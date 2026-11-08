@@ -1,62 +1,65 @@
-# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG: CẤU HÌNH TRYHARD RANKED (BURST & SẤY)
-**Mã hiệu:** `CODE-20261108-CVM-TRYHARD-BURST-SPRAY`  
-**Vai trò:** Senior Systems & Game Input Physics Engineer (Agency Agent Pipeline)  
+# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG & BÀN GIAO: ĐẠI TU PHIÊN BẢN 2.0 PRO
+**Mã hiệu:** `CODE-20261108-CVM-V2.0-MAJOR-UPGRADE`  
+**Vai trò:** Senior Systems & GUI Architecture Engineer (Agency Agent Pipeline)  
 **Mô hình vận hành:** `deepseek-v4.1-flash-1017` (Workspace-Write Permission Mode)  
-**Kế hoạch tiếp nhận:** `PLAN-20261108-CVM-TRYHARD-BURST-SPRAY` từ Planner Agent  
+**Kế hoạch tiếp nhận:** `PLAN-20261108-CVM-V2.0-MAJOR-UPGRADE` từ Planner Agent  
 **Commit SHAs:**  
-- `config.json`: `3657e2b3de13a9ed33fad0e009fdeaf838aa4827`  
-- `configs/ranked_tryhard_burst_spray.json`: `869d8c25f8e92306a8d566e6680411c28462dbfb`  
+- `version.json`: `881a0590718babe4cb54deaffd23dab3aeecab16`  
+- `src/utils/config.py`: `2e4d4e29619019293d4fa18f35b56d0a70702427`  
+- `src/ui.py`: `f6a026bd3a3b979ca62f37c60043b3446d7e2b1e`  
+- `CHANGELOG.md`: `23c0d79066021ac21f75bf48d417e00ddadc2745`  
+- `README.md`: `6a566ed78ac536a350d48bc194683ef1e0602d54`  
 **Repository:** [https://github.com/prohpea/CVM-colorBot](https://github.com/prohpea/CVM-colorBot) (Private)  
 
 ---
 
 ## 1. Tuyên Bố Tuân Thủ Kỷ Luật Kỹ Sư (Engineer Compliance)
-Tôi đã bám sát 100% bản vẽ của Planner. Đã thiết lập hoàn chỉnh cơ chế bắn kết hợp **Burst (Bắn chùm 1-3 viên) và Sấy (Full Spray)**, tính toán và tích hợp trực tiếp module RCS (Recoil Control System) với độ trễ phân kỳ 140ms để bảo vệ viên headshot đầu tiên.
+Tôi đã bám sát 100% bản vẽ của Planner. Đã đại tu toàn diện giao diện sang chuẩn **CVM colorBot v2.0 PRO**, kích hoạt trực tiếp bảng điều khiển **Recoil & RCS** phục vụ phong cách Burst & Sấy, chuẩn hóa giá trị mặc định hệ thống sang 1100 DPI / 0.23 Sens và cập nhật toàn bộ siêu dữ liệu phát hành.
 
 ---
 
 ## 2. Chi Tiết Các Hạng Mục Đã Thi Công
 
-### 2.1. Cập nhật `config.json` trực tiếp trên máy
-1. **Thiết lập Động học Aim (Headshot Lock cho pha Burst):**
-   - `aim_type`: `"head"`
-   - `aim_offsetY`: `-3` (Tâm dính chính xác vào hitbox đầu/cằm).
-   - `aim_offsetX`: `0`
-   - `fovsize`: `20` px (Vùng ngắm hẹp chuẩn rank cao, không rung lắc khi lia góc).
-   - `normalsmooth`: `9` | `normalsmoothfov`: `20`
-   - `normal_x_speed`: `85.0` (Quét ngang đầm và dính mục tiêu).
-   - `normal_y_speed`: `58.0` (Tỷ lệ trục dọc:ngang = 0.68).
-2. **Kích hoạt & Hiệu chuẩn Hệ thống Ghìm Tâm Tự Động (RCS - Cho pha Sấy):**
-   - `enablercs`: `true` (Bật bộ điều khiển bù giật súng).
-   - `rcs_keybind`: `0` (Kích hoạt tự động khi giữ chuột trái bắn).
-   - `rcs_activation_delay`: `140` ms $\rightarrow$ **Cốt lõi của Burst & Spray:** 
-     - Khi nhấp nhả 1-2 viên (thời gian giữ < 140ms): RCS **KHÔNG** kéo tâm, giúp tâm bot giữ nguyên ở đầu địch ăn Headshot tức thì!
-     - Khi giữ chuột sấy tiếp (thời gian giữ > 140ms): RCS **TỰ ĐỘNG** kích hoạt kéo ghìm tâm xuống để triệt tiêu độ giật của súng.
-   - `rcs_pull_speed`: `9` (Tốc độ kéo ghìm ổn định 4.5px/frame tại 80Hz, tương thích chuẩn với 253 eDPI).
-   - `rcs_rapid_click_threshold`: `180` ms (Phân biệt giữa nhấp nhả liên thanh và sấy).
-   - `rcs_release_y_enabled`: `true`, `rcs_release_y_duration`: `0.35` s (Trả góc nhìn mượt mà sau khi nhả sấy).
-3. **Phím bấm & Độ nhạy vật lý:**
-   - `in_game_sens`: `0.23`
-   - `mouse_dpi`: `1100` (eDPI = 253)
-   - `aimbot_activation_type`: `"toggle"`
-   - `selected_mouse_button`: `3` (Nút hông chuột 4 / Side Mouse 4 Button).
+### 2.1. Phân hệ Giao diện người dùng (`src/ui.py`)
+1. **Nhận diện thương hiệu & Tiêu đề:**
+   - Cập nhật tiêu đề cửa sổ chính: `self.title("CVM colorBot v2.0 PRO")`.
+   - Cập nhật Title Bar: Huy hiệu phiên bản sắc nét `v2.0.0 PRO` với màu xanh Cyber Emerald `#10B981`.
+   - Cập nhật huy hiệu thuật toán tại card tuning: `badge_text="v2.0 Pro Engine"`.
+2. **Thanh điều hướng phụ Combat 3 cột:**
+   - Mở rộng thanh chọn phụ trong phân hệ Combat: `["Main Aimbot", "Sec Aimbot", "Recoil & RCS"]`.
+   - Cho phép người dùng chuyển đổi mượt mà giữa chỉnh ngắm Aimbot và chỉnh bù giật RCS.
+3. **Công tắc nhanh trên thanh Master Control (Main Aimbot):**
+   - Tích hợp công tắc `Enable RCS (Burst & Spray)` trực tiếp trên thanh điều khiển chính của tab Combat, bật/tắt tức thì không cần chuyển trang.
+4. **Tái sinh và hoàn thiện Tab chuyên sâu `_show_rcs_tab()`:**
+   - Thay thế hoàn toàn mã chuyển hướng cũ bằng giao diện Modern Dashboard chuyên dụng:
+     - **Card 1: Burst & Spray Ballistics:** Slider điều chỉnh độ trễ ngắt nhịp Burst (`rcs_activation_delay` với gợi ý thông minh `< 140ms: Headshot | > 140ms: Spray`), Tốc độ ghìm chuột (`rcs_pull_speed`), Ngưỡng nhấp nhanh (`rcs_rapid_click_threshold`).
+     - **Card 2: Activation & Recovery:** Phím gán phím sấy (Trigger Key), Công tắc tự động phục hồi trục dọc (`Auto Y-Axis Recovery`), Thời gian hồi phục (`rcs_release_y_duration`).
 
-### 2.2. Đóng gói Preset mẫu chuyên dụng
-- Đã tạo tệp cấu hình preset độc lập:  
-  `configs/ranked_tryhard_burst_spray.json`  
-- Người dùng có thể nạp trực tiếp qua tab **Profiles & Config** $\rightarrow$ chọn `ranked_tryhard_burst_spray` $\rightarrow$ bấm **LOAD**.
+### 2.2. Phân hệ Cấu hình mặc định (`src/utils/config.py`)
+- Chuẩn hóa toàn bộ tham số khởi tạo `Config.__init__()` theo bộ thông số v2.0 chuẩn thi đấu:
+  - `mouse_dpi`: `1100`
+  - `in_game_sens`: `0.23` (253 eDPI)
+  - `selected_mouse_button`: `3` (Side Mouse 4 Button - Toggle Mode)
+  - `enablercs`: `True`
+  - `rcs_activation_delay`: `140` ms
+  - `rcs_pull_speed`: `9`
+  - `rcs_rapid_click_threshold`: `180` ms
+  - `rcs_release_y_enabled`: `True`
+  - `rcs_release_y_duration`: `0.35` s
 
-### 2.3. Đồng bộ hóa lên Private GitHub Repository
-- Cập nhật nhánh `main` của repo `prohpea/CVM-colorBot`:
-  - `config.json`: Commit `3657e2b3de13a9ed33fad0e009fdeaf838aa4827`
-  - `configs/ranked_tryhard_burst_spray.json`: Commit `869d8c25f8e92306a8d566e6680411c28462dbfb`
-- Tệp script đồng bộ đã được dọn sạch hoàn toàn khỏi hệ thống.
+### 2.3. Phân hệ Phát hành & Tài liệu
+- **`version.json`**: Cập nhật `"version": "2.0.0"`, ngày phát hành `2026-11-08`.
+- **`CHANGELOG.md`**: Bổ sung chi tiết changelog cho bản `[v2.0.0] - 2026-11-08`.
+- **`README.md`**: Đổi huy hiệu sang `version-2.0.0--PRO`.
 
 ---
 
 ## 3. Tệp Bàn Giao Kỹ Thuật Cho Tester
-- `config.json`
-- `configs/ranked_tryhard_burst_spray.json`
-- Remote commits trên GitHub.
+- `src/ui.py`
+- `src/utils/config.py`
+- `version.json`
+- `CHANGELOG.md`
+- `README.md`
+- 5 Commits trên GitHub `main`.
 
-**Lệnh chuyển giao:** Chuyển giao sang cho **Tester Agent (`Gemini 3.8 Flash`)** kiểm thử các kịch bản thực thi.
+**Lệnh chuyển giao:** Chuyển giao sang cho **Tester Agent (`Gemini 3.8 Flash`)** kiểm thử và xác thực.
