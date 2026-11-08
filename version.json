@@ -1,5 +1,5 @@
 {
-    "version": "1.2.1",
-    "release_date": "2026-11-03",
-    "changelog": "v1.2.1: Integrated OBS audio feedback (native Windows Beep via UDP 4455), real-time visual toggle HUD banner, recoil immunity, anti-tremor filtering, and humanized burst/spray tuning."
+    "version": "2.0.0",
+    "release_date": "2026-11-08",
+    "changelog": "v2.0.0 Major Upgrade: Complete modern dashboard UI redesign, integrated Recoil Control System (RCS) with 140ms time-windowing for burst and spray, pro-tuned 253 eDPI physics engine, seamless Profile Presets manager, and quiet network feedback."
 }
