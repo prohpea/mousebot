@@ -1,0 +1,106 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+wheels/
+.bangiao/
+
+# Test / cache
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+# config.json and sample presets in configs/ are tracked
+configs/*.tmp
+configs/*.bak
+docs
+docs/
+*.log
+*.tmp
+*.bak
+AGENTS.md
+
+# Compiled files
+*.pyd
+*.pyx
+*.c
+*.cpp
+
+# Archive files
+*.rar
+*.zip
+*.7z
+
+# Temporary files
+*.tmp
+*.temp
+.tmp*
+viewer.kv
+tess.py
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# GitHub Actions - Keep workflows, ignore setup files
+.github/setup-sync.ps1
+.github/CONFIG_STEPS.md
+.github/TEST_SYNC.md
+.github/GENERATE_SSH_KEY.md
+.github/SYNC_SETUP.md
+.github/TROUBLESHOOTING.md
+.github/QUICK_FIX.md
+
+# Mouse API folders
+# kmB - ignore entire folder
+src/utils/mouse/API/kmB/
+
+# kmboxA - ignore all except .pyd files
+src/utils/mouse/API/kmboxA/
+!src/utils/mouse/API/kmboxA/**/*.pyd
+
+# arduino - ignore entire folder
+src/utils/mouse/API/arduino/
+
+# DHZ - ignore entire folder
+src/utils/mouse/API/DHZ/
+
+# makxdv2 - ignore entire folder
+src/utils/mouse/API/makxdv2/
+
+# Net - ignore all except .pyd and .dll files
+src/utils/mouse/API/Net/
+!src/utils/mouse/API/Net/**/*.pyd
+!src/utils/mouse/API/Net/**/*.dll
