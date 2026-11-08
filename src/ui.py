@@ -318,7 +318,7 @@ class ViewerApp(ctk.CTk):
         super().__init__()
         
         # --- Window setup ---
-        self.title("CVM colorBot")
+        self.title("CVM colorBot v2.0 PRO")
         self.geometry("980x660")
         self._legacy_ui_mode = bool(getattr(config, "legacy_ui_mode", False))
         self._ui_theme = str(getattr(config, "ui_theme", "nord")).strip().lower()
@@ -523,9 +523,9 @@ class ViewerApp(ctk.CTk):
         current_version = self.update_checker.get_current_version()
         self.version_lbl = ctk.CTkLabel(
             title_container,
-            text=f"v{current_version}",
-            font=("Consolas", 9),
-            text_color=COLOR_TEXT_DIM
+            text=f"v{current_version} PRO",
+            font=("Consolas", 9, "bold"),
+            text_color="#10B981"
         )
         self.version_lbl.pack(side="left", padx=(10, 0))
         
@@ -4846,11 +4846,12 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Main Aimbot"
         self._clear_content()
         self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot"],
+            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
             "Main Aimbot",
             {
                 "Main Aimbot": self._show_aimbot_tab,
                 "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Recoil & RCS": self._show_rcs_tab,
             }
         )
         self._add_title("Main Aimbot")
@@ -4880,8 +4881,19 @@ class ViewerApp(ctk.CTk):
             command=self._on_anti_smoke_changed,
             font=("Segoe UI", 11),
             progress_color="#10B981"
-        ).pack(side="left")
+        ).pack(side="left", padx=(0, 20))
         self._checkbox_vars["anti_smoke_enabled"] = self.var_anti_smoke
+
+        self.var_enablercs = tk.BooleanVar(value=getattr(config, "enablercs", True))
+        ctk.CTkSwitch(
+            master_inner,
+            text="Enable RCS (Burst & Spray)",
+            variable=self.var_enablercs,
+            command=self._on_enablercs_changed,
+            font=("Segoe UI", 11),
+            progress_color="#06B6D4"
+        ).pack(side="left")
+        self._checkbox_vars["enablercs"] = self.var_enablercs
 
         # 2-COLUMN GRID CONTAINER
         grid_container = ctk.CTkFrame(self.content_frame, fg_color="transparent")
@@ -4966,7 +4978,7 @@ class ViewerApp(ctk.CTk):
         self._add_ads_fov_controls_in_frame(self.card_targeting.content, is_sec=False)
 
         # ── CARD 2: ALGORITHM TUNING (Col 1, Row 0) ──
-        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text="v1.2 Algo", accent_color="#06B6D4")
+        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text="v2.0 Pro Engine", accent_color="#06B6D4")
         self.card_windmouse.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         if current_mode in ("Normal", "WindMouse"):
@@ -5135,11 +5147,12 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Sec Aimbot"
         self._clear_content()
         self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot"],
+            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
             "Sec Aimbot",
             {
                 "Main Aimbot": self._show_aimbot_tab,
                 "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Recoil & RCS": self._show_rcs_tab,
             }
         )
         self._add_title("Secondary Aimbot")
@@ -5689,8 +5702,116 @@ class ViewerApp(ctk.CTk):
         self._show_aimbot_tab()
 
     def _show_rcs_tab(self):
-        """RCS is removed per user request. Redirects to Combat."""
-        self._show_aimbot_tab()
+        """Dedicated Recoil Control System (RCS) tab for Burst & Spray tuning."""
+        self._active_tab_name = "Combat"
+        self._clear_content()
+        self._add_sub_nav_bar(
+            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
+            "Recoil & RCS",
+            {
+                "Main Aimbot": self._show_aimbot_tab,
+                "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Recoil & RCS": self._show_rcs_tab,
+            }
+        )
+        self._add_title("Recoil Control System (RCS)")
+
+        # Master Control Switches Row
+        master_row = ctk.CTkFrame(self.content_frame, fg_color="#141822", corner_radius=8, border_width=1, border_color="#232B3B")
+        master_row.pack(fill="x", pady=(0, 10))
+        master_inner = ctk.CTkFrame(master_row, fg_color="transparent")
+        master_inner.pack(fill="x", padx=12, pady=6)
+
+        self.var_enablercs = tk.BooleanVar(value=getattr(config, "enablercs", True))
+        ctk.CTkSwitch(
+            master_inner,
+            text="Enable Auto Recoil Compensation (RCS)",
+            variable=self.var_enablercs,
+            command=self._on_enablercs_changed,
+            font=("Segoe UI", 11, "bold"),
+            progress_color="#10B981"
+        ).pack(side="left")
+        self._checkbox_vars["enablercs"] = self.var_enablercs
+
+        # 2-Column Grid Container
+        grid_container = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        grid_container.pack(fill="both", expand=True)
+        grid_container.grid_columnconfigure(0, weight=1)
+        grid_container.grid_columnconfigure(1, weight=1)
+
+        # Card 1: Burst & Spray Ballistics
+        self.card_recoil = ModernCard(grid_container, "Burst & Spray Ballistics", icon="🎯", badge_text="Ballistics", accent_color="#06B6D4")
+        self.card_recoil.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
+
+        # RCS Activation Delay (Burst vs Spray threshold)
+        self._add_slider_in_frame(
+            self.card_recoil.content,
+            "Burst Immunity Delay (ms)",
+            "rcs_activation_delay",
+            0, 500,
+            float(getattr(config, "rcs_activation_delay", 140)),
+            self._on_rcs_activation_delay_changed
+        )
+        info_lbl = ctk.CTkLabel(
+            self.card_recoil.content,
+            text="💡 < 140ms: Tap/Burst locks headshot | > 140ms: Auto spray pull-down",
+            font=("Segoe UI", 9, "italic"),
+            text_color="#94A3B8"
+        )
+        info_lbl.pack(anchor="w", padx=4, pady=(0, 8))
+
+        # RCS Pull Speed
+        self._add_slider_in_frame(
+            self.card_recoil.content,
+            "Recoil Pull Speed",
+            "rcs_pull_speed",
+            1, 20,
+            float(getattr(config, "rcs_pull_speed", 9)),
+            self._on_rcs_pull_speed_changed
+        )
+
+        # Rapid Click Threshold
+        self._add_slider_in_frame(
+            self.card_recoil.content,
+            "Rapid Click Threshold (ms)",
+            "rcs_rapid_click_threshold",
+            50, 500,
+            float(getattr(config, "rcs_rapid_click_threshold", 180)),
+            self._on_rcs_rapid_click_threshold_changed
+        )
+
+        # Card 2: Activation & Recovery
+        self.card_rcs_recovery = ModernCard(grid_container, "Activation & Recovery", icon="⚙️", badge_text="Recovery", accent_color="#10B981")
+        self.card_rcs_recovery.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
+
+        # Keybind
+        current_rcs_btn = self._ads_binding_to_display(getattr(config, "rcs_keybind", 0))
+        self.rcs_key_bind_button = self._add_bind_capture_row_in_frame(
+            self.card_rcs_recovery.content,
+            "Trigger Key",
+            current_rcs_btn,
+            self._start_rcs_key_capture
+        )
+
+        # Auto Y-Release Switch
+        self.var_rcs_release_y_enabled = tk.BooleanVar(value=getattr(config, "rcs_release_y_enabled", True))
+        self._add_switch_in_frame(
+            self.card_rcs_recovery.content,
+            "Auto Y-Axis Recovery",
+            init_val=self.var_rcs_release_y_enabled.get(),
+            command=lambda v: [self.var_rcs_release_y_enabled.set(v), self._on_rcs_release_y_enabled_changed()]
+        )
+        self._checkbox_vars["rcs_release_y_enabled"] = self.var_rcs_release_y_enabled
+
+        # Y-Release Duration
+        self._add_slider_in_frame(
+            self.card_rcs_recovery.content,
+            "Recovery Duration (s)",
+            "rcs_release_y_duration",
+            0.1, 2.0,
+            float(getattr(config, "rcs_release_y_duration", 0.35)),
+            self._on_rcs_release_y_duration_changed
+        )
 
     def _show_config_tab(self):
         self._active_tab_name = "Profiles"
