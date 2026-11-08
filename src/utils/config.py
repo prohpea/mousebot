@@ -53,11 +53,11 @@ class Config:
 
         
         # --- Mouse / MAKCU ---
-        self.selected_mouse_button = 1
+        self.selected_mouse_button = 3
         self.selected_tb_btn = 1
         self.selected_2_tb = 2
-        self.in_game_sens = 0.235
-        self.mouse_dpi = 800
+        self.in_game_sens = 0.23
+        self.mouse_dpi = 1100
         self.mouse_api = "Serial"  # Serial, Arduino, SendInput, Net, KmboxA, MakV2, MakcuController, MakxdMakAPI, MakAPI, DHZ, Ferrum, Medius
         self.keyboard_api_enabled = False
         self.keyboard_api = "Follow Mouse API"  # Follow Mouse API, SendInput, Serial, Net...
@@ -225,15 +225,15 @@ class Config:
         self.switch_confirm_frames = 3
         self.ema_alpha = 0.35
         
-        # RCS (Recoil Control System) 瑷疆
-        self.enablercs = False  # 鏄惁鍟熺敤 RCS
-        self.rcs_keybind = 0  # RCS 綁定, default = Left Mouse Button
-        self.rcs_pull_speed = 10  # 涓嬫媺閫熷害锛?-20锛?
-        self.rcs_activation_delay = 100  # 鍟熷嫊寤堕伈锛?0-500ms锛?
-        self.rcs_rapid_click_threshold = 200  # 蹇€熼粸鎿婇柧鍊硷紙100-1000ms锛?
-        # RCS Y 杌歌В閹栬ō缃?
-        self.rcs_release_y_enabled = False  # 鏄惁鍟熺敤宸﹂嵉鎸変笅鏅傝В閹?Y 杌哥Щ鍕?
-        self.rcs_release_y_duration = 1.0  # Y 杌歌В閹栨寔绾屾檪闁擄紙0.1~5绉掞級
+        # RCS (Recoil Control System)
+        self.enablercs = True  # Enable RCS (Burst & Spray)
+        self.rcs_keybind = 0  # RCS binding, default = Left Mouse Button
+        self.rcs_pull_speed = 9  # Pull speed (1-20, default 9 for 253 eDPI)
+        self.rcs_activation_delay = 140  # Activation delay (140ms burst immunity)
+        self.rcs_rapid_click_threshold = 180  # Rapid click threshold (180ms)
+        # RCS Y Release
+        self.rcs_release_y_enabled = True  # Auto-release Y
+        self.rcs_release_y_duration = 0.35  # Release duration (0.35s)
         # --- Normal Aim ---
         self.normal_x_speed = 3
         self.normal_y_speed = 3
