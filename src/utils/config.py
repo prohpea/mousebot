@@ -8,13 +8,13 @@ class Config:
 
         self.enableaim = True
         self.enabletb = False
-        self.offsetX = -2
-        self.offsetY = 3
+        self.offsetX = 0
+        self.offsetY = 0
         
         # --- Aimbot Offsets ---
-        self.aim_offsetX = 0  # Aimbot 灏堢敤 X 鍋忕Щ
-        self.aim_offsetY = 0  # Aimbot 灏堢敤 Y 鍋忕Щ
-        self.aim_type = "head"  # Aimbot 鐬勬簴椤炲瀷: head, body, nearest
+        self.aim_offsetX = 0  # Aimbot X offset
+        self.aim_offsetY = -2  # Aimbot Y offset (fine-tune forehead/eyes)
+        self.aim_type = "head"  # Aimbot targeting: head, body, nearest
 
         self.color = "purple"
         
@@ -37,8 +37,8 @@ class Config:
         self.detection_max_aspect = 2.8
         self.detection_require_vertical_line = False
         self.min_detection_bbox_area = 150
-        self.head_estimate_ratio = 0.22
-        self.head_refine_min_pixels = 20
+        self.head_estimate_ratio = 0.09
+        self.head_refine_min_pixels = 12
         self.aim_latest_frame_priority = True
         self.enable_target_temporal_smoothing = False
         self.move_queue_merge_batch = 4
