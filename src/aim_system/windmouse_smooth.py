@@ -41,6 +41,12 @@ class WindMouse:
             
             # Break if we're close enough to target
             if distance_squared < target_area * target_area:
+                # Ensure micro-step is preserved if breaking on close approach
+                if not path and (abs(dx_to_target) >= 0.15 or abs(dy_to_target) >= 0.15):
+                    s_x = 1 if dx_to_target >= 0.15 else (-1 if dx_to_target <= -0.15 else 0)
+                    s_y = 1 if dy_to_target >= 0.15 else (-1 if dy_to_target <= -0.15 else 0)
+                    if s_x != 0 or s_y != 0:
+                        path.append((s_x, s_y, min_wait))
                 break
             
             # Calculate distance for threshold check
@@ -225,9 +231,19 @@ class SmoothAiming:
         """
         current_time = time.time()
         
-        # Skip if movement is too small (deadzone)
+        # Skip only when already dead-center on target (< 0.20 count)
         distance = math.hypot(dx, dy)
+        if distance < 0.20:
+            return []
+
+        # Micro-correction guarantee: if very close (0.20 <= distance < 1.0),
+        # emit a deterministic 1px step so tracking NEVER stalls near the head!
         if distance < 1.0:
+            m_dx = 1 if dx >= 0.15 else (-1 if dx <= -0.15 else 0)
+            m_dy = 1 if dy >= 0.15 else (-1 if dy <= -0.15 else 0)
+            if m_dx != 0 or m_dy != 0:
+                delay = getattr(config, "smooth_min_delay", 0.002)
+                return [(m_dx, m_dy, delay)]
             return []
 
         # Update velocity model with anti-tremor filtering
@@ -279,11 +295,11 @@ class SmoothAiming:
             max_step = max(max_step, min(config.smooth_max_step, target_speed * 0.04))
         max_step = max(config.smooth_min_step, min(max_step, config.smooth_max_step))
         
-        # Target area
+        # Target area: tightened to 0.25 to prevent stall on close head approach
         if target_speed > 80.0:
-            target_area = max(1.0, distance * 0.02)
+            target_area = max(0.20, distance * 0.01)
         else:
-            target_area = max(2.0, distance * config.smooth_target_area_ratio)
+            target_area = max(0.25, distance * config.smooth_target_area_ratio)
         
         # Get distance threshold from config
         distance_threshold = getattr(config, 'smooth_distance_threshold', 50.0)
