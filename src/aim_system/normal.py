@@ -62,7 +62,7 @@ def _enqueue_path(tracker, path, max_steps=24, clear_existing=False):
             used_steps += 1
         qdx = int(round(total_dx))
         qdy = int(round(total_dy))
-        if qdx == 0 and qdy == 0 and (abs(total_dx) + abs(total_dy)) >= 0.35:
+        if qdx == 0 and qdy == 0 and (abs(total_dx) + abs(total_dy)) >= 0.20:
             if abs(total_dx) >= abs(total_dy):
                 qdx = 1 if total_dx > 0 else -1
             else:
@@ -671,18 +671,18 @@ class _WindMouseConfig:
             self.smooth_max_delay = float(getattr(config, "wm_max_delay", 0.003))
             self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold", 50.0))
         
-        # Profile "Burst & Spray" — ultra-smooth humanized tracking for burst/spray control
-        self.smooth_reaction_min = 0.08
-        self.smooth_reaction_max = 0.20
-        self.smooth_close_range = 30.0
-        self.smooth_close_speed = 0.15
+        # Profile "Burst & Spray" — ultra-responsive humanized tracking for head lock
+        self.smooth_reaction_min = 0.035
+        self.smooth_reaction_max = 0.070
+        self.smooth_close_range = 35.0
+        self.smooth_close_speed = 0.55
         self.smooth_far_range = 200.0
-        self.smooth_far_speed = 0.35
-        self.smooth_fatigue_effect = 0.5
-        self.smooth_max_step_ratio = 0.08
-        self.smooth_target_area_ratio = 0.05
-        self.smooth_acceleration = 0.50
-        self.smooth_deceleration = 0.40
+        self.smooth_far_speed = 0.85
+        self.smooth_fatigue_effect = 0.3
+        self.smooth_max_step_ratio = 0.22
+        self.smooth_target_area_ratio = 0.02
+        self.smooth_acceleration = 0.65
+        self.smooth_deceleration = 0.55
         self.smooth_micro_corrections = 1
 
 
