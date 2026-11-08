@@ -894,24 +894,33 @@ class AimTracker:
 
         center_x = (effective_x1 + effective_x2) / 2.0
         headx_base = center_x + effective_width * (offset_x / 100.0)
-        # Keep Y estimate deterministic (no mask-driven jitter).
-        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.22))
+        # Geometric head ratio (0.09 = ~9% of height, dead center on forehead/eyes)
+        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.09))
         heady_base = float(y1) + float(height) * base_head_ratio + effective_height * (offset_y / 100.0)
 
-        # Optional one-pass refinement from the already computed global mask.
-        # Use only the upper body band and median X to reduce left/right arm jitter.
+        # One-pass refinement from the already computed global mask.
+        # Refines both X and Y to lock directly onto the actual head contour!
         if mask is not None:
             mx1 = max(0, min(int(x1), mask.shape[1] - 1))
             my1 = max(0, min(int(y1), mask.shape[0] - 1))
             mx2 = max(mx1 + 1, min(int(x2), mask.shape[1]))
             my2 = max(my1 + 1, min(int(y2), mask.shape[0]))
-            upper_h = max(6, int((my2 - my1) * 0.42))
+            upper_h = max(6, int((my2 - my1) * 0.35))
             upper_y2 = min(my2, my1 + upper_h)
             upper_mask = mask[my1:upper_y2, mx1:mx2]
             if upper_mask.size > 0:
                 ys, xs = np.where(upper_mask > 0)
-                if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
+                min_pixels = int(getattr(config, "head_refine_min_pixels", 12))
+                if len(xs) >= min_pixels:
+                    # Head X: median of upper mask pixels (centers horizontally on head)
                     headx_base = float(mx1 + int(np.median(xs)))
+                    # Head Y: refine directly to the upper head cluster center!
+                    top_head_cutoff = np.min(ys) + max(4, int(upper_h * 0.40))
+                    top_head_ys = ys[ys <= top_head_cutoff]
+                    if len(top_head_ys) > 0:
+                        heady_base = float(my1 + np.median(top_head_ys))
+                    else:
+                        heady_base = float(my1 + np.min(ys) + max(2.0, upper_h * 0.15))
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
