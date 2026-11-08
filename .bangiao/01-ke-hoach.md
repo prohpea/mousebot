@@ -1,69 +1,71 @@
-# 📋 [PLANNER AGENT] BẢN THIẾT KẾ KIẾN TRÚC: CẤU HÌNH TRYHARD RANKED (BURST & SẤY)
-**Mã hiệu:** `PLAN-20261108-CVM-TRYHARD-BURST-SPRAY`  
-**Vai trò:** Lead Solutions Architect & FPS Combat Specialist (Agency Agent Pipeline)  
+# 📋 [PLANNER AGENT] BẢN THIẾT KẾ & KẾ HOẠCH NÂNG CẤP ĐẠI TU CVM-COLORBOT BẢN 2.0 PRO
+**Mã hiệu:** `PLAN-20261108-CVM-V2.0-MAJOR-UPGRADE`  
+**Vai trò:** Lead Solutions Architect & Systems Engineering Director (Agency Agent Pipeline)  
 **Mô hình vận hành:** `gpt-6-sol` (Headless Read-Only Mode)  
-**Dự án:** CVM-colorBot v1.2.1 - Ranked Combat Dynamics & Recoil Compensation  
+**Dự án:** CVM-colorBot v2.0.0 PRO - Enterprise Architecture Overhaul  
 **Khách hàng/Ủy thác:** User  
-**Yêu cầu người dùng:** Thiết lập cấu hình **Tryhard Ranked** chuyên biệt cho phong cách **Bắn Burst (1-3 viên) và Sấy (Full Spray)**, kết hợp cùng độ nhạy **Sens 0.23, DPI 1100 (253 eDPI)**.  
+**Yêu cầu người dùng:** Tối ưu lại toàn bộ cả giao diện và chức năng, sau đó cập nhật toàn bộ dự án lên phiên bản 2.0.  
 
 ---
 
-## 1. Phân Tích Động Lực Học Thi Đấu Rank Cao (Competitive FPS Ballistics)
+## 1. Phân Tích Hiện Trạng & Tầm Nhìn Bản 2.0 (Architectural Vision)
 
-### 1.1. Bản chất cơ học của "Burst & Sấy"
-Trong các trận đấu rank cao (Valorant Immortal/Radiant, CS2 Premier/Faceit):
-- **Giai đoạn 1: Bắn Burst (Viên 1 - 3, thời gian < 140ms):**
-  - Độ chính xác phát bắn đầu tiên (first-bullet accuracy) gần như tuyệt đối.
-  - Yêu cầu trọng tâm: Tâm súng phải dính chặt vào **Hitbox Đầu (`aim_type: "head"`, `aim_offsetY: -3`)**.
-  - **Điều cấm kỵ (Fatal Flaw):** Tuyệt đối KHÔNG được kích hoạt kéo tâm chuột xuống (RCS pull-down) ở giai đoạn này. Nếu vừa bấm chuột đã kéo ghìm xuống, viên đạn thứ 1 và 2 sẽ cắm vào ngực/bụng đối thủ, đánh mất lợi thế 1-tap One Shot Kill.
-- **Giai đoạn 2: Bắn Sấy (Spray từ viên thứ 4 trở đi, thời gian > 140ms):**
-  - Khẩu súng giật nảy mạnh lên phía trên theo quán tính nòng súng.
-  - Người chơi giữ chuột trái để sấy kết liễu hoặc đục xuyên góc/smoke.
-  - Yêu cầu trọng tâm: Hệ thống Recoil Control System (RCS) phải **tự động kích hoạt ngay sau viên thứ 3** (delay 140ms), kéo ghìm trục Y với tốc độ bù giật đồng bộ nhịp sấy, đồng thời giải phóng trục Y của Aimbot (`dy = 0`) để không tranh chấp lực kéo, nhưng vẫn giữ trục X (`dx`) để bám theo địch khi đối phương di chuyển (counter-strafe).
+### 1.1. Hiện trạng phiên bản cũ (v1.2.1)
+- **Giao diện người dùng (UI):**
+  - Tiêu đề và nhãn hiển thị vẫn mang mã hiệu cũ `v1.2.1`.
+  - Tab RCS bị ẩn/chuyển hướng (`_show_rcs_tab` chỉ đơn thuần redirect về Combat) khiến người dùng không có công cụ trực quan để tinh chỉnh độ trễ Burst & Sấy (RCS delay) hoặc tốc độ kéo chuột (pull speed) ngay trên giao diện.
+  - Hàng công tắc Master (Master Switches) ở Main Aimbot chỉ có Aimbot và Anti-Smoke, thiếu công tắc nhanh cho tính năng sấy bù giật RCS.
+- **Cấu hình & Dữ liệu cốt lõi:**
+  - File `src/utils/config.py` vẫn giữ các giá trị mặc định khởi thủy cũ (DPI 800, Sens 0.235, RCS tắt, delay 100ms).
+- **Hệ thống phiên bản & Tài liệu:**
+  - `version.json`, `CHANGELOG.md`, `README.md` đang dừng lại ở bản 1.2.1 / 2.10.2 chưa đồng bộ.
 
-### 1.2. Tính toán Tham số Động học cho eDPI 253 (DPI 1100 - Sens 0.23)
-1. **Thiết kế Cửa sổ Thời gian RCS (RCS Time Windowing):**
-   - `enablercs`: `true`
-   - `rcs_keybind`: `0` (Chuột trái / Left Mouse Button).
-   - `rcs_activation_delay`: **`140` ms** (Ngưỡng vàng: nhấp nhả 1-2 viên burst trong < 140ms thì RCS không can thiệp $\rightarrow$ Headshot. Nhấn giữ > 140ms thì RCS tự động ghìm spray).
-   - `rcs_pull_speed`: **`9`** (Với 253 eDPI, mức kéo 9 tương đương $9 \times 0.5 = 4.5\text{ px}$ mỗi chu kỳ 80Hz, bù hoàn hảo độ nảy nòng súng sấy).
-   - `rcs_rapid_click_threshold`: **`180` ms** (Nhận diện chính xác giữa tap nhấp nhả liên thanh và giữ sấy).
-   - `rcs_release_y_enabled`: **`true`**, `rcs_release_y_duration`: **`0.35` s** (Trả tâm nhẹ nhàng sau khi nhả sấy, không cắm tâm xuống sàn).
-2. **Hình học Vùng ngắm (Tryhard FOV Geometry):**
-   - `fovsize`: **`20` px** (FOV hẹp chuyên tryhard).
-   - *Lý do:* Không bị văng tâm hoặc kéo lệch khi gặp 2 địch đứng cạnh nhau; chỉ hút khi tâm đã kê gần đầu địch (crosshair placement).
-3. **Cân chỉnh Tốc độ & Lực kéo WindMouse (Physics Curve):**
-   - `normal_x_speed`: **`85.0`** (Tốc độ quét ngang nhanh hơn để bám kịp địch counter-strafe).
-   - `normal_y_speed`: **`58.0`** (Tỷ lệ Y:X ~ 0.68, ổn định đường chân trời khi sấy).
-   - `normalsmooth`: **`9`** (Mịn màng, không giật rung mắt đọc 1100 DPI).
-   - `wm_gravity`: **`5.2`** (Lực hút dính mục tiêu cao).
-   - `wm_wind`: **`1.6`** (Mô phỏng đường cong tự nhiên của cổ tay tuyển thủ).
-   - `anti_tremor_deadband`: **`1.5` px** (Bỏ qua rung lắc vi mô).
-   - `smooth_reaction_min`: **`0.035` s** | `smooth_reaction_max`: **`0.070` s** (Thời gian phản ứng cấp độ Pro).
+### 1.2. Mục tiêu chiến lược Bản 2.0.0 PRO (Core Directives)
+1. **Đại tu giao diện người dùng (Modern High-Precision Dashboard v2.0):**
+   - Nâng cấp Header: Cửa sổ frameless viền sắc nét, tiêu đề `CVM colorBot v2.0 PRO`, huy hiệu phiên bản cao cấp `v2.0.0 PRO` với tone màu Cyber Emerald/Cyan.
+   - Bổ sung công tắc nhanh **"Enable RCS (Burst & Spray)"** ngay trên thanh điều khiển Master của tab Combat.
+   - Khôi phục và tái thiết lập toàn diện **Tab RCS & Recoil Control** trong phân hệ Combat:
+     - Card điều khiển chuyên sâu: Tốc độ ghìm (`rcs_pull_speed`), Độ trễ phân kỳ Burst/Sấy (`rcs_activation_delay` với chú thích trực quan), Ngưỡng nhấp nhanh (`rcs_rapid_click_threshold`), Tự động trả tâm Y (`rcs_release_y`).
+   - Cập nhật huy hiệu thuật toán: Chuyển toàn bộ badge `v1.2 Algo` sang `v2.0 Pro Engine`.
+2. **Tối ưu hóa chức năng & Động lực học (Core Physics Optimization):**
+   - Tích hợp chuẩn hoá bộ giá trị mặc định của hệ thống trong `src/utils/config.py`:
+     - Mouse DPI: `1100` | In-game Sens: `0.23` (253 eDPI).
+     - Phím kích hoạt: `Side Mouse 4 Button` (Mã `3`) với chế độ `Toggle`.
+     - Phím sấy: `Left Mouse Button` (Mã `0`) tự động kích hoạt RCS sau `140ms`.
+   - Bảo toàn cấu trúc nạp preset: Đồng bộ hóa toàn diện giữa `config.json` và thư mục `configs/`.
+3. **Cập nhật hệ thống siêu dữ liệu & Phát hành (Release Engineering):**
+   - Nâng cấp `version.json` lên `"2.0.0"`.
+   - Cập nhật nhật ký phát hành `CHANGELOG.md` bản 2.0.0 hoành tráng.
+   - Cập nhật `README.md` với huy hiệu Version 2.0.0 PRO và tài liệu hướng dẫn mới nhất.
 
 ---
 
 ## 2. Bản Vẽ Phân Bổ File Cho Coder (Scope of Work)
 
-### 2.1. Tệp cấu hình chính: `config.json`
-- Kích hoạt và thiết lập toàn bộ thông số RCS cho Burst & Spray.
-- Đồng bộ `mouse_dpi: 1100` và `in_game_sens: 0.23`.
-- Gán phím: Aimbot Toggle bằng `selected_mouse_button: 3` (Side Mouse 4), RCS tự động theo chuột trái (`rcs_keybind: 0`).
+### 2.1. Phân hệ Giao diện: `src/ui.py`
+- Sửa tiêu đề cửa sổ: `self.title("CVM colorBot v2.0 PRO")`.
+- Cập nhật thanh header: Logo, nhãn phiên bản `v2.0.0 PRO`.
+- Sửa thanh điều hướng phụ của Combat: `["Main Aimbot", "Sec Aimbot", "Recoil & RCS"]`.
+- Bổ sung công tắc RCS nhanh trên `master_row` của `_show_aimbot_tab()`.
+- Xây dựng lại hoàn chỉnh hàm `_show_rcs_tab()` với giao diện ModernCard và các slider điều khiển thời gian thực.
 
-### 2.2. Tệp Preset chuyên dụng: `configs/ranked_tryhard_burst_spray.json`
-- Đóng gói toàn bộ cấu hình vào danh mục Preset của phần mềm để nạp tức thì trong tab "Profiles & Config".
+### 2.2. Phân hệ Cấu hình: `src/utils/config.py`
+- Cập nhật giá trị khởi tạo mặc định trong `Config.__init__()` khớp chuẩn v2.0.
 
-### 2.3. Đồng bộ hóa GitHub:
-- Commit và Push lên nhánh `main` của repository Private `prohpea/CVM-colorBot`.
+### 2.3. Phân hệ Phiên bản: `version.json`, `CHANGELOG.md`, `README.md`
+- Đẩy toàn bộ định danh dự án lên `2.0.0`.
+
+### 2.4. Đồng bộ GitHub:
+- Commit toàn bộ các thay đổi và push lên remote `prohpea/CVM-colorBot` nhánh `main`.
 
 ---
 
 ## 3. Tiêu Chuẩn Nghiệm Thu (Acceptance Criteria - AC)
-- [ ] **AC-1:** `enablercs == True`, `rcs_keybind == 0`, `rcs_pull_speed == 9`, `rcs_activation_delay == 140`.
-- [ ] **AC-2:** Vùng ngắm `fovsize == 20`, tốc độ `85.0 / 58.0`, smooth `9`.
-- [ ] **AC-3:** Điểm ngắm ưu tiên `aim_type == "head"`, `aim_offsetY == -3`.
-- [ ] **AC-4:** Tạo preset `configs/ranked_tryhard_burst_spray.json` hoàn chỉnh.
-- [ ] **AC-5:** Đồng bộ lên GitHub Private repo thành công.
-- [ ] **AC-6:** Đầy đủ nhật ký 4 bước tại `.bangiao/`.
+- [ ] **AC-1:** Giao diện `src/ui.py` có tiêu đề v2.0 PRO, tab Recoil & RCS hoàn chỉnh, công tắc nhanh RCS hoạt động mượt mà.
+- [ ] **AC-2:** File `src/utils/config.py` đồng bộ mặc định DPI 1100, Sens 0.23, Toggle Side Mouse 4, RCS delay 140ms.
+- [ ] **AC-3:** `version.json` phản ánh chính xác `"version": "2.0.0"`.
+- [ ] **AC-4:** `CHANGELOG.md` và `README.md` ghi nhận đầy đủ tính năng v2.0.0.
+- [ ] **AC-5:** Khởi chạy kiểm thử cú pháp Python không phát sinh bất kỳ lỗi cú pháp hay import nào.
+- [ ] **AC-6:** Đẩy commit lên GitHub Private repo thành công và lập biên bản đầy đủ tại `.bangiao/`.
 
-**Lệnh chuyển giao:** Bàn giao bản thiết kế sang cho **Coder Agent (`deepseek-v4.1-flash-1017`)** thi công ngay.
+**Lệnh chuyển giao:** Bàn giao bản thiết kế sang cho **Coder Agent (`deepseek-v4.1-flash`)** thi công ngay.
