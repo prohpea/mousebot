@@ -10,7 +10,7 @@
 
   <br><br>
 
-  [![Version](https://img.shields.io/badge/version-2.10.2-55E6E6?style=for-the-badge&labelColor=101820)](version.json)
+  [![Version](https://img.shields.io/badge/version-2.0.0--PRO-10B981?style=for-the-badge&labelColor=101820)](version.json)
   [![Python](https://img.shields.io/badge/Python-3.11--3.13-FFD85E?style=for-the-badge&logo=python&logoColor=white&labelColor=101820)](https://www.python.org/downloads/)
   [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-58A6FF?style=for-the-badge&logo=windows&logoColor=white&labelColor=101820)](#系統需求)
   [![License](https://img.shields.io/badge/License-Custom-E46AC8?style=for-the-badge&labelColor=101820)](LICENSE)
