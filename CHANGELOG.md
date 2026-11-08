@@ -4,6 +4,27 @@ All notable changes, bug fixes, and tuning updates to the CVM-colorBot WindMouse
 
 ---
 
+## [v2.0.0] - 2026-11-08 ("Major UI & Functional Overhaul - Burst & Spray Pro")
+
+### 🚀 Major Highlights & Redesign
+- **Modern 5-Pillar UI Overhaul**:
+  - Upgraded window title and branding to **CVM colorBot v2.0 PRO**.
+  - New high-contrast Emerald/Cyan dashboard badges with real-time status indicators.
+  - Added dedicated **"Recoil & RCS"** control pillar inside the Combat tab for live ballistics tuning.
+  - Added one-click **"Enable RCS (Burst & Spray)"** master switch directly onto the Main Aimbot dashboard.
+- **Two-Stage Ballistics Engine (Burst & Spray)**:
+  - **140ms Burst Immunity**: For the first 1-3 bullets (< 140ms hold), RCS pull-down is inhibited, allowing first-bullet headshot priority with `aim_type: head` and `aim_offsetY: -3`.
+  - **Auto Spray Compensation**: Holding fire beyond 140ms automatically engages vertical pull-down (`rcs_pull_speed: 9`), while aimbot smoothly releases the vertical axis (`dy = 0`) and maintains horizontal tracking.
+  - **Auto Y-Recovery**: Smoothly restores pitch angles after spray release (`0.35s` recovery duration).
+- **Pro-Calibrated Defaults (253 eDPI)**:
+  - Default hardware standard set to **1100 DPI** and **0.23 In-Game Sensitivity**.
+  - Default activation mode set to **Toggle** on **Side Mouse 4 Button (XBUTTON1)**.
+- **Dedicated Ranked Presets**:
+  - `configs/ranked_tryhard_burst_spray.json`: Dedicated preset for competitive high-tier play.
+  - `configs/toggle_edpi253_dpi1100.json`: Dedicated preset for clean toggle aiming.
+
+---
+
 ## [v1.2.1] - 2026-11-03 ("Toggle Audio & Visual Feedback")
 
 ### 🔔 New Features
