@@ -1,71 +1,78 @@
-# 📋 [PLANNER AGENT] BẢN THIẾT KẾ & KẾ HOẠCH NÂNG CẤP ĐẠI TU CVM-COLORBOT BẢN 2.0 PRO
-**Mã hiệu:** `PLAN-20261108-CVM-V2.0-MAJOR-UPGRADE`  
-**Vai trò:** Lead Solutions Architect & Systems Engineering Director (Agency Agent Pipeline)  
+# 📋 [PLANNER AGENT] BÁO CÁO PHÂN TÍCH & KẾ HOẠCH KHẮC PHỤC LỖI TÂM KHÔNG KHÓA ĐẦU (HEAD TARGETING BUG)
+**Mã hiệu:** `PLAN-20261109-CVM-HEAD-AIM-FIX`  
+**Vai trò:** Lead Solutions Architect & Computer Vision FPS Specialist (Agency Agent Pipeline)  
 **Mô hình vận hành:** `gpt-6-sol` (Headless Read-Only Mode)  
-**Dự án:** CVM-colorBot v2.0.0 PRO - Enterprise Architecture Overhaul  
+**Dự án:** CVM-colorBot v2.0 PRO - Kinematic & Hitbox Tracking Engine  
 **Khách hàng/Ủy thác:** User  
-**Yêu cầu người dùng:** Tối ưu lại toàn bộ cả giao diện và chức năng, sau đó cập nhật toàn bộ dự án lên phiên bản 2.0.  
+**Vấn đề người dùng phản hồi:** Bot không nhắm được vào đầu của địch khi chơi.  
 
 ---
 
-## 1. Phân Tích Hiện Trạng & Tầm Nhìn Bản 2.0 (Architectural Vision)
+## 1. Điều Tra & Phân Tích Nguyên Nhân Gốc Rễ (Root Cause Analysis)
 
-### 1.1. Hiện trạng phiên bản cũ (v1.2.1)
-- **Giao diện người dùng (UI):**
-  - Tiêu đề và nhãn hiển thị vẫn mang mã hiệu cũ `v1.2.1`.
-  - Tab RCS bị ẩn/chuyển hướng (`_show_rcs_tab` chỉ đơn thuần redirect về Combat) khiến người dùng không có công cụ trực quan để tinh chỉnh độ trễ Burst & Sấy (RCS delay) hoặc tốc độ kéo chuột (pull speed) ngay trên giao diện.
-  - Hàng công tắc Master (Master Switches) ở Main Aimbot chỉ có Aimbot và Anti-Smoke, thiếu công tắc nhanh cho tính năng sấy bù giật RCS.
-- **Cấu hình & Dữ liệu cốt lõi:**
-  - File `src/utils/config.py` vẫn giữ các giá trị mặc định khởi thủy cũ (DPI 800, Sens 0.235, RCS tắt, delay 100ms).
-- **Hệ thống phiên bản & Tài liệu:**
-  - `version.json`, `CHANGELOG.md`, `README.md` đang dừng lại ở bản 1.2.1 / 2.10.2 chưa đồng bộ.
+Sau khi rà soát toàn bộ chu trình xử lý ảnh từ `main.py`, `src/utils/detection.py` đến `src/aim_system/normal.py`, Planner phát hiện **3 nguyên nhân toán học và thuật toán chí mạng** khiến bot luôn nhắm vào ngực thay vì đầu:
 
-### 1.2. Mục tiêu chiến lược Bản 2.0.0 PRO (Core Directives)
-1. **Đại tu giao diện người dùng (Modern High-Precision Dashboard v2.0):**
-   - Nâng cấp Header: Cửa sổ frameless viền sắc nét, tiêu đề `CVM colorBot v2.0 PRO`, huy hiệu phiên bản cao cấp `v2.0.0 PRO` với tone màu Cyber Emerald/Cyan.
-   - Bổ sung công tắc nhanh **"Enable RCS (Burst & Spray)"** ngay trên thanh điều khiển Master của tab Combat.
-   - Khôi phục và tái thiết lập toàn diện **Tab RCS & Recoil Control** trong phân hệ Combat:
-     - Card điều khiển chuyên sâu: Tốc độ ghìm (`rcs_pull_speed`), Độ trễ phân kỳ Burst/Sấy (`rcs_activation_delay` với chú thích trực quan), Ngưỡng nhấp nhanh (`rcs_rapid_click_threshold`), Tự động trả tâm Y (`rcs_release_y`).
-   - Cập nhật huy hiệu thuật toán: Chuyển toàn bộ badge `v1.2 Algo` sang `v2.0 Pro Engine`.
-2. **Tối ưu hóa chức năng & Động lực học (Core Physics Optimization):**
-   - Tích hợp chuẩn hoá bộ giá trị mặc định của hệ thống trong `src/utils/config.py`:
-     - Mouse DPI: `1100` | In-game Sens: `0.23` (253 eDPI).
-     - Phím kích hoạt: `Side Mouse 4 Button` (Mã `3`) với chế độ `Toggle`.
-     - Phím sấy: `Left Mouse Button` (Mã `0`) tự động kích hoạt RCS sau `140ms`.
-   - Bảo toàn cấu trúc nạp preset: Đồng bộ hóa toàn diện giữa `config.json` và thư mục `configs/`.
-3. **Cập nhật hệ thống siêu dữ liệu & Phát hành (Release Engineering):**
-   - Nâng cấp `version.json` lên `"2.0.0"`.
-   - Cập nhật nhật ký phát hành `CHANGELOG.md` bản 2.0.0 hoành tráng.
-   - Cập nhật `README.md` với huy hiệu Version 2.0.0 PRO và tài liệu hướng dẫn mới nhất.
+### 1.1. Nguyên nhân 1 (Chí mạng): Thuật toán Refine Mask chỉ cập nhật trục X, hoàn toàn bỏ qua trục Y
+- Tại hàm `_estimate_head_positions` (`main.py`, dòng 903-915):
+  ```python
+  if upper_mask.size > 0:
+      ys, xs = np.where(upper_mask > 0)
+      if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
+          headx_base = float(mx1 + int(np.median(xs)))
+  ```
+- **Lỗ hổng:** Mặc dù hệ thống đã tìm ra toàn bộ mảng tọa độ `ys` của viền màu tím/vàng trên đầu địch, mã nguồn chỉ lấy `np.median(xs)` để căn giữa ngang, mà **hoàn toàn vứt bỏ `ys`**!
+- Tọa độ `heady_base` bị bỏ mặc, không được cập nhật từ mask mà phụ thuộc hoàn toàn vào công thức hình học tĩnh.
 
----
+### 1.2. Nguyên nhân 2: Tỷ lệ ước lượng đầu (`head_estimate_ratio`) bị đặt ở mức Ngực (0.22)
+- Công thức tính Y tĩnh:
+  $$\text{heady\_base} = y_1 + \text{height} \times \text{base\_head\_ratio} + \text{effective\_height} \times \left(\frac{\text{offset\_y}}{100.0}\right)$$
+- Trong file `config.json` và `src/utils/config.py`:
+  - `head_estimate_ratio` bị đặt thành **`0.22`** (22% chiều cao cơ thể).
+  - `offsetY` bị đặt là **`3`** (+3% chiều cao cơ thể).
+  - Tổng tỷ lệ hướng xuống: $22\% + 2.7\% = \mathbf{24.7\%}$ từ đỉnh đầu!
+- **Thực tế giải phẫu mô hình game FPS (Valorant/CS2):**
+  - Đỉnh đầu: $0\%$
+  - Mắt / Mũi (Tâm Hitbox Headshot): $\mathbf{6.5\% \sim 9.5\%}$
+  - Cằm / Cổ: $12\% \sim 14\%$
+  - Xương đòn / Ngực trên: $18\% \sim 25\%$
+- **Hệ quả:** Mức 24.7% nằm chính xác tại **ngực trên / xương ức** của địch. Kể cả khi có `aim_offsetY: -4` đến `-6`, tâm vẫn chỉ dịch lên xương đòn, không bao giờ chạm tới đầu!
 
-## 2. Bản Vẽ Phân Bổ File Cho Coder (Scope of Work)
-
-### 2.1. Phân hệ Giao diện: `src/ui.py`
-- Sửa tiêu đề cửa sổ: `self.title("CVM colorBot v2.0 PRO")`.
-- Cập nhật thanh header: Logo, nhãn phiên bản `v2.0.0 PRO`.
-- Sửa thanh điều hướng phụ của Combat: `["Main Aimbot", "Sec Aimbot", "Recoil & RCS"]`.
-- Bổ sung công tắc RCS nhanh trên `master_row` của `_show_aimbot_tab()`.
-- Xây dựng lại hoàn chỉnh hàm `_show_rcs_tab()` với giao diện ModernCard và các slider điều khiển thời gian thực.
-
-### 2.2. Phân hệ Cấu hình: `src/utils/config.py`
-- Cập nhật giá trị khởi tạo mặc định trong `Config.__init__()` khớp chuẩn v2.0.
-
-### 2.3. Phân hệ Phiên bản: `version.json`, `CHANGELOG.md`, `README.md`
-- Đẩy toàn bộ định danh dự án lên `2.0.0`.
-
-### 2.4. Đồng bộ GitHub:
-- Commit toàn bộ các thay đổi và push lên remote `prohpea/CVM-colorBot` nhánh `main`.
+### 1.3. Nguyên nhân 3: Địch ngồi (crouch) hoặc núp sau chướng ngại vật (head-glitch)
+- Khi địch ngồi hoặc chỉ ló đầu qua thùng gỗ, chiều cao bounding box `height` giảm xuống (chỉ còn phần đầu và vai).
+- Do thuật toán cũ không lấy đỉnh mask `np.min(ys)`, việc nhân tỷ lệ phần trăm sẽ bị co cụm sai lệch, khiến tâm bị kéo chúc xuống mép dưới của thùng gỗ.
 
 ---
 
-## 3. Tiêu Chuẩn Nghiệm Thu (Acceptance Criteria - AC)
-- [ ] **AC-1:** Giao diện `src/ui.py` có tiêu đề v2.0 PRO, tab Recoil & RCS hoàn chỉnh, công tắc nhanh RCS hoạt động mượt mà.
-- [ ] **AC-2:** File `src/utils/config.py` đồng bộ mặc định DPI 1100, Sens 0.23, Toggle Side Mouse 4, RCS delay 140ms.
-- [ ] **AC-3:** `version.json` phản ánh chính xác `"version": "2.0.0"`.
-- [ ] **AC-4:** `CHANGELOG.md` và `README.md` ghi nhận đầy đủ tính năng v2.0.0.
-- [ ] **AC-5:** Khởi chạy kiểm thử cú pháp Python không phát sinh bất kỳ lỗi cú pháp hay import nào.
-- [ ] **AC-6:** Đẩy commit lên GitHub Private repo thành công và lập biên bản đầy đủ tại `.bangiao/`.
+## 2. Giải Pháp Thiết Kế Kỹ Thuật (Architecture & Algorithm Redesign)
+
+### 2.1. Cải tiến Hàm `_estimate_head_positions` trong `main.py`
+1. **Tinh chỉnh trực tiếp từ Mask viền màu (Active Mask Head Tracking):**
+   - Khi `mask` có điểm nhận diện trong vùng thân trên:
+     - Đỉnh đầu thực tế: $\text{min\_y} = \min(ys)$
+     - Vùng pixel đầu thực tế: Các điểm có $ys \le \text{min\_y} + \max(4, \text{upper\_h} \times 0.35)$
+     - Tọa độ Y chuẩn xác của đầu:
+       $$\text{heady\_base} = \text{my1} + \text{median}(\text{top\_head\_ys})$$
+   - Đảm bảo dù địch đứng, ngồi hay núp thùng, tâm luôn hút chính xác vào tâm khối pixel của đầu!
+2. **Hiệu chỉnh Tỷ lệ dự phòng hình học (Geometric Fallback):**
+   - Đổi giá trị mặc định của `head_estimate_ratio` từ `0.22` xuống **`0.09`** (9% từ đỉnh đầu, khớp chuẩn tâm mắt/mũi).
+   - Đặt `offsetY: 0` (triệt tiêu lực kéo xuống 3% cũ).
+   - Đặt `aim_offsetY: -2` (vi chỉnh đỉnh đầu / forehead lock).
+
+---
+
+## 3. Bản Vẽ Phân Bổ File Cho Coder (Scope of Work)
+1. **`main.py`**: Nâng cấp hàm `_estimate_head_positions` hỗ trợ trích xuất cả `headx_base` và `heady_base` từ `ys`.
+2. **`src/utils/config.py`**: Chuẩn hóa `head_estimate_ratio = 0.09`, `offsetY = 0`, `aim_offsetY = -2`.
+3. **`config.json` & Presets trong `configs/`**: Cập nhật các thông số chuẩn hóa khóa đầu.
+4. **Đồng bộ GitHub**: Commit và push toàn bộ thay đổi lên nhánh `main`.
+
+---
+
+## 4. Tiêu Chuẩn Nghiệm Thu (Acceptance Criteria - AC)
+- [ ] **AC-1:** Hàm `_estimate_head_positions` tính toán tọa độ `heady_base` đạt tỷ lệ từ $6.5\% \sim 9.5\%$ chiều cao cơ thể (thay vì $20\% \sim 25\%$).
+- [ ] **AC-2:** Khi có `mask`, tọa độ `heady_base` khóa trực tiếp vào `median(top_head_ys)`.
+- [ ] **AC-3:** `config.json` có `head_estimate_ratio == 0.09`, `offsetY == 0`, `aim_offsetY == -2`.
+- [ ] **AC-4:** Kiểm thử độc lập bằng kịch bản mô phỏng hình học và mask đạt 100% PASS.
+- [ ] **AC-5:** Đẩy commit lên GitHub Private repo thành công.
 
 **Lệnh chuyển giao:** Bàn giao bản thiết kế sang cho **Coder Agent (`deepseek-v4.1-flash`)** thi công ngay.
