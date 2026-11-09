@@ -102,6 +102,24 @@ def _enqueue_path(tracker, path, max_steps=24, clear_existing=False):
             break
 
 
+def calculate_exact_counts(dx, dy, sens, dpi, screen_w=1920, fov_deg=103.0):
+    """
+    Calculate exact physical mouse counts required to rotate the crosshair
+    by (dx, dy) screen pixels in Valorant.
+    """
+    fx = (float(screen_w) / 2.0) / math.tan(math.radians(float(fov_deg) / 2.0))
+    cm_per_rev = 54.54 / max(float(sens), 0.01)
+    counts_per_cm = float(dpi) / 2.54
+    deg_per_count = 360.0 / (cm_per_rev * counts_per_cm)
+    
+    deg_x = math.degrees(math.atan2(float(dx), fx))
+    deg_y = math.degrees(math.atan2(float(dy), fx))
+    
+    counts_x = deg_x / deg_per_count
+    counts_y = deg_y / deg_per_count
+    return counts_x, counts_y
+
+
 def calculate_movement(dx, dy, sens, dpi):
     """
     瑷堢畻绉诲嫊閲忥紙鍩烘柤闈堟晱搴﹀拰 DPI锛?
@@ -385,29 +403,34 @@ def _apply_normal_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 
 def _apply_flick_aim(dx, dy, tracker, is_sec=False):
     """
-    Flick mode 鐬勬簴锛氬弬鑰?C++ mode_silent.cpp 鐨?ApplyModeFlick锛?
-    directly scale raw delta and dispatch one immediate move.
+    Flick / One-Tap mode:
+    Calculate true angular mouse counts and dispatch instant crisp snap to head.
     """
+    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
+    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
+
+    counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
+
     if is_sec:
-        strength_x = float(getattr(config, "flick_strength_x_sec", 5.0))
-        strength_y = float(getattr(config, "flick_strength_y_sec", strength_x))
-        label = "Sec Aimbot (Flick)"
+        strength_x = float(getattr(config, "flick_strength_x_sec", 0.85))
+        strength_y = float(getattr(config, "flick_strength_y_sec", 0.75))
+        label = "Sec Aimbot (One-Tap Flick)"
     else:
-        strength_x = float(getattr(config, "flick_strength_x", 5.0))
+        strength_x = float(getattr(config, "flick_strength_x", 0.70))
         strength_y = float(getattr(config, "flick_strength_y", strength_x))
         label = "Main Aimbot (Flick)"
 
-    strength_x = max(0.01, min(5.0, strength_x))
+    strength_x = max(0.01, min(2.0, strength_x))
     if strength_y <= 0.0:
         strength_y = strength_x
-    strength_y = max(0.01, min(5.0, strength_y))
+    strength_y = max(0.01, min(2.0, strength_y))
 
-    out_x = float(dx) * (strength_x / 5.0)
-    out_y = float(dy) * (strength_y / 5.0)
+    out_x = counts_x * strength_x
+    out_y = counts_y * strength_y
 
     ddx, ddy = tracker._clip_movement(out_x, out_y)
     qdx, qdy = _quantize_with_residual(tracker, ddx, ddy, is_sec=is_sec)
-    if qdx == 0 and qdy == 0 and (abs(dx) + abs(dy)) >= 1.0:
+    if qdx == 0 and qdy == 0 and (abs(dx) + abs(dy)) >= 0.5:
         if abs(dx) >= abs(dy):
             qdx = 1 if dx > 0 else -1
         else:
@@ -723,9 +746,14 @@ def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
     
     # 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩锛堣垏 Normal 妯″紡涓€鑷达級
-    ndx, ndy = calculate_movement(dx, dy, sens, dpi)
-    ndx *= x_speed
-    ndy *= y_speed
+    if is_sec:
+        counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
+        ndx = counts_x * (x_speed / 100.0) * 0.85
+        ndy = counts_y * (y_speed / 100.0) * 0.75
+    else:
+        ndx, ndy = calculate_movement(dx, dy, sens, dpi)
+        ndx *= x_speed
+        ndy *= y_speed
     
     path = smooth_aimer.calculate_smooth_path(ndx, ndy, wm_config)
     
@@ -905,16 +933,47 @@ def process_normal_mode(
         tracker.rcs_rapid_click_threshold
     )
     
-    # 處理 Aimbot（優先級：Main > Sec）
-    best_target_main = min(targets_main, key=lambda t: t[2]) if targets_main else None
+    # 處理 Aimbot（優先級：Sec Aimbot [One-Tap Hold] > Main Aimbot [Spray Toggle]）
+    # 当用户主动按下 Sec Aim 按钮（如右键）时，Sec Aim 具有最高优先级立刻执行
     best_target_sec = min(targets_sec, key=lambda t: t[2]) if targets_sec else None
+    best_target_main = min(targets_main, key=lambda t: t[2]) if targets_main else None
 
-    if best_target_main:
+    # === 1. 優先處理 Sec Aimbot (One-Tap / ADS) ===
+    if sec_active and best_target_sec:
+        cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
+        if cx is not None and cy is not None:
+            distance_to_center_sec = math.hypot(cx - center_x, cy - center_y)
+            sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
+            if distance_to_center_sec <= sec_fov:
+                try:
+                    aim_type_sec = getattr(config, "aim_type_sec", "head")
+                    aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
+                    aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
+                    
+                    dx = (cx + aim_offsetX_sec) - center_x
+                    dy = (cy + aim_offsetY_sec) - center_y
+                    
+                    if aim_type_sec == "nearest" and head_y_min is not None and body_y_max is not None:
+                        if head_y_min < body_y_max:
+                            target_y = cy + aim_offsetY_sec
+                            if head_y_min <= target_y <= body_y_max:
+                                dy = 0
+                    
+                    if rcs_active:
+                        dy = 0
+                    if check_y_release():
+                        dy = 0
+                    
+                    _dispatch_aimbot(dx, dy, distance_to_center_sec, mode_sec, tracker, is_sec=True)
+                    sec_aimbot_active = True
+                except Exception as e:
+                    log_print(f"[Sec Aimbot error] {e}")
+
+    # === 2. 如果 Sec Aimbot 未啟動，處理 Main Aimbot (Spray / Tracking) ===
+    if not sec_aimbot_active and best_target_main:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_main)
         if cx is not None and cy is not None:
             distance_to_center = math.hypot(cx - center_x, cy - center_y)
-
-            # === 優先處理 Main Aimbot ===
             main_fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
             if distance_to_center <= main_fov:
                 if main_active:
@@ -946,43 +1005,6 @@ def process_normal_mode(
                         main_aimbot_active = True
                     except Exception as e:
                         log_print(f"[Main Aimbot error] {e}")
-    
-    # === 如果 Main Aimbot 未啟動，嘗試 Sec Aimbot ===
-    if not main_aimbot_active and best_target_sec:
-        cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
-        if cx is not None and cy is not None:
-            distance_to_center_sec = math.hypot(cx - center_x, cy - center_y)
-            sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
-            if distance_to_center_sec <= sec_fov:
-                if sec_active:
-                    try:
-                        aim_type_sec = getattr(config, "aim_type_sec", "head")
-                        aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
-                        aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
-                        
-                        dx = (cx + aim_offsetX_sec) - center_x
-                        dy = (cy + aim_offsetY_sec) - center_y
-                        
-                        # Nearest 妯″紡
-                        if aim_type_sec == "nearest" and head_y_min is not None and body_y_max is not None:
-                            if head_y_min < body_y_max:
-                                target_y = cy + aim_offsetY_sec
-                                if head_y_min <= target_y <= body_y_max:
-                                    dy = 0
-                        
-                        # RCS 鏁村悎
-                        if rcs_active:
-                            dy = 0
-                        
-                        # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
-                        if check_y_release():
-                            dy = 0
-                        
-                        # 鏍规摎 Sec 妯″紡瑾垮害
-                        _dispatch_aimbot(dx, dy, distance_to_center_sec, mode_sec, tracker, is_sec=True)
-                        sec_aimbot_active = True
-                    except Exception as e:
-                        log_print(f"[Sec Aimbot error] {e}")
 
     magnet_enabled = bool(getattr(config, "enable_magnet_trigger", False))
     if magnet_enabled:
