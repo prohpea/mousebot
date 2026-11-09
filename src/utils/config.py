@@ -251,11 +251,11 @@ class Config:
         self.normal_y_speed_sec = 52.0
         self.normalsmooth_sec = 4
         self.normalsmoothfov_sec = 28
-        self.flick_strength_x_sec = 5.0
-        self.flick_strength_y_sec = 5.0
-        self.fovsize_sec = 28
+        self.flick_strength_x_sec = 0.85
+        self.flick_strength_y_sec = 0.75
+        self.fovsize_sec = 30.0
         self.ads_fov_enabled_sec = False
-        self.ads_fovsize_sec = 28
+        self.ads_fovsize_sec = 30.0
         self.ads_key_sec = "Right Mouse Button"
         self.ads_key_type_sec = "hold"  # hold, toggle
         self.selected_mouse_button_sec = 1
