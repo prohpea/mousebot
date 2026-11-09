@@ -246,22 +246,22 @@ class Config:
         self.flick_strength_y = 5.0
         
         # --- Secondary Aimbot ---
-        self.enableaim_sec = False
-        self.normal_x_speed_sec = 2
-        self.normal_y_speed_sec = 2
-        self.normalsmooth_sec = 20
-        self.normalsmoothfov_sec = 20
+        self.enableaim_sec = True
+        self.normal_x_speed_sec = 105.0
+        self.normal_y_speed_sec = 52.0
+        self.normalsmooth_sec = 4
+        self.normalsmoothfov_sec = 28
         self.flick_strength_x_sec = 5.0
         self.flick_strength_y_sec = 5.0
-        self.fovsize_sec = 150
+        self.fovsize_sec = 28
         self.ads_fov_enabled_sec = False
-        self.ads_fovsize_sec = 150
+        self.ads_fovsize_sec = 28
         self.ads_key_sec = "Right Mouse Button"
         self.ads_key_type_sec = "hold"  # hold, toggle
-        self.selected_mouse_button_sec = 2
-        self.aim_offsetX_sec = 0  # Sec Aimbot X 鍋忕Щ
-        self.aim_offsetY_sec = 0  # Sec Aimbot Y 鍋忕Щ
-        self.aim_type_sec = "head"  # Sec Aimbot 鐬勬簴椤炲瀷
+        self.selected_mouse_button_sec = 1
+        self.aim_offsetX_sec = 0  # Sec Aimbot X 偏移
+        self.aim_offsetY_sec = 0  # Sec Aimbot Y 偏移
+        self.aim_type_sec = "head"  # Sec Aimbot 瞄準類型
         
         # --- NCAF Parameters (Main) ---
         # Snap Radius = outer engagement zone (larger), Near Radius = inner precision zone (smaller)
@@ -294,13 +294,13 @@ class Config:
         self.wm_distance_threshold = 50.0  # 璺濋洟闁惧€硷紝浣庢柤姝ゅ€兼檪绉诲嫊鏇寸簿纰?
         
         # --- WindMouse Parameters (Sec) ---
-        self.wm_gravity_sec = 9.0
-        self.wm_wind_sec = 3.0
-        self.wm_max_step_sec = 15.0
-        self.wm_min_step_sec = 2.0
+        self.wm_gravity_sec = 11.0
+        self.wm_wind_sec = 1.0
+        self.wm_max_step_sec = 14.0
+        self.wm_min_step_sec = 1.0
         self.wm_min_delay_sec = 0.001
         self.wm_max_delay_sec = 0.003
-        self.wm_distance_threshold_sec = 50.0  # 璺濋洟闁惧€硷紝浣庢柤姝ゅ€兼檪绉诲嫊鏇寸簿纰?
+        self.wm_distance_threshold_sec = 28.0
         
         # --- Bezier Parameters (Main) ---
         self.bezier_segments = 8
