@@ -1,39 +1,41 @@
-# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG BẢN VÁ TRIỆT TIÊU KÉO QUÁ CAO (OVERSHOOT)
-**Mã hiệu:** `COD-20261109-CVM-AIM-OVER-HEAD-IMPL`  
+# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG HỆ THỐNG SEC AIM ONE-TAP (SHERIFF, GUARDIAN, MARSHAL)
+**Mã hiệu:** `COD-20261109-CVM-SEC-AIM-ONETAP-IMPL`  
 **Vai trò:** Senior Core Developer (Agency Agent Pipeline)  
 **Mô hình vận hành:** `deepseek-v4.1-flash-1017` (Workspace-Write Mode)  
 **Căn cứ thiết kế:** `.bangiao/01-ke-hoach.md`
 
 ---
 
-## 1. Các Tệp Mã Nguồn Đã Thi Công
+## 1. Chi Tiết Các Tệp Đã Can Thiệp
 
-### 1.1. `main.py` (Hàm `_estimate_head_positions`)
-- **Vấn đề cũ:** Thuật toán lọc `ys <= np.min(ys) + max(...)` rồi lấy `np.median(top_head_ys)` gán điểm nhắm vào đúng đỉnh viền tóc/nón ($2 - 4\text{px}$ dưới đỉnh bounding box).
-- **Giải pháp mới:**
-  - Định vị đỉnh nón/tóc: `head_top = float(np.min(ys))`.
-  - Tính khoảng hạ xuống tâm diện mạo nhân vật: `head_center_offset = max(3.0, float(height) * 0.11)`.
-  - Đặt tọa độ đích: `heady_base = float(my1) + head_top + head_center_offset`.
-  - Bảo tồn khả năng tùy biến người dùng: `if offset_y != 0: heady_base += effective_height * (offset_y / 100.0)`.
-  - Cập nhật tỷ lệ ước lượng hình học dự phòng: `base_head_ratio = 0.13` (thay vì 0.09).
+### 1.1. `src/aim_system/normal.py` (`_WindMouseConfig`)
+- Bổ sung cấu hình nhánh động học riêng biệt `if is_sec:` trong hàm khởi tạo:
+  - `smooth_reaction_min = 0.012`, `smooth_reaction_max = 0.026` (giảm độ trễ phản xạ xuống mức micro-second, cho phép nhắm bắn tức thì).
+  - `smooth_close_speed = 0.80` (tăng mạnh tốc độ áp sát đầu trong bán kính 30px).
+  - `smooth_far_speed = 0.95`.
+  - `smooth_max_step_ratio = 0.28`.
+  - `smooth_acceleration = 0.80`, `smooth_deceleration = 0.70`.
+  - `smooth_fatigue_effect = 0.10` (triệt tiêu tình trạng giảm tốc do mỏi tay ảo).
+  - `smooth_target_area_ratio = 0.015`.
+  - Mặc định: `wm_gravity_sec = 11.0`, `wm_wind_sec = 1.0`, `wm_max_step_sec = 14.0`, `wm_min_step_sec = 1.0`, `wm_distance_threshold_sec = 28.0`.
 
 ### 1.2. `src/utils/config.py`
-- Sửa mặc định `self.aim_offsetY` từ `-2` thành `0` (tránh việc trừ âm đẩy tâm ngược lên trời).
-- Sửa mặc định `self.head_estimate_ratio` từ `0.09` thành `0.13` (đáp ứng đúng tỷ lệ giải phẫu hitbox đầu Valorant).
+- Cập nhật giá trị khởi tạo chuẩn xác cho Secondary Aimbot:
+  - `enableaim_sec = True`
+  - `normal_x_speed_sec = 105.0`
+  - `normal_y_speed_sec = 52.0`
+  - `normalsmooth_sec = 4`
+  - `normalsmoothfov_sec = 28`
+  - `fovsize_sec = 28`
+  - `selected_mouse_button_sec = 1` (Right Mouse Button)
+  - `wm_gravity_sec = 11.0`, `wm_wind_sec = 1.0`, `wm_distance_threshold_sec = 28.0`
 
-### 1.3. `config.json` & Toàn bộ profile trong `configs/`
-- `config.json`:
-  - `aim_offsetY`: `0`
-  - `aim_offsetY_sec`: `0`
-  - `normal_y_speed`: `48.0` (giảm từ 68.0, hãm quán tính văng dọc)
-  - `head_estimate_ratio`: `0.13`
-- `configs/ranked_tryhard_burst_spray.json`: Đồng bộ `aim_offsetY: 0`, `normal_y_speed: 48.0`, `head_estimate_ratio: 0.13`.
-- `configs/ranked_tryhard_burst_spray_cvm.json`: Đồng bộ `aim_offsetY: 0`, `normal_y_speed: 48.0`, `head_estimate_ratio: 0.13`.
-- `configs/toggle_edpi253_dpi1100.json`: Đồng bộ `aim_offsetY: 0`, `normal_y_speed: 48.0`, `head_estimate_ratio: 0.13`.
-- `configs/toggle_edpi253_dpi1100_cvm.json`: Đồng bộ `aim_offsetY: 0`, `normal_y_speed: 48.0`, `head_estimate_ratio: 0.13`.
+### 1.3. Cấu hình & Presets
+- Cập nhật [config.json](file:///c:/Users/TeamOS/Downloads/CVM-colorBot-v1.2.1-FullPackage/CVM-colorBot/config.json).
+- Tạo mới tệp preset chuyên dụng: [onetap_sheriff_guardian_marshal.json](file:///c:/Users/TeamOS/Downloads/CVM-colorBot-v1.2.1-FullPackage/CVM-colorBot/configs/onetap_sheriff_guardian_marshal.json).
+- Đồng bộ bộ thông số Sec Aim One-Tap vào toàn bộ các preset khác trong thư mục `configs/`.
 
 ---
 
-## 2. Kiểm Tra Biên Dịch & Cú Pháp
-- Biên dịch bytecode `py_compile` trên `main.py` và `src/utils/config.py`: **100% SUCCESS**.
-- Không phát sinh lỗi cú pháp hay phụ thuộc bên ngoài.
+## 2. Kiểm Tra Biên Dịch & Đóng Gói
+- `py_compile` xác nhận mã nguồn `normal.py` và `config.py` đạt 100% hợp lệ, sẵn sàng chuyển cho Tester Agent.
