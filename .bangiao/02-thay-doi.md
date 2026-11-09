@@ -1,5 +1,5 @@
-# 🛠️ [CODER AGENT] NHẬT KÝ THI CÔNG TRIỆT TIÊU RUNG GIẬT 71MS
-**Mã hiệu:** `COD-20261109-CVM-SEC-AIM-71MS-STABILIZATION`  
+# 🛠️ [CODER AGENT] NHẬT KÝ THI CÔNG KIẾN TRÚC BALLISTIC ONE-TAP
+**Mã hiệu:** `COD-20261109-CVM-ARCHITECTURE-OVERHAUL`  
 **Vai trò:** Senior Core Developer (Agency Agent Pipeline)  
 **Mô hình vận hành:** `deepseek-v4.1-flash-1017` (Workspace-Write Execution Mode)  
 **Tài liệu bám sát:** `.bangiao/01-ke-hoach.md`  
@@ -9,38 +9,40 @@
 ## 1. Chi Tiết Các File Đã Chỉnh Sửa
 
 ### 1.1. `src/aim_system/normal.py`
-- Trong hàm `_apply_flick_aim`:
-  - Thêm cơ chế Deadzone cận tâm:
+- Tái cấu trúc hoàn toàn hàm `_apply_flick_aim`:
+  - **Tách riêng nhánh Sec Aim:** Khi `is_sec=True`, chuyển sang chế độ Ballistic Impulse với cửa sổ trơ (Refractory Cooldown):
     ```python
-    distance_error = math.hypot(dx, dy)
-    deadzone = float(getattr(config, "sec_aim_deadzone", 2.2 if is_sec else 1.5))
-    if distance_error <= deadzone:
-        return
+    now = time.perf_counter()
+    if is_sec:
+        last_flick_time = getattr(tracker, "_last_sec_flick_time", 0.0)
+        cooldown_sec = float(getattr(config, "sec_flick_cooldown_ms", 85.0)) / 1000.0
+        if (now - last_flick_time) < cooldown_sec:
+            return  # Đang trong cửa sổ trơ, không gửi xung đè
     ```
-  - Cập nhật Gain cho độ trễ 71ms:
-    - `strength_x = float(getattr(config, "flick_strength_x_sec", 0.035))`
-    - `strength_y = float(getattr(config, "flick_strength_y_sec", 0.030))`
-    - `max_step_counts = float(getattr(config, "sec_max_step_counts", 8.0))`
-  - Xóa bỏ điều kiện ép xung $\ge 0.5\text{px}$, chỉ kích hoạt bù vi bước khi `distance_error >= 3.5`.
-- Trong hàm `_apply_windmouse_aim`:
-  - Đồng bộ tỷ lệ xung Sec Aim: `* 0.035` cho X và `* 0.030` cho Y.
+  - **Tính xung chính xác và phát lệnh 1 nhịp:**
+    ```python
+    flick_factor_x = float(getattr(config, "flick_strength_x_sec", 0.92))
+    flick_factor_y = float(getattr(config, "flick_strength_y_sec", 0.90))
+    target_counts_x = counts_x * flick_factor_x
+    target_counts_y = counts_y * flick_factor_y
+    qdx = int(round(ddx))
+    qdy = int(round(ddy))
+    setattr(tracker, "_last_sec_flick_time", now)
+    _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=True)
+    ```
+- Trong `process_normal_mode`:
+  - Reset tức thì `tracker._last_sec_flick_time = 0.0` ngay khi người chơi nhả chuột phải (`not sec_active`), giúp cú click tiếp theo được phát lệnh tức thì không có độ trễ.
 
-### 1.2. `main.py`
-- Bật mặc định `enable_target_temporal_smoothing`:
-  ```python
-  use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", True))
-  ```
-
-### 1.3. `src/utils/config.py`
-- Cập nhật default:
+### 1.2. `src/utils/config.py`
+- Thay thế các tham số chắp vá cũ (`sec_max_step_counts`) bằng các tham số đạn đạo chuẩn:
+  - `self.flick_strength_x_sec = 0.92` (Snap 92% quãng đường, phần còn lại rơi vào Deadzone)
+  - `self.flick_strength_y_sec = 0.90`
+  - `self.sec_flick_cooldown_ms = 85.0` (Khóa nhận lệnh trong thời gian trễ camera)
+  - `self.sec_aim_deadzone = 2.2` (Vùng chết khóa cứng đầu địch)
   - `self.enable_target_temporal_smoothing = True`
-  - `self.flick_strength_x_sec = 0.035`
-  - `self.flick_strength_y_sec = 0.030`
-  - `self.sec_max_step_counts = 8.0`
-  - `self.sec_aim_deadzone = 2.2`
-- Cập nhật hàm `to_dict` với `sec_aim_deadzone` và `sec_max_step_counts`.
+- Cập nhật hàm `to_dict`.
 
-### 1.4. Hệ Thống Cấu Hình `config.json` & `configs/*.json`
+### 1.3. Hệ Thống Cấu Hình `config.json` & `configs/*.json`
 Đồng bộ các thông số mới vào toàn bộ các profile cấu hình:
 - `config.json`
 - `configs/onetap_sheriff_guardian_marshal.json`
@@ -53,4 +55,4 @@
 ---
 
 ## 2. Kiểm Tra Cú Pháp
-- `py_compile` xác nhận: **100% sạch lỗi biên dịch trên tất cả các file**.
+- `python -m py_compile` xác nhận: **100% sạch lỗi cú pháp**.

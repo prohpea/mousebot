@@ -251,9 +251,9 @@ class Config:
         self.normal_y_speed_sec = 52.0
         self.normalsmooth_sec = 4
         self.normalsmoothfov_sec = 28
-        self.flick_strength_x_sec = 0.035
-        self.flick_strength_y_sec = 0.030
-        self.sec_max_step_counts = 8.0
+        self.flick_strength_x_sec = 0.92
+        self.flick_strength_y_sec = 0.90
+        self.sec_flick_cooldown_ms = 85.0
         self.sec_aim_deadzone = 2.2
         self.fovsize_sec = 30.0
         self.ads_fov_enabled_sec = False
@@ -676,7 +676,7 @@ class Config:
             "normalsmoothfov_sec": self.normalsmoothfov_sec,
             "flick_strength_x_sec": self.flick_strength_x_sec,
             "flick_strength_y_sec": self.flick_strength_y_sec,
-            "sec_max_step_counts": getattr(self, "sec_max_step_counts", 8.0),
+            "sec_flick_cooldown_ms": getattr(self, "sec_flick_cooldown_ms", 85.0),
             "sec_aim_deadzone": getattr(self, "sec_aim_deadzone", 2.2),
             "fovsize_sec": self.fovsize_sec,
             "ads_fov_enabled_sec": self.ads_fov_enabled_sec,

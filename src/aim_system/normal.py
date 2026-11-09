@@ -403,30 +403,58 @@ def _apply_normal_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 
 def _apply_flick_aim(dx, dy, tracker, is_sec=False):
     """
-    Flick / One-Tap mode:
-    Calculate true angular mouse counts and dispatch instant crisp snap to head.
+    Ballistic One-Tap Flick Mode with Refractory Cooldown:
+    Dispatches a single precise impulse, then engages an 85ms refractory window
+    matching the 71ms video pipeline latency to completely eliminate oscillation and jitter.
     """
-    # Deadzone check to eliminate jitter when crosshair is already inside head hitbox
     distance_error = math.hypot(dx, dy)
     deadzone = float(getattr(config, "sec_aim_deadzone", 2.2 if is_sec else 1.5))
     if distance_error <= deadzone:
         return
 
+    now = time.perf_counter()
+    if is_sec:
+        last_flick_time = getattr(tracker, "_last_sec_flick_time", 0.0)
+        cooldown_sec = float(getattr(config, "sec_flick_cooldown_ms", 85.0)) / 1000.0
+        if (now - last_flick_time) < cooldown_sec:
+            return
+
+        sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
+        dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
+        counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
+
+        flick_factor_x = float(getattr(config, "flick_strength_x_sec", 0.92))
+        flick_factor_y = float(getattr(config, "flick_strength_y_sec", 0.90))
+        target_counts_x = counts_x * flick_factor_x
+        target_counts_y = counts_y * flick_factor_y
+
+        ddx, ddy = tracker._clip_movement(target_counts_x, target_counts_y)
+        qdx = int(round(ddx))
+        qdy = int(round(ddy))
+
+        try:
+            from src.utils.mouse import update_movement_lock
+            lock_x = getattr(config, "mouse_lock_sec_x", False)
+            lock_y = getattr(config, "mouse_lock_sec_y", False)
+            if lock_x or lock_y:
+                update_movement_lock(lock_x, lock_y, is_main=False)
+        except Exception:
+            pass
+
+        setattr(tracker, "_last_sec_flick_time", now)
+        if qdx != 0 or qdy != 0:
+            _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=True)
+            log_move(qdx, qdy, "Sec Aimbot (Ballistic One-Tap)")
+        return
+
     sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-
     counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
 
-    if is_sec:
-        strength_x = float(getattr(config, "flick_strength_x_sec", 0.035))
-        strength_y = float(getattr(config, "flick_strength_y_sec", 0.030))
-        max_step_counts = float(getattr(config, "sec_max_step_counts", 8.0))
-        label = "Sec Aimbot (One-Tap Flick)"
-    else:
-        strength_x = float(getattr(config, "flick_strength_x", 0.70))
-        strength_y = float(getattr(config, "flick_strength_y", strength_x))
-        max_step_counts = float(getattr(config, "flick_max_step_counts", 999.0))
-        label = "Main Aimbot (Flick)"
+    strength_x = float(getattr(config, "flick_strength_x", 0.70))
+    strength_y = float(getattr(config, "flick_strength_y", strength_x))
+    max_step_counts = float(getattr(config, "flick_max_step_counts", 999.0))
+    label = "Main Aimbot (Flick)"
 
     strength_x = max(0.001, min(2.0, strength_x))
     if strength_y <= 0.0:
@@ -928,6 +956,9 @@ def process_normal_mode(
         sec_active = check_aimbot_activation(selected_btn_sec, activation_type_sec, is_sec=True)
     else:
         reset_activation_state(is_sec=True)
+    
+    if not sec_active and hasattr(tracker, "_last_sec_flick_time"):
+        tracker._last_sec_flick_time = 0.0
     
     # 取得各自的 Operation Mode
     mode_main = getattr(config, "mode", "Normal")

@@ -217,8 +217,8 @@
     "normal_y_speed_sec": 52.0,
     "normalsmooth_sec": 4,
     "normalsmoothfov_sec": 28,
-    "flick_strength_x_sec": 0.035,
-    "flick_strength_y_sec": 0.03,
+    "flick_strength_x_sec": 0.92,
+    "flick_strength_y_sec": 0.9,
     "fovsize_sec": 30.0,
     "ads_fov_enabled_sec": false,
     "ads_fovsize_sec": 30.0,
@@ -368,6 +368,6 @@
     "anti_tremor_deadband": 1.0,
     "smooth_reaction_min": 0.035,
     "smooth_reaction_max": 0.07,
-    "sec_max_step_counts": 8.0,
-    "sec_aim_deadzone": 2.2
+    "sec_aim_deadzone": 2.2,
+    "sec_flick_cooldown_ms": 85.0
 }
