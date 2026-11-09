@@ -30,6 +30,7 @@ Design notes
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence, Tuple
 
@@ -49,8 +50,21 @@ DEFAULT_HFOV_DEG: float = 103.0
 DEFAULT_DPI: float = 1100.0
 DEFAULT_SENS: float = 0.23
 
+#: Valorant yaw per mouse count at in-game sensitivity 1.0.
+#: ``deg_per_count(sens) = 0.07 * sens`` and therefore
+#: ``counts_per_deg(sens) = 1 / (0.07 * sens)`` -> 62.112 counts/deg at 0.23.
+DEFAULT_VALORANT_DEG_PER_COUNT: float = 0.07
+
+#: Calibration sources (explicit, never inferred at resolve time).
+SOURCE_VALORANT = "valorant"
+SOURCE_MEASURED = "measured"
+SOURCE_ANALYTIC = "analytic"
+
 #: A measurement diverging this much from the analytic model is suspicious.
 MEASURED_DIVERGENCE_WARN: float = 0.20
+
+#: A measurement whose sensitivity moved this much should be re-measured.
+SENS_DRIFT_WARN: float = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +311,219 @@ def _resolve_capture_service(tracker: Any) -> Any:
     return None
 
 
+def _cfg_getter(cfg: Any):
+    """Return ``get(name, default)`` for a dict, object or ``None``."""
+    if isinstance(cfg, dict):
+        return lambda name, default: cfg.get(name, default)
+    if cfg is None:
+        return lambda name, default: default
+    return lambda name, default: getattr(cfg, name, default)
+
+
+# ---------------------------------------------------------------------------
+# Caches (plan 7.3)
+# ---------------------------------------------------------------------------
+#
+# Geometry/calibration are pure functions of a handful of scalars, but they were
+# rebuilt every frame: ``FrameGeometry`` construction plus several trigonometry
+# calls, and a dozen ``getattr`` reads. Both are cached under a SIGNATURE that
+# includes every input, so a change to crop, FOV or sensitivity invalidates it.
+
+_MAX_CACHE_ENTRIES = 32
+_GEOMETRY_CACHE: "OrderedDict[tuple, FrameGeometry]" = OrderedDict()
+_CALIBRATION_CACHE: "OrderedDict[tuple, Calibration]" = OrderedDict()
+
+
+def _cache_put(cache, key: tuple, value):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _MAX_CACHE_ENTRIES:
+        cache.popitem(last=False)
+    return value
+
+
+def clear_caches() -> None:
+    """Drop every cached geometry/calibration (tests, config reload)."""
+    _GEOMETRY_CACHE.clear()
+    _CALIBRATION_CACHE.clear()
+
+
+def cache_sizes() -> Tuple[int, int]:
+    """``(geometry_entries, calibration_entries)`` — used by tests."""
+    return len(_GEOMETRY_CACHE), len(_CALIBRATION_CACHE)
+
+
+def resolve_calibration(cfg: Any = None, tracker: Any = None) -> Calibration:
+    """Build the active :class:`Calibration` from config/tracker.
+
+    ``calibration_source`` is authoritative (plan 10.3):
+
+    * ``valorant`` recomputes ``1 / (deg_per_count * sens)`` on every call, so a
+      sensitivity change takes effect immediately (0.23 -> 0.40 must NOT keep
+      using 62.11 c/deg, which is 42 % too much travel).
+    * ``measured`` uses the stored pair and never rescales with sens.
+    * ``analytic`` falls back to the legacy ``cm_per_rev`` model.
+    """
+    if cfg is None:
+        try:
+            from src.utils.config import config as cfg  # local import avoids a cycle
+        except Exception:  # pragma: no cover
+            cfg = None
+
+    _get = _cfg_getter(cfg)
+
+    sens = _get("in_game_sens", getattr(tracker, "in_game_sens", DEFAULT_SENS))
+    dpi = _get("mouse_dpi", getattr(tracker, "mouse_dpi", DEFAULT_DPI))
+    cm_per_rev = _get("cm_per_rev", DEFAULT_CM_PER_REV)
+    deg_per_count = _get(
+        "valorant_deg_per_count", DEFAULT_VALORANT_DEG_PER_COUNT
+    )
+    samples = _get("calibration_samples", 0)
+    r2 = _get("calibration_r2", 0.0)
+    sens_at_measurement = _get("calibration_sens_at_measurement", 0.0)
+
+    source = str(_get("calibration_source", "") or "").strip().lower()
+    measured_x = _as_positive_float(_get("counts_per_deg_x", None), 0.0)
+    measured_y = _as_positive_float(_get("counts_per_deg_y", None), 0.0)
+    has_pair = measured_x > 0.0 and measured_y > 0.0
+
+    common = dict(
+        sens=sens,
+        dpi=dpi,
+        cm_per_rev=cm_per_rev,
+        valorant_deg_per_count=deg_per_count,
+        samples=samples,
+        r2=r2,
+        sens_at_measurement=sens_at_measurement,
+    )
+
+    if source == SOURCE_VALORANT:
+        return Calibration(source=SOURCE_VALORANT, **common)
+    if source == SOURCE_MEASURED and has_pair:
+        return Calibration(
+            counts_per_deg_x=measured_x,
+            counts_per_deg_y=measured_y,
+            source=SOURCE_MEASURED,
+            **common,
+        )
+    if not source:
+        # Un-migrated caller: a complete pair is a measurement, else analytic.
+        if has_pair:
+            return Calibration(
+                counts_per_deg_x=measured_x,
+                counts_per_deg_y=measured_y,
+                source=SOURCE_MEASURED,
+                **common,
+            )
+        return Calibration(source=SOURCE_ANALYTIC, **common)
+    # Explicit analytic, or measured without a usable pair.
+    return Calibration(source=SOURCE_ANALYTIC, **common)
+
+
+def resolve_calibration_cached(cfg: Any = None, tracker: Any = None) -> Calibration:
+    """:func:`resolve_calibration`, memoised on the scalars that define it.
+
+    The signature includes the source plus every number the formula reads, so a
+    sensitivity change (valorant) or a new measurement invalidates it.
+    """
+    if cfg is None:
+        # Resolve the SAME object resolve_calibration() will read, otherwise the
+        # signature would be built from defaults while the value came from the
+        # global config (a cache that never invalidates).
+        try:
+            from src.utils.config import config as cfg  # local import avoids a cycle
+        except Exception:  # pragma: no cover
+            cfg = None
+
+    _get = _cfg_getter(cfg)
+
+    def _r(name: str, default: Any, digits: int = 9) -> Any:
+        value = _get(name, default)
+        try:
+            return round(float(value), digits)
+        except (TypeError, ValueError):
+            return str(value)
+
+    signature = (
+        str(_get("calibration_source", "") or "").strip().lower(),
+        _r("counts_per_deg_x", 0.0),
+        _r("counts_per_deg_y", 0.0),
+        _r("in_game_sens", getattr(tracker, "in_game_sens", DEFAULT_SENS)),
+        _r("mouse_dpi", getattr(tracker, "mouse_dpi", DEFAULT_DPI)),
+        _r("cm_per_rev", DEFAULT_CM_PER_REV),
+        _r("valorant_deg_per_count", DEFAULT_VALORANT_DEG_PER_COUNT),
+        _r("calibration_r2", 0.0),
+        _r("calibration_sens_at_measurement", 0.0),
+    )
+    hit = _CALIBRATION_CACHE.get(signature)
+    if hit is not None:
+        _CALIBRATION_CACHE.move_to_end(signature)
+        return hit
+    calibration = resolve_calibration(cfg=cfg, tracker=tracker)
+    return _cache_put(_CALIBRATION_CACHE, signature, calibration)
+
+
+def _collect_geometry_inputs(
+    frame: Any,
+    frame_w: Any,
+    frame_h: Any,
+    cfg: Any,
+    tracker: Any,
+) -> dict:
+    """Read every input that affects :func:`resolve_geometry` (once)."""
+    if frame_w is None or frame_h is None:
+        if frame is None:
+            frame = getattr(tracker, "_aim_frame", None) or getattr(tracker, "_last_frame", None)
+        width, height = _frame_size(frame)
+        frame_w = width if frame_w is None else frame_w
+        frame_h = height if frame_h is None else frame_h
+
+    _get = _cfg_getter(cfg)
+    capture = _resolve_capture_service(tracker)
+    capture_mode = str(_get("capture_mode", "") or "")
+    if not capture_mode and capture is not None:
+        capture_mode = str(getattr(capture, "mode", "") or "")
+
+    return {
+        "frame_w": frame_w,
+        "frame_h": frame_h,
+        "hfov_deg": _get("hfov_deg", DEFAULT_HFOV_DEG),
+        "vfov_deg": _get("vfov_deg", 0.0),
+        "capture_mode": capture_mode,
+        "udp_fov_enabled": bool(_get("udp_fov_enabled", False)),
+        "udp_fov": _get("udp_fov", None),
+        "ndi_fov_enabled": bool(_get("ndi_fov_enabled", False)),
+        "ndi_fov": _get("ndi_fov", None),
+        "capture_range_x": _get("capture_range_x", None),
+        "capture_range_y": _get("capture_range_y", None),
+        "capture_width": _get("capture_width", None),
+        "capture_height": _get("capture_height", None),
+    }
+
+
+def _geometry_signature(inputs: dict) -> tuple:
+    def _s(value: Any) -> Any:
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    return (
+        _as_positive_int(inputs["frame_w"]) or 0,
+        _as_positive_int(inputs["frame_h"]) or 0,
+        round(_as_positive_float(inputs["hfov_deg"], DEFAULT_HFOV_DEG), 6),
+        round(_as_positive_float(inputs["vfov_deg"], 0.0), 6),
+        _s(inputs["capture_mode"]),
+        bool(inputs["udp_fov_enabled"]),
+        _s(inputs["udp_fov"]),
+        bool(inputs["ndi_fov_enabled"]),
+        _s(inputs["ndi_fov"]),
+        _s(inputs["capture_range_x"]),
+        _s(inputs["capture_range_y"]),
+        _s(inputs["capture_width"]),
+        _s(inputs["capture_height"]),
+    )
+
+
 def resolve_geometry(
     frame: Any = None,
     *,
@@ -304,8 +531,9 @@ def resolve_geometry(
     frame_h: Any = None,
     cfg: Any = None,
     tracker: Any = None,
+    cached: bool = True,
 ) -> FrameGeometry:
-    """Build a :class:`FrameGeometry` for the frame currently being analysed.
+    """Build (or fetch from cache) a :class:`FrameGeometry` for the live frame.
 
     Parameters
     ----------
@@ -316,54 +544,41 @@ def resolve_geometry(
         Config-like object (defaults to the global ``src.utils.config.config``).
     tracker:
         Optional tracker; may expose ``capture``/``app.capture``.
+    cached:
+        Set ``False`` to bypass/refresh the cache.
     """
-    if frame_w is None or frame_h is None:
-        if frame is None:
-            # Fall back to the frame the tracker last analysed.
-            frame = getattr(tracker, "_aim_frame", None) or getattr(tracker, "_last_frame", None)
-        width, height = _frame_size(frame)
-        frame_w = width if frame_w is None else frame_w
-        frame_h = height if frame_h is None else frame_h
-
-    region_w = _as_positive_int(frame_w) or 0
-    region_h = _as_positive_int(frame_h) or 0
-
     if cfg is None:
         try:
             from src.utils.config import config as cfg  # local import avoids a cycle
         except Exception:  # pragma: no cover - config always importable in-app
             cfg = None
 
-    def _get(name: str, default: Any) -> Any:
-        if isinstance(cfg, dict):
-            return cfg.get(name, default)
-        if cfg is None:
-            return default
-        return getattr(cfg, name, default)
+    inputs = _collect_geometry_inputs(frame, frame_w, frame_h, cfg, tracker)
+    signature = _geometry_signature(inputs)
+    if cached:
+        hit = _GEOMETRY_CACHE.get(signature)
+        if hit is not None:
+            _GEOMETRY_CACHE.move_to_end(signature)
+            return hit
 
-    hfov_deg = _as_positive_float(_get("hfov_deg", DEFAULT_HFOV_DEG), DEFAULT_HFOV_DEG)
+    region_w = _as_positive_int(inputs["frame_w"]) or 0
+    region_h = _as_positive_int(inputs["frame_h"]) or 0
+
+    hfov_deg = _as_positive_float(inputs["hfov_deg"], DEFAULT_HFOV_DEG)
     if not (0.0 < hfov_deg < 180.0):
         hfov_deg = DEFAULT_HFOV_DEG
-    configured_vfov = _as_positive_float(_get("vfov_deg", 0.0), 0.0)
-
-    capture = _resolve_capture_service(tracker)
-    capture_mode = str(_get("capture_mode", "") or "")
-    if not capture_mode and capture is not None:
-        capture_mode = str(getattr(capture, "mode", "") or "")
-
-    configured_native_w = _as_positive_int(_get("capture_width", None))
-    configured_native_h = _as_positive_int(_get("capture_height", None))
+    configured_vfov = _as_positive_float(inputs["vfov_deg"], 0.0)
 
     crop = resolve_crop_info(
-        capture_mode=capture_mode,
-        udp_fov_enabled=bool(_get("udp_fov_enabled", False)),
-        udp_fov=_get("udp_fov", None),
-        ndi_fov_enabled=bool(_get("ndi_fov_enabled", False)),
-        ndi_fov=_get("ndi_fov", None),
-        capture_range_x=_get("capture_range_x", None),
-        capture_range_y=_get("capture_range_y", None),
-        native_w=configured_native_w,
-        native_h=configured_native_h,
+        capture_mode=inputs["capture_mode"],
+        udp_fov_enabled=inputs["udp_fov_enabled"],
+        udp_fov=inputs["udp_fov"],
+        ndi_fov_enabled=inputs["ndi_fov_enabled"],
+        ndi_fov=inputs["ndi_fov"],
+        capture_range_x=inputs["capture_range_x"],
+        capture_range_y=inputs["capture_range_y"],
+        native_w=_as_positive_int(inputs["capture_width"]),
+        native_h=_as_positive_int(inputs["capture_height"]),
     )
 
     # Default assumption: the frame we received IS the raster that ``hfov_deg``
@@ -398,7 +613,7 @@ def resolve_geometry(
 
     explicit_vfov = configured_vfov if 0.0 < configured_vfov < 180.0 else None
 
-    return geometry_from_native(
+    geometry = geometry_from_native(
         native_w=native_w,
         native_h=native_h,
         hfov_deg=hfov_deg,
@@ -407,6 +622,8 @@ def resolve_geometry(
         region_h=region_h,
         source=source,
     )
+    _cache_put(_GEOMETRY_CACHE, signature, geometry)
+    return geometry
 
 
 # ---------------------------------------------------------------------------
@@ -418,39 +635,123 @@ def resolve_geometry(
 class Calibration:
     """Maps angles to mouse counts.
 
-    ``counts_per_deg_x/y`` come either from the analytic model (sensitivity, DPI,
-    cm/rev) or from a real measurement. A measured calibration always wins.
+    ``counts_per_deg_x/y`` come from one of three EXPLICIT sources:
+
+    ``valorant``
+        ``1 / (0.07 * sens)`` — the Valorant preset. Recomputed live when the
+        sensitivity changes, so a flick never silently loses 40 % of its travel.
+    ``measured``
+        A real impulse/shift measurement. Invariant under sensitivity; carries
+        ``samples``/``r2`` provenance and the sensitivity it was taken at.
+    ``analytic``
+        The legacy ``cm_per_rev`` model. Kept for compatibility, always flagged
+        as untrusted in the UI.
     """
 
     counts_per_deg_x: Optional[float] = None
     counts_per_deg_y: Optional[float] = None
-    source: str = "analytic"
+    #: Empty means "caller did not declare one": a complete supplied pair is then
+    #: treated as a measurement (back-compat with the pre-provenance API), and
+    #: anything less falls back to the analytic model. ``resolve_calibration``
+    #: always passes an explicit source read from the config.
+    source: str = ""
     sens: float = DEFAULT_SENS
     dpi: float = DEFAULT_DPI
     cm_per_rev: float = DEFAULT_CM_PER_REV
+    valorant_deg_per_count: float = DEFAULT_VALORANT_DEG_PER_COUNT
+    samples: int = 0
+    r2: float = 0.0
+    sens_at_measurement: float = 0.0
 
     def __post_init__(self) -> None:
-        measured_x = _as_positive_float(self.counts_per_deg_x, 0.0)
-        measured_y = _as_positive_float(self.counts_per_deg_y, 0.0)
-        self.counts_per_deg_x = measured_x if measured_x > 0.0 else None
-        self.counts_per_deg_y = measured_y if measured_y > 0.0 else None
+        supplied_x = _as_positive_float(self.counts_per_deg_x, 0.0)
+        supplied_y = _as_positive_float(self.counts_per_deg_y, 0.0)
         self.sens = max(0.01, _as_positive_float(self.sens, DEFAULT_SENS) or DEFAULT_SENS)
         self.dpi = max(1.0, _as_positive_float(self.dpi, DEFAULT_DPI) or DEFAULT_DPI)
         self.cm_per_rev = max(
             0.01, _as_positive_float(self.cm_per_rev, DEFAULT_CM_PER_REV) or DEFAULT_CM_PER_REV
         )
+        self.valorant_deg_per_count = max(
+            0.001,
+            _as_positive_float(self.valorant_deg_per_count, DEFAULT_VALORANT_DEG_PER_COUNT)
+            or DEFAULT_VALORANT_DEG_PER_COUNT,
+        )
+        try:
+            self.samples = max(0, int(self.samples or 0))
+        except (TypeError, ValueError):
+            self.samples = 0
+        try:
+            self.r2 = max(0.0, min(1.0, float(self.r2 or 0.0)))
+        except (TypeError, ValueError):
+            self.r2 = 0.0
+        self.sens_at_measurement = _as_positive_float(self.sens_at_measurement, 0.0)
 
-        # A complete pair of supplied scales IS a measurement. An incomplete pair
-        # is not usable, so both axes fall back to the analytic model together
-        # (a half-measured calibration would silently skew one axis only).
-        if self.counts_per_deg_x is not None and self.counts_per_deg_y is not None:
-            self.source = "measured"
+        source = str(self.source or "").strip().lower()
+        if source not in (SOURCE_VALORANT, SOURCE_MEASURED, SOURCE_ANALYTIC):
+            source = ""
+
+        # A complete supplied pair IS a measurement unless the caller named a
+        # preset explicitly. An incomplete pair is not usable, so both axes fall
+        # back together (a half-measured calibration would skew one axis only).
+        has_pair = supplied_x > 0.0 and supplied_y > 0.0
+        if source == SOURCE_VALORANT:
+            self._apply_valorant()
+            return
+        if source == SOURCE_MEASURED:
+            if has_pair:
+                self.counts_per_deg_x = supplied_x
+                self.counts_per_deg_y = supplied_y
+                self.source = SOURCE_MEASURED
+                return
+            # Claimed measured but no pair: fall through to analytic rather than
+            # pretend the constants are a measurement.
+        elif source == "" and has_pair:
+            self.counts_per_deg_x = supplied_x
+            self.counts_per_deg_y = supplied_y
+            self.source = SOURCE_MEASURED
             return
 
-        self.source = "analytic"
+        self.source = SOURCE_ANALYTIC
         analytic = self.analytic_counts_per_deg()
         self.counts_per_deg_x = analytic
         self.counts_per_deg_y = analytic
+
+    def _apply_valorant(self) -> None:
+        cpd = self.valorant_counts_per_deg(self.sens)
+        self.counts_per_deg_x = cpd
+        self.counts_per_deg_y = cpd
+        self.source = SOURCE_VALORANT
+
+    # -- source helpers -----------------------------------------------------
+    def valorant_counts_per_deg(self, sens: Optional[float] = None) -> float:
+        """Valorant scale for ``sens`` (defaults to this calibration's sens)."""
+        value = self.sens if sens is None else _as_positive_float(sens, self.sens)
+        value = max(0.01, float(value))
+        return 1.0 / (self.valorant_deg_per_count * value)
+
+    def rebased(self, sens: Optional[float] = None) -> "Calibration":
+        """Return this calibration at a new sensitivity.
+
+        Only ``valorant`` follows sensitivity (that IS its definition). A
+        measurement is a physical fact and must not be rescaled.
+        """
+        if self.source != SOURCE_VALORANT or sens is None:
+            return self
+        return Calibration(
+            source=SOURCE_VALORANT,
+            sens=sens,
+            dpi=self.dpi,
+            cm_per_rev=self.cm_per_rev,
+            valorant_deg_per_count=self.valorant_deg_per_count,
+        )
+
+    def cm_per_360(self) -> float:
+        """Physical mouse travel for one 360 turn at the active scale."""
+        cpd = _as_positive_float(self.counts_per_deg_x, 0.0)
+        if cpd <= 0.0:
+            return 0.0
+        counts_360 = cpd * 360.0
+        return counts_360 / (self.dpi / 2.54)
 
     # -- analytic fallback --------------------------------------------------
     @property
@@ -464,7 +765,19 @@ class Calibration:
 
     @property
     def is_measured(self) -> bool:
-        return self.source == "measured"
+        return self.source == SOURCE_MEASURED
+
+    @property
+    def is_valorant(self) -> bool:
+        return self.source == SOURCE_VALORANT
+
+    @property
+    def is_analytic(self) -> bool:
+        return self.source == SOURCE_ANALYTIC
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.source == SOURCE_ANALYTIC
 
     @property
     def divergence_from_analytic(self) -> float:
@@ -474,8 +787,44 @@ class Calibration:
             return 0.0
         return (float(self.counts_per_deg_x) - analytic) / analytic
 
+    @property
+    def divergence_from_valorant(self) -> float:
+        """Relative difference between the active scale and the Valorant preset."""
+        valorant = self.valorant_counts_per_deg(self.sens)
+        if valorant <= 0:
+            return 0.0
+        return (float(self.counts_per_deg_x) / valorant) - 1.0
+
+    def sens_drift(self) -> float:
+        """Relative change of in-game sensitivity since a measurement was taken."""
+        if self.sens_at_measurement <= 0:
+            return 0.0
+        return (self.sens / self.sens_at_measurement) - 1.0
+
     def needs_recalibration_warning(self) -> bool:
-        return self.is_measured and abs(self.divergence_from_analytic) > MEASURED_DIVERGENCE_WARN
+        """Source-specific "this scale is suspicious" predicate."""
+        if self.source == SOURCE_MEASURED:
+            # Sensitivity moved since the measurement -> re-measure.
+            if abs(self.sens_drift()) > SENS_DRIFT_WARN:
+                return True
+            # A stored R2 below the acceptance threshold means noisy data.
+            if self.r2 > 0.0 and self.r2 < 0.99:
+                return True
+            # A measurement far from the analytic model is worth a second look.
+            return abs(self.divergence_from_analytic) > MEASURED_DIVERGENCE_WARN
+        if self.source == SOURCE_VALORANT:
+            return not (0.05 <= self.sens <= 5.0)
+        # Analytic is legacy by definition: always warn.
+        return True
+
+    def describe(self) -> str:
+        return (
+            f"Calibration(source={self.source}, "
+            f"counts/deg=({float(self.counts_per_deg_x):.4f}, "
+            f"{float(self.counts_per_deg_y):.4f}), "
+            f"sens={self.sens:.4f}, dpi={self.dpi:.1f}, "
+            f"samples={self.samples}, r2={self.r2:.3f})"
+        )
 
     # -- conversion ---------------------------------------------------------
     def deg_to_counts(self, dx_deg: float, dy_deg: float) -> Tuple[float, float]:
@@ -493,48 +842,6 @@ class Calibration:
     def px_to_counts(self, geometry: FrameGeometry, dx: float, dy: float) -> Tuple[float, float]:
         deg_x, deg_y = geometry.px_to_deg(dx, dy)
         return self.deg_to_counts(deg_x, deg_y)
-
-    def describe(self) -> str:
-        return (
-            f"Calibration(source={self.source}, "
-            f"counts/deg=({float(self.counts_per_deg_x):.4f}, "
-            f"{float(self.counts_per_deg_y):.4f}), "
-            f"sens={self.sens:.4f}, dpi={self.dpi:.1f})"
-        )
-
-
-def resolve_calibration(cfg: Any = None, tracker: Any = None) -> Calibration:
-    """Build the active :class:`Calibration` from config/tracker."""
-    if cfg is None:
-        try:
-            from src.utils.config import config as cfg
-        except Exception:  # pragma: no cover
-            cfg = None
-
-    def _get(name: str, default: Any) -> Any:
-        if isinstance(cfg, dict):
-            return cfg.get(name, default)
-        if cfg is None:
-            return default
-        return getattr(cfg, name, default)
-
-    sens = _get("in_game_sens", getattr(tracker, "in_game_sens", DEFAULT_SENS))
-    dpi = _get("mouse_dpi", getattr(tracker, "mouse_dpi", DEFAULT_DPI))
-    cm_per_rev = _get("cm_per_rev", DEFAULT_CM_PER_REV)
-
-    measured_x = _as_positive_float(_get("counts_per_deg_x", None), 0.0)
-    measured_y = _as_positive_float(_get("counts_per_deg_y", None), 0.0)
-
-    if measured_x > 0.0 and measured_y > 0.0:
-        return Calibration(
-            counts_per_deg_x=measured_x,
-            counts_per_deg_y=measured_y,
-            source="measured",
-            sens=sens,
-            dpi=dpi,
-            cm_per_rev=cm_per_rev,
-        )
-    return Calibration(sens=sens, dpi=dpi, cm_per_rev=cm_per_rev)
 
 
 def px_to_counts(
@@ -554,7 +861,7 @@ def px_to_counts(
     if geometry is None:
         geometry = resolve_geometry(frame=frame, cfg=cfg, tracker=tracker)
     if calibration is None:
-        calibration = resolve_calibration(cfg=cfg, tracker=tracker)
+        calibration = resolve_calibration_cached(cfg=cfg, tracker=tracker)
     return calibration.px_to_counts(geometry, dx, dy)
 
 
@@ -585,7 +892,9 @@ def legacy_exact_counts(
         region_w=width,
         region_h=height,
     )
-    return Calibration(sens=sens, dpi=dpi).px_to_counts(geometry, dx, dy)
+    return Calibration(source=SOURCE_ANALYTIC, sens=sens, dpi=dpi).px_to_counts(
+        geometry, dx, dy
+    )
 
 
 #: Engines for the CLOSED-LOOP modes (Normal/PID/NCAF/WindMouse/Bezier).
@@ -622,7 +931,9 @@ def closed_loop_counts(
     """
     if str(engine or "").strip().lower() == ENGINE_V2:
         if calibration is None:
-            calibration = Calibration(sens=sens, dpi=dpi, cm_per_rev=cm_per_rev)
+            calibration = Calibration(
+                source=SOURCE_ANALYTIC, sens=sens, dpi=dpi, cm_per_rev=cm_per_rev
+            )
         if geometry is None:
             geometry = FrameGeometry(
                 frame_w=1920,
@@ -633,7 +944,9 @@ def closed_loop_counts(
         return calibration.px_to_counts(geometry, dx, dy)
 
     # Legacy path: identical arithmetic to the retired calculate_movement().
-    deg_per_count = Calibration(sens=sens, dpi=dpi, cm_per_rev=cm_per_rev).deg_per_count
+    deg_per_count = Calibration(
+        source=SOURCE_ANALYTIC, sens=sens, dpi=dpi, cm_per_rev=cm_per_rev
+    ).deg_per_count
     return float(dx) * deg_per_count, float(dy) * deg_per_count
 
 

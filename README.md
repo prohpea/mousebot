@@ -10,7 +10,7 @@
 
   <br><br>
 
-  [![Version](https://img.shields.io/badge/version-2.0.0--PRO-10B981?style=for-the-badge&labelColor=101820)](version.json)
+  [![Version](https://img.shields.io/badge/version-2.1.0--PRO-10B981?style=for-the-badge&labelColor=101820)](version.json)
   [![Python](https://img.shields.io/badge/Python-3.11--3.13-FFD85E?style=for-the-badge&logo=python&logoColor=white&labelColor=101820)](https://www.python.org/downloads/)
   [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-58A6FF?style=for-the-badge&logo=windows&logoColor=white&labelColor=101820)](#系統需求)
   [![License](https://img.shields.io/badge/License-Custom-E46AC8?style=for-the-badge&labelColor=101820)](LICENSE)
@@ -60,6 +60,8 @@ CVM ColorBot 透過 OpenCV 與 HSV 色彩範圍進行即時目標辨識，將影
 ### 主要功能
 
 - **雙組追蹤設定** — 主、副 Aimbot 可分別配置模式、按鍵與參數。
+- **Flick V2 專用頁** — 主、副通道各有 Gain、Settle Delay、Max Counts、Budget、Iterations、Deadzone 與進階 Switch Radius；即時顯示有效步數與診斷。
+- **Calibration — Valorant** — 內建 `0.07 °/count @ sens 1.0` 預設（sens 0.23 → 62.112 counts/deg）、cm/360 交叉驗證、實測 5 點/軸 + R² ≥ 0.99 的 provenance（來源／樣本／R²）。
 - **Triggerbot** — 支援延遲、按住時間、連發、冷卻與辨識確認設定。
 - **RCS** — 可調整後座力補償速度、啟動延遲與快速點擊門檻。
 - **Anti-Smoke** — 過濾煙霧等低可信度區域，降低錯誤鎖定。

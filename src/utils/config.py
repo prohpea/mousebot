@@ -42,6 +42,11 @@ class Config:
         self.aim_latest_frame_priority = True
         self.enable_target_temporal_smoothing = True
         self.move_queue_merge_batch = 4
+        # Dispatch the move queue PER TAG (calib exclusive, flick whole, track/rcs
+        # batched inside their own tag). False restores the old cross-tag merge.
+        self.move_queue_per_tag_dispatch = True
+        # Config schema (NOT the app version): bumped when keys/migrations change.
+        self.config_schema = 3
         
         # --- Custom HSV Settings ---
         self.custom_hsv_min_h = 0    # H 鏈€灏忓€?(0-179)
@@ -129,10 +134,23 @@ class Config:
         # Bezier). "legacy" preserves existing speed/smoothing tuning; "v2" uses
         # physical counts from aim_math and needs retuning. Rollback flag.
         self.aim_engine = "legacy"
-        self.counts_per_deg_x = 0.0    # measured calibration (0 = not measured)
-        self.counts_per_deg_y = 0.0    # measured calibration (0 = not measured)
+        self.counts_per_deg_x = 0.0    # measured/preset calibration (0 = not measured)
+        self.counts_per_deg_y = 0.0    # measured/preset calibration (0 = not measured)
         self.calibration_r2 = 0.0      # quality of the stored measurement
         self.calibration_samples = 0   # how many points produced it
+        # --- Calibration provenance (schema 3) ---------------------------
+        # ``calibration_source`` is EXPLICIT: it decides which formula is used,
+        # so it is never inferred again at resolve time.
+        #   valorant : counts_per_deg = 1 / (0.07 * sens), recomputed live
+        #   measured : measured pair, invariant under sens (provenance + R2)
+        #   analytic : legacy 54.54 cm/rev model (marked LEGACY in the UI)
+        # ``""`` means UNDECIDED: the migration decides, so a schema-2 file that
+        # simply lacks the key is not mistaken for a fresh default.
+        self.calibration_source = ""
+        self.valorant_deg_per_count = 0.07   # yaw per count at in-game sens 1.0
+        self.valorant_sens_at_calibration = 0.0
+        self.calibration_sens_at_measurement = 0.0
+        self.calibration_updated_at = ""
 
         self.tbfovsize = 5 
         self.trigger_ads_fov_enabled = False
@@ -271,9 +289,15 @@ class Config:
         self.flick_gain = 1.0
         self.flick_max_counts = 6000.0    # per-impulse budget, in counts
         self.flick_max_iterations = 4
-        self.flick_budget_ms = 120.0      # convergence budget, not a blind lockout
+        self.flick_budget_ms = 240.0      # convergence budget, not a blind lockout
         self.flick_settle_ms = 70.0        # wait for camera pipeline before measuring again
         self.flick_deadzone_px = 1.5
+        # A target moving further than this is a DIFFERENT target (the key is a
+        # screen position that legitimately drifts while the crosshair converges).
+        self.flick_switch_radius_px = 64
+        # Publish per-frame Flick diagnostics to the UI (off by default: no dict
+        # allocation on the hot path unless somebody is looking at it).
+        self.flick_telemetry_enabled = False
         self.flick_strength_x = 1.0       # legacy, migrated into flick_gain
         self.flick_strength_y = 1.0       # legacy, migrated into flick_gain
 
@@ -286,9 +310,10 @@ class Config:
         self.flick_gain_sec = 1.0
         self.flick_max_counts_sec = 6000.0
         self.flick_max_iterations_sec = 4
-        self.flick_budget_ms_sec = 120.0
+        self.flick_budget_ms_sec = 240.0
         self.flick_settle_ms_sec = 70.0
         self.flick_deadzone_px_sec = 2.0
+        self.flick_switch_radius_px_sec = 64
         self.flick_strength_x_sec = 1.0   # legacy, migrated into flick_gain_sec
         self.flick_strength_y_sec = 1.0   # legacy, migrated into flick_gain_sec
         self.sec_flick_cooldown_ms = 120.0  # legacy, now an alias of flick_budget_ms_sec
@@ -407,6 +432,11 @@ class Config:
         self.legacy_ui_mode = False
         self.ui_theme = "nord"
         self.language = "en"
+        # Pro/Simple is a real, persisted preference now (it used to be read and
+        # written by the UI but absent from the schema, so it reset every launch).
+        self.ui_pro_mode = False
+        # Preview is a debug aid, not a 144 Hz render target: cap its FPS.
+        self.ui_preview_max_fps = 30
         
         # --- Capture Settings ---
         self.toggle_feedback_method = "udp"  # "udp" or "zmq"
@@ -476,6 +506,15 @@ class Config:
         
         # 杓夊叆淇濆瓨鐨勯厤缃紙濡傛灉瀛樺湪锛?
         self.load_from_file()
+        # A fresh install has no config.json, so from_dict()/migration never ran and
+        # ``calibration_source`` is still "" (undecided). Fresh default is the
+        # Valorant preset, so materialise its scale instead of leaving 0 c/deg.
+        if not self.calibration_source:
+            self.calibration_source = "valorant"
+        if self.calibration_source == "valorant" and not self.measured_pair_valid():
+            _cpd = self.valorant_counts_per_deg()
+            self.counts_per_deg_x = float(_cpd)
+            self.counts_per_deg_y = float(_cpd)
     
     def to_dict(self):
         """灏囬厤缃綁鎻涚偤瀛楀吀 - 鍖呭惈鎵€鏈夎ō缃?"""
@@ -514,6 +553,10 @@ class Config:
             "aim_latest_frame_priority": self.aim_latest_frame_priority,
             "enable_target_temporal_smoothing": self.enable_target_temporal_smoothing,
             "move_queue_merge_batch": self.move_queue_merge_batch,
+            "move_queue_per_tag_dispatch": bool(
+                getattr(self, "move_queue_per_tag_dispatch", True)
+            ),
+            "config_schema": int(getattr(self, "config_schema", 3)),
             
             # Custom HSV Settings
             "custom_hsv_min_h": self.custom_hsv_min_h,
@@ -719,6 +762,15 @@ class Config:
             "counts_per_deg_y": self.counts_per_deg_y,
             "calibration_r2": self.calibration_r2,
             "calibration_samples": self.calibration_samples,
+            "calibration_source": str(getattr(self, "calibration_source", "analytic")),
+            "valorant_deg_per_count": float(getattr(self, "valorant_deg_per_count", 0.07)),
+            "valorant_sens_at_calibration": float(
+                getattr(self, "valorant_sens_at_calibration", 0.0)
+            ),
+            "calibration_sens_at_measurement": float(
+                getattr(self, "calibration_sens_at_measurement", 0.0)
+            ),
+            "calibration_updated_at": str(getattr(self, "calibration_updated_at", "")),
             "max_speed": self.max_speed,
 
             # Flick Aim (v2 closed loop)
@@ -729,6 +781,10 @@ class Config:
             "flick_budget_ms": self.flick_budget_ms,
             "flick_settle_ms": self.flick_settle_ms,
             "flick_deadzone_px": self.flick_deadzone_px,
+            "flick_switch_radius_px": int(getattr(self, "flick_switch_radius_px", 64)),
+            "flick_telemetry_enabled": bool(
+                getattr(self, "flick_telemetry_enabled", False)
+            ),
             # legacy aliases kept for backward-compatible files
             "flick_strength_x": self.flick_strength_x,
             "flick_strength_y": self.flick_strength_y,
@@ -745,6 +801,9 @@ class Config:
             "flick_budget_ms_sec": self.flick_budget_ms_sec,
             "flick_settle_ms_sec": self.flick_settle_ms_sec,
             "flick_deadzone_px_sec": self.flick_deadzone_px_sec,
+            "flick_switch_radius_px_sec": int(
+                getattr(self, "flick_switch_radius_px_sec", 64)
+            ),
             "flick_strength_x_sec": self.flick_strength_x_sec,
             "flick_strength_y_sec": self.flick_strength_y_sec,
             "sec_flick_cooldown_ms": getattr(self, "sec_flick_cooldown_ms", 120.0),
@@ -852,6 +911,8 @@ class Config:
             "legacy_ui_mode": self.legacy_ui_mode,
             "ui_theme": self.ui_theme,
             "language": self.language,
+            "ui_pro_mode": bool(getattr(self, "ui_pro_mode", False)),
+            "ui_preview_max_fps": int(getattr(self, "ui_preview_max_fps", 30)),
             
             # Capture & Network Feedback Settings
             "toggle_feedback_method": self.toggle_feedback_method,
@@ -1309,6 +1370,19 @@ class Config:
         else:
             self.ui_collapsible_states = {}
         self.legacy_ui_mode = bool(getattr(self, "legacy_ui_mode", False))
+        self.ui_pro_mode = bool(getattr(self, "ui_pro_mode", False))
+        self.flick_telemetry_enabled = bool(getattr(self, "flick_telemetry_enabled", False))
+        self.move_queue_per_tag_dispatch = bool(
+            getattr(self, "move_queue_per_tag_dispatch", True)
+        )
+        try:
+            self.ui_preview_max_fps = max(1, min(144, int(getattr(self, "ui_preview_max_fps", 30))))
+        except Exception:
+            self.ui_preview_max_fps = 30
+        try:
+            self.config_schema = max(1, int(getattr(self, "config_schema", 3)))
+        except Exception:
+            self.config_schema = 3
         theme = str(getattr(self, "ui_theme", "nord")).strip().lower()
         if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic"}:
             theme = "classic" if self.legacy_ui_mode else "nord"
@@ -1456,6 +1530,8 @@ class Config:
         _clamp("flick_settle_ms_sec", 70.0, 0.0, 500.0)
         _clamp("flick_deadzone_px", 1.5, 0.0, 20.0)
         _clamp("flick_deadzone_px_sec", 2.0, 0.0, 20.0)
+        _clamp_int("flick_switch_radius_px", 64, 16, 256)
+        _clamp_int("flick_switch_radius_px_sec", 64, 16, 256)
         _clamp("max_speed", 6000.0, 1.0, 20000.0)
         _clamp("hfov_deg", 103.0, 40.0, 140.0)
         _clamp("vfov_deg", 0.0, 0.0, 140.0)
@@ -1493,6 +1569,153 @@ class Config:
             )
         _clamp("calibration_r2", 0.0, 0.0, 1.0)
         _clamp_int("calibration_samples", 0, 0, 10000)
+        self._migrate_calibration_source(source)
+
+    # ------------------------------------------------------------------
+    # Calibration provenance (schema 3)
+    # ------------------------------------------------------------------
+    _CALIBRATION_SOURCES = ("valorant", "measured", "analytic")
+
+    def valorant_counts_per_deg(self, sens=None):
+        """``1 / (deg_per_count * sens)`` for the Valorant preset."""
+        try:
+            deg_per_count = float(getattr(self, "valorant_deg_per_count", 0.07) or 0.07)
+        except Exception:
+            deg_per_count = 0.07
+        deg_per_count = max(0.001, deg_per_count)
+        if sens is None:
+            try:
+                sens = float(getattr(self, "in_game_sens", 0.23) or 0.23)
+            except Exception:
+                sens = 0.23
+        sens = max(0.01, float(sens))
+        return 1.0 / (deg_per_count * sens)
+
+    def measured_pair_valid(self):
+        """True when BOTH axes carry a usable measured scale."""
+        try:
+            x = float(getattr(self, "counts_per_deg_x", 0.0) or 0.0)
+            y = float(getattr(self, "counts_per_deg_y", 0.0) or 0.0)
+        except Exception:
+            return False
+        return x > 0.0 and y > 0.0
+
+    def _migrate_calibration_source(self, source):
+        """Decide ``calibration_source`` for a schema-2 config (plan 10.2/5.7).
+
+        The old config stored ``counts_per_deg = 62.11`` while claiming
+        ``samples = 0, r2 = 0`` and displaying ``MEASURED``. 62.11 is not a
+        measurement: it is the Valorant preset at sens 0.23. It is recognised
+        within 1 % and kept as a *preset*. Anything else without the samples/R2
+        to back it is demoted to ``analytic`` instead of being trusted.
+        """
+        def _clamp(fname, default, lower, upper):
+            try:
+                value = float(getattr(self, fname, default))
+            except Exception:
+                value = float(default)
+            if value != value or value in (float("inf"), float("-inf")):
+                value = float(default)
+            setattr(self, fname, max(float(lower), min(float(upper), value)))
+
+        _clamp("valorant_deg_per_count", 0.07, 0.01, 0.2)
+        _clamp("valorant_sens_at_calibration", 0.0, 0.0, 10.0)
+        _clamp("calibration_sens_at_measurement", 0.0, 0.0, 10.0)
+
+        if isinstance(source, dict) and "counts_per_deg_x" not in source and "calibration_source" not in source:
+            self.calibration_source = "analytic"
+            self.counts_per_deg_x = 0.0
+            self.counts_per_deg_y = 0.0
+            return
+
+        explicit = None
+        if isinstance(source, dict) and source.get("calibration_source") is not None:
+            explicit = str(source.get("calibration_source")).strip().lower()
+        elif not isinstance(source, dict) and getattr(self, "calibration_source", ""):
+            # Only trust the attribute when there is no payload at all (a Config
+            # built purely from defaults). A schema-2 dict that lacks the key must
+            # NOT be read as "explicitly valorant".
+            explicit = str(getattr(self, "calibration_source")).strip().lower()
+
+        if explicit in self._CALIBRATION_SOURCES:
+            # Already versioned: only re-validate consistency.
+            if explicit == "measured" and not self.measured_pair_valid():
+                log_print(
+                    "[Config] WARN calibration_source=measured but no measured pair "
+                    "is stored; falling back to analytic."
+                )
+                explicit = "analytic"
+            if explicit == "valorant" and not self.measured_pair_valid():
+                # A preset is always derivable from sens; make sure the stored
+                # pair agrees with it so the UI readout is truthful.
+                cpd = self.valorant_counts_per_deg()
+                self.counts_per_deg_x = float(cpd)
+                self.counts_per_deg_y = float(cpd)
+            self.calibration_source = explicit
+        elif self.measured_pair_valid():
+            valorant = self.valorant_counts_per_deg()
+            ratio = (float(self.counts_per_deg_x) / valorant) if valorant > 0 else 0.0
+            samples = int(getattr(self, "calibration_samples", 0) or 0)
+            r2 = float(getattr(self, "calibration_r2", 0.0) or 0.0)
+            if abs(ratio - 1.0) <= 0.01:
+                # Matches the Valorant preset within 1 %: it is a PRESET.
+                self.calibration_source = "valorant"
+                self.valorant_sens_at_calibration = float(
+                    getattr(self, "in_game_sens", 0.23) or 0.23
+                )
+                log_print(
+                    f"[Config] calibration {float(self.counts_per_deg_x):.4f} c/deg "
+                    f"matches the Valorant preset at sens "
+                    f"{self.valorant_sens_at_calibration:.3f}; source=valorant"
+                )
+            elif samples >= 5 and r2 >= 0.99:
+                self.calibration_source = "measured"
+            else:
+                # Unbacked magic number (e.g. the legacy 285.28): not a measurement.
+                self.calibration_source = "analytic"
+                self.counts_per_deg_x = 0.0
+                self.counts_per_deg_y = 0.0
+                log_print(
+                    "[Config] WARN stored counts_per_deg has no provenance "
+                    f"(samples={samples}, r2={r2:.3f}); demoted to analytic. "
+                    "Run the Calibration panel to measure it."
+                )
+        else:
+            # No usable pair at all. A schema-2 file is treated as legacy analytic
+            # so an old file does not silently start as "Valorant preset"; a fresh
+            # Config() default stays "valorant".
+            saved = str(getattr(self, "calibration_source", "") or "")
+            if isinstance(source, dict) and source:
+                self.calibration_source = "analytic"
+            elif saved in self._CALIBRATION_SOURCES:
+                self.calibration_source = saved
+            else:
+                self.calibration_source = "valorant"
+            if self.calibration_source == "valorant":
+                cpd = self.valorant_counts_per_deg()
+                self.counts_per_deg_x = float(cpd)
+                self.counts_per_deg_y = float(cpd)
+
+        if self.calibration_source == "measured":
+            # A measurement is invariant under sensitivity; what it must remember
+            # is the sensitivity it was taken at, so a later change can warn.
+            if not getattr(self, "calibration_sens_at_measurement", 0.0):
+                self.calibration_sens_at_measurement = float(
+                    getattr(self, "in_game_sens", 0.23) or 0.23
+                )
+        def _clamp(fname, default, lower, upper):
+            try:
+                value = float(getattr(self, fname, default))
+            except Exception:
+                value = float(default)
+            if value != value or value in (float("inf"), float("-inf")):
+                value = float(default)
+            setattr(self, fname, max(float(lower), min(float(upper), value)))
+
+        _clamp("valorant_deg_per_count", 0.07, 0.01, 0.2)
+        _clamp("valorant_sens_at_calibration", 0.0, 0.0, 10.0)
+        _clamp("calibration_sens_at_measurement", 0.0, 0.0, 10.0)
+        self.config_schema = 3
 
     def save_to_file(self, filename="config.json"):
         """Save configuration atomically."""

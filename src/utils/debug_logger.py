@@ -30,6 +30,10 @@ _LEVEL_ORDER = {
 
 _log_buffer = deque(maxlen=5000)
 _log_lock = Lock()
+#: Monotonic counter bumped on every appended entry. The Telemetry tab compares
+#: it against the version it last rendered instead of diffing 500 formatted
+#: strings ten times a second (plan H2).
+_log_version = 0
 
 _console_enabled = True
 _console_level = LOG_TYPE_INFO
@@ -55,8 +59,10 @@ def _should_echo(level: str) -> bool:
 
 
 def _append_entry(entry: dict):
+    global _log_version
     with _log_lock:
         _log_buffer.append(entry)
+        _log_version += 1
 
 
 def _format_console_line(entry: dict) -> str:
@@ -192,6 +198,14 @@ def log_print(*args, sep: str = " ", end: str = "\n", file=None, flush: bool = F
 
 
 def log_move(dx: float, dy: float, source: str = "Aimbot"):
+    """Record one mouse move (only when somebody is actually going to read it).
+
+    At 144-200 FPS this used to append 300-400 entries per second on every run.
+    Flick has its own diagnostics dictionary, so the log is only useful for
+    the Telemetry tab or an explicit debug session (plan H13).
+    """
+    if not _move_logging_enabled():
+        return
     _append_entry(
         {
             "type": LOG_TYPE_MOVE,
@@ -203,6 +217,37 @@ def log_move(dx: float, dy: float, source: str = "Aimbot"):
             "message": f"[{source}] Move: dx={dx:.2f}, dy={dy:.2f}",
         }
     )
+
+
+def _move_logging_enabled() -> bool:
+    """Read the gate flags without importing the config module at import time."""
+    global _move_logging_enabled_cached
+    try:
+        from src.utils.config import config
+
+        if bool(getattr(config, "flick_telemetry_enabled", False)):
+            return True
+        if bool(getattr(config, "debug_move_logging", False)):
+            return True
+    except Exception:
+        pass
+    return bool(_move_logging_enabled_cached)
+
+
+#: Set by ``set_move_logging`` for callers that do not use the config object.
+_move_logging_enabled_cached = False
+
+
+def set_move_logging(enabled: bool):
+    """Force move logging on/off (tests, debug sessions)."""
+    global _move_logging_enabled_cached
+    _move_logging_enabled_cached = bool(enabled)
+
+
+def get_log_version() -> int:
+    """Monotonic entry counter (see ``_log_version``)."""
+    with _log_lock:
+        return _log_version
 
 
 def log_click(source: str = "Triggerbot"):
@@ -223,8 +268,10 @@ def get_recent_logs(count: int = 100) -> list:
 
 
 def clear_logs():
+    global _log_version
     with _log_lock:
         _log_buffer.clear()
+        _log_version += 1
 
 
 def get_log_count() -> int:

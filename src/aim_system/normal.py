@@ -26,7 +26,7 @@ from .mode_dispatcher import dispatch as dispatch_aim_mode, get_mode_caps, norma
 from .aim_math import (
     closed_loop_counts,
     legacy_exact_counts,
-    resolve_calibration,
+    resolve_calibration_cached,
     resolve_geometry,
 )
 
@@ -169,7 +169,7 @@ def _tracking_counts(dx, dy, tracker, is_sec=False):
         dpi=dpi,
         engine=engine,
         geometry=geometry,
-        calibration=resolve_calibration(cfg=config, tracker=tracker),
+        calibration=resolve_calibration_cached(cfg=config, tracker=tracker),
     )
 
 
@@ -195,7 +195,7 @@ def _flick_style_counts(dx, dy, tracker, is_sec=False):
             dy,
             engine="v2",
             geometry=geometry,
-            calibration=resolve_calibration(cfg=config, tracker=tracker),
+            calibration=resolve_calibration_cached(cfg=config, tracker=tracker),
         )
     sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
@@ -227,13 +227,13 @@ def compute_silent_delta(dx, dy, multiplier, max_speed):
 
 
 def _flush_move_queue(tracker):
-    """Flush pending move queue items when needed."""
-    if tracker.move_queue.full():
-        try:
-            while not tracker.move_queue.empty():
-                tracker.move_queue.get_nowait()
-        except queue.Empty:
-            pass
+    """Deprecated no-op — kept as a shim for external scripts.
+
+    The queue is drained and dispatched by ``AimTracker._process_move_queue``;
+    flushing it from the aim path could silently discard a flick impulse that had
+    not been sent yet.
+    """
+    return None
 
 
 # =====================================================
@@ -947,16 +947,20 @@ def _apply_bezier_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 # 涓昏搴﹀櫒
 # =====================================================
 
-def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False, frame=None, target_id=None):
+def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False, frame=None, target_id=None, caps=None):
     """
     Route one aim decision to its mode handler.
 
     ``frame`` and ``target_id`` are passed through only to modes that declare a
     convergence budget (Flick), so geometry-aware conversion and target-switch
     detection work without changing the other handlers' signatures.
+
+    ``caps`` lets the caller pass the capability dict it already resolved for
+    this frame instead of paying for another ``get_mode_caps`` copy (plan H8).
     """
     mode_name = normalize_mode(mode)
-    caps = get_mode_caps(mode_name)
+    if caps is None:
+        caps = get_mode_caps(mode_name)
     kwargs = {}
     if caps.get("uses_budget"):
         kwargs["frame"] = frame
@@ -1094,6 +1098,14 @@ def process_normal_mode(
     aim_enabled_sec = getattr(config, "enableaim_sec", False)
     selected_btn_sec = getattr(config, "selected_mouse_button_sec", None)
     activation_type_sec = getattr(config, "aimbot_activation_type_sec", "hold_enable")
+
+    # A calibration session owns the mouse: any aim command emitted now would
+    # either contaminate the impulse measurement or be dropped by the queue, so
+    # both channels are suppressed for the duration of the session (plan 7.4).
+    calibration_session = bool(getattr(tracker, "calibration_session", False))
+    if calibration_session:
+        aim_enabled = False
+        aim_enabled_sec = False
     
     center_x = frame.xres / 2.0
     center_y = frame.yres / 2.0
@@ -1120,6 +1132,9 @@ def process_normal_mode(
     # 取得各自的 Operation Mode
     mode_main = getattr(config, "mode", "Normal")
     mode_sec = getattr(config, "mode_sec", "Normal")
+    # Resolve capabilities ONCE per frame per channel (plan H8).
+    caps_main = get_mode_caps(mode_main)
+    caps_sec = get_mode_caps(mode_sec)
     
     # 處理 RCS（每幀調用，檢查是否應該啟動）
     # Its pull goes through the shared queue with the "rcs" tag so it cannot race
@@ -1162,7 +1177,6 @@ def process_normal_mode(
                         # RCS / Y-release must not silently zero the vertical
                         # error of a one-shot flick: that guarantees a miss that
                         # nothing can correct afterwards.
-                        caps_sec = get_mode_caps(mode_sec)
                         if rcs_active and caps_sec.get("closed_loop"):
                             dy = 0
                         if (not caps_sec.get("one_shot")) and check_y_release():
@@ -1177,6 +1191,7 @@ def process_normal_mode(
                             is_sec=True,
                             frame=frame,
                             target_id=_target_identity(best_target_sec),
+                            caps=caps_sec,
                         )
                         sec_aimbot_active = True
                 except Exception as e:
@@ -1205,11 +1220,11 @@ def process_normal_mode(
                         )
                         if error is not None:
                             dx, dy = error
-                            caps_main = get_mode_caps(mode_main)
+                            caps = caps_main
                             # Never zero the vertical error of a one-shot mode.
-                            if rcs_active and caps_main.get("closed_loop"):
+                            if rcs_active and caps.get("closed_loop"):
                                 dy = 0
-                            if (not caps_main.get("one_shot")) and check_y_release():
+                            if (not caps.get("one_shot")) and check_y_release():
                                 dy = 0
 
                             _dispatch_aimbot(
@@ -1221,6 +1236,7 @@ def process_normal_mode(
                                 is_sec=False,
                                 frame=frame,
                                 target_id=_target_identity(best_target_main),
+                                caps=caps,
                             )
                             main_aimbot_active = True
                     except Exception as e:

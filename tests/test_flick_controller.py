@@ -452,6 +452,306 @@ class TestFlickDeliveryFailure(unittest.TestCase):
         self.assertEqual(controller.state.t0, 0.0)
 
 
+class TestRollbackRestoresTiming(unittest.TestCase):
+    """C3: the old rollback only restored iterations and residual.
+
+    A rejected impulse still set ``_last_step_time`` (so the next frame sat in
+    the settle window for a step that never happened), incremented
+    ``total_sent``/``last_sent`` (diagnostics claimed travel that never occurred)
+    and bumped ``clamped_steps``.
+    """
+
+    def _controller(self, clock=None, settle_ms=0.0):
+        kwargs = dict(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_counts=1e9,
+            max_iterations=6,
+            budget_ms=100000.0,
+            deadzone_px=0.0,
+            settle_ms=settle_ms,
+        )
+        if clock is not None:
+            kwargs["clock"] = clock
+        return FlickController(**kwargs)
+
+    def test_snapshot_is_taken_before_mutation(self):
+        controller = self._controller()
+        controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertIsNotNone(controller._pre_step_snapshot)
+
+    def test_rollback_restores_last_step_time(self):
+        clock = FakeClock()
+        controller = self._controller(clock=clock, settle_ms=70.0)
+        controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertGreater(controller._last_step_time, 0.0)
+        controller.rollback_step()
+        self.assertEqual(controller._last_step_time, 0.0)
+
+    def test_rollback_restores_total_and_last_sent(self):
+        controller = self._controller()
+        controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        controller.rollback_step()
+        self.assertEqual(controller.state.total_sent, (0.0, 0.0))
+        self.assertEqual(controller.state.last_sent, (0.0, 0.0))
+
+    def test_rollback_restores_clamped_counter(self):
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_counts=10.0,
+            max_iterations=6,
+            budget_ms=100000.0,
+            deadzone_px=0.0,
+        )
+        controller.step(300.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertEqual(controller.state.clamped_steps, 1)
+        controller.rollback_step()
+        self.assertEqual(controller.state.clamped_steps, 0)
+
+    def test_retry_after_rollback_is_not_blocked_by_settle(self):
+        """The frame after a rejected impulse must be able to retry immediately."""
+        clock = FakeClock()
+        controller = self._controller(clock=clock, settle_ms=70.0)
+        first = controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertTrue(first.move)
+        controller.rollback_step()
+        clock.advance_ms(1.0)  # much less than the 70 ms settle
+        retry = controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertTrue(retry.move, "rollback left the controller stuck in 'settling'")
+        self.assertNotEqual(retry.reason, "settling")
+
+    def test_rollback_twice_does_not_double_count(self):
+        controller = self._controller()
+        controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        controller.rollback_step()
+        controller.rollback_step()
+        self.assertEqual(controller.state.iterations, 0)
+        self.assertEqual(controller.state.total_sent, (0.0, 0.0))
+
+
+class TestSettleAndBudget(unittest.TestCase):
+    def test_effective_steps_matches_plan_formula(self):
+        from src.aim_system.flick_controller import effective_steps
+
+        # settle 70 / budget 120 -> floor(1.71)+1 = 2
+        self.assertEqual(effective_steps(4, 120.0, 70.0), 2)
+        # fresh default: budget 240 -> floor(3.43)+1 = 4
+        self.assertEqual(effective_steps(4, 240.0, 70.0), 4)
+        # settle 0 -> every iteration is reachable
+        self.assertEqual(effective_steps(4, 120.0, 0.0), 4)
+        # budget too small for even two steps
+        self.assertEqual(effective_steps(4, 40.0, 120.0), 1)
+        # never exceeds max_iterations
+        self.assertEqual(effective_steps(2, 1000.0, 10.0), 2)
+
+    def test_controller_reports_effective_steps(self):
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_iterations=4,
+            budget_ms=120.0,
+            settle_ms=70.0,
+        )
+        self.assertEqual(controller.effective_steps, 2)
+        self.assertTrue(controller.budget_advice())
+
+    def test_budget_advice_empty_when_consistent(self):
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_iterations=4,
+            budget_ms=240.0,
+            settle_ms=70.0,
+        )
+        self.assertEqual(controller.budget_advice(), "")
+
+    def test_settle_blocks_second_step(self):
+        clock = FakeClock()
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_counts=1e9,
+            max_iterations=6,
+            budget_ms=100000.0,
+            deadzone_px=0.0,
+            settle_ms=70.0,
+            clock=clock,
+        )
+        first = controller.step(200.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertTrue(first.move)
+        clock.advance_ms(10.0)
+        blocked = controller.step(200.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertFalse(blocked.move)
+        self.assertEqual(blocked.reason, "settling")
+        clock.advance_ms(70.0)
+        allowed = controller.step(200.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertTrue(allowed.move)
+
+    def test_suggested_budget_funds_all_iterations(self):
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_iterations=4,
+            budget_ms=120.0,
+            settle_ms=70.0,
+        )
+        suggestion = controller.suggested_budget_ms()
+        self.assertGreaterEqual(
+            __import__(
+                "src.aim_system.flick_controller", fromlist=["effective_steps"]
+            ).effective_steps(4, suggestion, 70.0),
+            4,
+        )
+
+
+class TestSwitchRadius(unittest.TestCase):
+    def test_switch_radius_default_is_64(self):
+        controller = FlickController(geometry=GEOM, calibration=CALIB)
+        self.assertAlmostEqual(controller.switch_radius_px, 64.0)
+
+    def test_configure_updates_switch_radius(self):
+        controller = FlickController(geometry=GEOM, calibration=CALIB)
+        controller.configure(switch_radius_px=128.0)
+        self.assertAlmostEqual(controller.switch_radius_px, 128.0)
+
+    def test_larger_radius_suppresses_switch(self):
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_counts=1.0,
+            max_iterations=5,
+            budget_ms=100000.0,
+            deadzone_px=0.0,
+            switch_radius_px=200.0,
+        )
+        controller.step(100.0, 0.0, geometry=GEOM, calibration=CALIB, target_key=(900.0, 500.0))
+        controller.step(100.0, 0.0, geometry=GEOM, calibration=CALIB, target_key=(1000.0, 500.0))
+        # 100 px apart, radius 200 -> still the same target, two iterations.
+        self.assertEqual(controller.state.iterations, 2)
+
+    def test_configure_reads_settle_from_config(self):
+        cfg = {"flick_settle_ms": 125.0, "flick_switch_radius_px": 90}
+        controller = FlickController.from_config(cfg=cfg, geometry=GEOM)
+        self.assertAlmostEqual(controller.settle_ms, 125.0)
+        self.assertAlmostEqual(controller.switch_radius_px, 90.0)
+
+    def test_configure_settle_takes_effect_immediately(self):
+        clock = FakeClock()
+        controller = FlickController(
+            geometry=GEOM,
+            calibration=CALIB,
+            max_counts=1e9,
+            max_iterations=6,
+            budget_ms=100000.0,
+            deadzone_px=0.0,
+            settle_ms=0.0,
+            clock=clock,
+        )
+        controller.step(200.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        controller.configure(settle_ms=80.0)
+        clock.advance_ms(10.0)
+        step = controller.step(200.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        self.assertEqual(step.reason, "settling")
+
+
+class TestStatusPublishing(unittest.TestCase):
+    def test_status_has_diagnostics_fields(self):
+        controller = FlickController(
+            geometry=GEOM, calibration=CALIB, deadzone_px=0.0, max_counts=1e9
+        )
+        controller.step(30.0, 0.0, geometry=GEOM, calibration=CALIB, target_key="t1")
+        status = controller.status()
+        for key in (
+            "reason",
+            "iterations",
+            "effective_steps",
+            "counts",
+            "residual",
+            "calibration",
+            "geometry",
+            "gain",
+            "clamped",
+            "armed",
+        ):
+            self.assertIn(key, status)
+        self.assertEqual(status["calibration"], "measured")
+        self.assertEqual(status["geometry"], "analytic")
+        self.assertTrue(status["armed"])
+
+    def test_status_reports_valorant_source(self):
+        from src.aim_system.aim_math import Calibration as Cal
+
+        cal = Cal(source="valorant", sens=0.23)
+        controller = FlickController(geometry=GEOM, calibration=cal)
+        self.assertEqual(controller.status()["calibration"], "valorant")
+
+
+class TestFromConfigExtended(unittest.TestCase):
+    def test_settle_and_switch_are_read(self):
+        cfg = {
+            "flick_settle_ms": 90.0,
+            "flick_switch_radius_px": 100,
+            "flick_gain": 1.0,
+            "flick_budget_ms": 240.0,
+        }
+        controller = FlickController.from_config(cfg=cfg, geometry=GEOM)
+        self.assertAlmostEqual(controller.settle_ms, 90.0)
+        self.assertEqual(controller.switch_radius_px, 100.0)
+
+    def test_sec_variants_are_preferred(self):
+        cfg = {
+            "flick_settle_ms": 70.0,
+            "flick_settle_ms_sec": 120.0,
+            "flick_switch_radius_px": 64,
+            "flick_switch_radius_px_sec": 128,
+        }
+        controller = FlickController.from_config(is_sec=True, cfg=cfg, geometry=GEOM)
+        self.assertAlmostEqual(controller.settle_ms, 120.0)
+        self.assertEqual(controller.switch_radius_px, 128.0)
+
+
+class TestFlickTuning(unittest.TestCase):
+    def test_snapshot_signature_changes_with_config(self):
+        from src.aim_system.tuning import snapshot_flick_tuning
+
+        first = snapshot_flick_tuning(cfg={"flick_settle_ms": 70.0})
+        second = snapshot_flick_tuning(cfg={"flick_settle_ms": 90.0})
+        self.assertNotEqual(first.signature(), second.signature())
+
+    def test_snapshot_is_stable_for_same_config(self):
+        from src.aim_system.tuning import snapshot_flick_tuning
+
+        cfg = {"flick_settle_ms": 70.0, "flick_budget_ms": 240.0}
+        self.assertEqual(
+            snapshot_flick_tuning(cfg=cfg).signature(),
+            snapshot_flick_tuning(cfg=cfg).signature(),
+        )
+
+    def test_snapshot_maps_to_controller_kwargs(self):
+        from src.aim_system.tuning import snapshot_flick_tuning
+
+        tuning = snapshot_flick_tuning(cfg={"flick_settle_ms": 80.0, "flick_switch_radius_px": 96})
+        kwargs = tuning.for_controller()
+        self.assertEqual(kwargs["settle_ms"], 80.0)
+        self.assertEqual(kwargs["switch_radius_px"], 96.0)
+
+    def test_sec_channel_uses_sec_keys(self):
+        from src.aim_system.tuning import snapshot_flick_tuning
+
+        cfg = {"flick_gain": 1.0, "flick_gain_sec": 1.8}
+        self.assertAlmostEqual(snapshot_flick_tuning(cfg=cfg, is_sec=True).gain, 1.8)
+        self.assertAlmostEqual(snapshot_flick_tuning(cfg=cfg, is_sec=False).gain, 1.0)
+
+    def test_tuning_effective_steps(self):
+        from src.aim_system.tuning import snapshot_flick_tuning
+
+        tuning = snapshot_flick_tuning(
+            cfg={"flick_max_iterations": 4, "flick_budget_ms": 120.0, "flick_settle_ms": 70.0}
+        )
+        self.assertEqual(tuning.effective_steps, 2)
+
+
 class TestNoLegacyOvershoot(unittest.TestCase):
     """The three mechanisms that made the old flick diverge must be gone."""
 

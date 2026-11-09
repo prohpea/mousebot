@@ -36,6 +36,7 @@ from .aim_math import (
     FrameGeometry,
     px_to_counts,
     resolve_calibration,
+    resolve_calibration_cached,
     resolve_geometry,
 )
 
@@ -54,9 +55,14 @@ DEFAULT_DEADZONE_PX_SEC: float = 2.0
 #: would wipe the residual and the iteration budget. A gross jump is required.
 DEFAULT_SWITCH_RADIUS_PX: float = 64.0
 
-#: A single step below this many counts is not worth a mouse report; it is kept
-#: as residual instead of being rounded away.
-MIN_STEP_COUNTS: float = 0.5
+#: Pipeline latency the settle window defaults to (camera + encode + decode).
+DEFAULT_SETTLE_MS: float = 70.0
+
+#: Smallest budget that still allows the default iteration count at the default
+#: settle: floor(240/70)+1 = 4 steps.
+DEFAULT_BUDGET_MS_FRESH: float = 240.0
+MIN_BUDGET_MS: float = 40.0
+MAX_BUDGET_MS: float = 1000.0
 
 
 def _cfg_get(cfg: Any, name: str, default: Any, tracker: Any = None) -> Any:
@@ -153,8 +159,24 @@ class FlickStep:
     clamped: bool = False
     error_px: Tuple[float, float] = (0.0, 0.0)
 
-    def as_tuple(self) -> Tuple[float, float, bool]:
-        return float(self.counts[0]), float(self.counts[1]), bool(self.move)
+
+def effective_steps(max_iterations: int, budget_ms: float, settle_ms: float) -> int:
+    """How many steps the budget can actually fund.
+
+    ``min(max_iterations, floor(budget / max(settle, 1)) + 1)``
+
+    With ``settle=70, budget=120`` this is **2**, not 4: the UI used to promise
+    four iterations while the controller could only ever send two. The Flick V2
+    panel now shows this number (and offers ``Auto-fix``) so the two knobs can
+    never disagree again.
+    """
+    try:
+        iterations = max(1, int(max_iterations))
+        budget = max(0.0, float(budget_ms))
+        settle = max(1.0, float(settle_ms))
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(iterations, int(budget // settle) + 1))
 
 
 class FlickController:
@@ -185,6 +207,9 @@ class FlickController:
         self._switch_radius_px = max(1.0, float(switch_radius_px))
         self._clock = clock or time.perf_counter
         self._pre_step_residual: Tuple[float, float] = (0.0, 0.0)
+        # Snapshot of everything a rollback must restore (C3: a rejected impulse
+        # used to leave _last_step_time/last_sent/total_sent charged).
+        self._pre_step_snapshot: Optional[dict] = None
         self._last_step_time: float = 0.0
         self.state = FlickState()
 
@@ -228,20 +253,30 @@ class FlickController:
             ),
         )
         settle_ms = _as_float(
-            _cfg_get(cfg, f"flick_settle_ms{suffix}", _cfg_get(cfg, "flick_settle_ms", 70.0, tracker), tracker),
-            70.0,
+            _cfg_get(cfg, f"flick_settle_ms{suffix}", _cfg_get(cfg, "flick_settle_ms", DEFAULT_SETTLE_MS, tracker), tracker),
+            DEFAULT_SETTLE_MS,
+        )
+        switch_radius = _as_float(
+            _cfg_get(
+                cfg,
+                f"flick_switch_radius_px{suffix}",
+                _cfg_get(cfg, "flick_switch_radius_px", DEFAULT_SWITCH_RADIUS_PX, tracker),
+                tracker,
+            ),
+            DEFAULT_SWITCH_RADIUS_PX,
         )
         if geometry is None:
             geometry = resolve_geometry(frame=frame, cfg=cfg, tracker=tracker)
         return cls(
             geometry=geometry,
-            calibration=resolve_calibration(cfg=cfg, tracker=tracker),
+            calibration=resolve_calibration_cached(cfg=cfg, tracker=tracker),
             gain=gain,
             max_counts=max_counts,
             max_iterations=max_iterations,
             budget_ms=budget_ms,
             deadzone_px=deadzone,
             settle_ms=settle_ms,
+            switch_radius_px=switch_radius,
         )
 
     def configure(
@@ -255,6 +290,7 @@ class FlickController:
         budget_ms: Optional[float] = None,
         deadzone_px: Optional[float] = None,
         settle_ms: Optional[float] = None,
+        switch_radius_px: Optional[float] = None,
     ) -> "FlickController":
         if geometry is not None:
             self.geometry = geometry
@@ -272,7 +308,30 @@ class FlickController:
             self.deadzone_px = max(0.0, float(deadzone_px))
         if settle_ms is not None:
             self.settle_ms = max(0.0, float(settle_ms))
+        if switch_radius_px is not None:
+            self._switch_radius_px = max(1.0, float(switch_radius_px))
         return self
+
+    # -- derived ------------------------------------------------------------
+    @property
+    def effective_steps(self) -> int:
+        """Iterations the current budget can fund (see :func:`effective_steps`)."""
+        return effective_steps(self.max_iterations, self.budget_ms, self.settle_ms)
+
+    def budget_advice(self) -> str:
+        """Empty when Settle/Budget agree, otherwise a short warning."""
+        if self.settle_ms <= 0.0:
+            return ""
+        if self.effective_steps >= self.max_iterations:
+            return ""
+        return (
+            f"Settle {self.settle_ms:.0f} ms leaves only {self.effective_steps} of "
+            f"{self.max_iterations} steps within a {self.budget_ms:.0f} ms budget"
+        )
+
+    def suggested_budget_ms(self) -> float:
+        """Budget that funds every iteration at the current settle."""
+        return float(self.max_iterations) * max(self.settle_ms, 1.0)
 
     # -- lifecycle ----------------------------------------------------------
     def reset(self, reason: str = "reset") -> None:
@@ -314,13 +373,29 @@ class FlickController:
         """Undo the bookkeeping of the last step that could not be delivered.
 
         Called when the move queue rejected the impulse: the counts were never
-        sent, so the iteration must not be charged and the residual must go back
-        to what it was. Otherwise the budget burns on commands that never moved
-        the mouse, and the flick silently gives up.
+        sent, so the iteration must not be charged, the residual must go back to
+        what it was, **and the timing/accounting must be restored too**. The
+        previous version only decremented ``iterations`` and restored
+        ``residual``, so a rejected impulse still set ``_last_step_time`` (the
+        next settle window began counting from a step that never happened),
+        ``last_sent`` and ``total_sent`` (diagnostics claimed travel that never
+        occurred) and ``clamped_steps`` (the clamp counter was inflated).
         """
+        snapshot = self._pre_step_snapshot
+        if snapshot is not None:
+            self.state.residual = snapshot.get("residual", self._pre_step_residual)
+            self.state.last_sent = snapshot.get("last_sent", self.state.last_sent)
+            self.state.total_sent = snapshot.get("total_sent", self.state.total_sent)
+            self.state.last_counts = snapshot.get("last_counts", self.state.last_counts)
+            self.state.last_error = snapshot.get("last_error", self.state.last_error)
+            self.state.clamped_steps = snapshot.get("clamped_steps", self.state.clamped_steps)
+            self._last_step_time = snapshot.get("last_step_time", self._last_step_time)
+            self._pre_step_snapshot = None
+        else:  # defensive: no snapshot means at least restore the residual
+            self.state.residual = self._pre_step_residual
+
         if self.state.iterations > 0:
             self.state.iterations -= 1
-        self.state.residual = self._pre_step_residual
         if self.state.iterations <= 0:
             self.state.t0 = 0.0
 
@@ -419,6 +494,16 @@ class FlickController:
 
         # 5. Carry sub-count residual from previous steps.
         self._pre_step_residual = self.state.residual
+        self._pre_step_snapshot = {
+            "residual": self.state.residual,
+            "last_sent": self.state.last_sent,
+            "total_sent": self.state.total_sent,
+            "last_counts": self.state.last_counts,
+            "last_error": self.state.last_error,
+            "clamped_steps": self.state.clamped_steps,
+            "last_step_time": self._last_step_time,
+            "iterations": self.state.iterations,
+        }
         counts_x += self.state.residual[0]
         counts_y += self.state.residual[1]
 
@@ -469,6 +554,45 @@ class FlickController:
         )
 
     # -- introspection ------------------------------------------------------
+    def status(self) -> dict:
+        """Small, allocation-cheap snapshot for the Flick V2 diagnostics panel."""
+        calibration_source = "none"
+        if self.calibration is not None:
+            calibration_source = str(self.calibration.source)
+        geometry_source = "none"
+        if self.geometry is not None:
+            geometry_source = str(self.geometry.source)
+        return {
+            "reason": self.state.released_reason or "",
+            "iterations": int(self.state.iterations),
+            "max_iterations": int(self.max_iterations),
+            "effective_steps": int(self.effective_steps),
+            "counts": (
+                float(self.state.last_sent[0]),
+                float(self.state.last_sent[1]),
+            ),
+            "total_sent": (
+                float(self.state.total_sent[0]),
+                float(self.state.total_sent[1]),
+            ),
+            "residual": (
+                float(self.state.residual[0]),
+                float(self.state.residual[1]),
+            ),
+            "error_px": (
+                float(self.state.last_error[0]),
+                float(self.state.last_error[1]),
+            ),
+            "armed": bool(self.state.armed),
+            "clamped": int(self.state.clamped_steps),
+            "calibration": calibration_source,
+            "geometry": geometry_source,
+            "gain": float(self.gain),
+            "settle_ms": float(self.settle_ms),
+            "budget_ms": float(self.budget_ms),
+            "switch_radius_px": float(self._switch_radius_px),
+        }
+
     def describe(self) -> str:
         calib = self.calibration.describe() if self.calibration else "Calibration(none)"
         geom = "none"
@@ -481,5 +605,6 @@ class FlickController:
         return (
             f"FlickController(gain={self.gain:.3f}, max_counts={self.max_counts:.1f}, "
             f"max_iterations={self.max_iterations}, budget_ms={self.budget_ms:.1f}, "
+            f"settle_ms={self.settle_ms:.1f}, switch_radius_px={self._switch_radius_px:.1f}, "
             f"deadzone_px={self.deadzone_px:.2f}, {geom}, {calib})"
         )

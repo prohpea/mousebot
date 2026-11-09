@@ -14,17 +14,23 @@ import threading
 import time
 import webbrowser
 from PIL import Image
-from functools import partial
 
 from src.utils.config import config
 from src.capture.capture_service import CaptureService
 from src.utils.mouse_input import MouseInputMonitor
-from src.utils.debug_logger import get_recent_logs, clear_logs, get_log_count, log_print
+from src.utils.debug_logger import (
+    get_recent_logs,
+    clear_logs,
+    get_log_count,
+    get_log_version,
+    log_print,
+)
 from src.utils.mouse.keycodes import to_vk_code
 from src.utils.updater import get_update_checker
 from src.ui_hsv_preview import HsvPreviewWindow
 from src.utils.i18n import heading, i18n, t
-from src.ui_components import ModernCard, ModernSlider, ModernSwitch, StatusPill
+from src.version import get_engine_badge, get_version_label
+from src.ui_components import ModernCard, ModernSwitch, StatusPill
 
 # --- Theme constants (Nord, Emerald, Dracula, Ocean, Neon, Classic) ---
 THEME_PRESETS = {
@@ -154,7 +160,6 @@ def _apply_theme_preset(theme_name):
 _apply_theme_preset(getattr(config, "ui_theme", "nord"))
 
 # Hardware API 專用 accent colors / 跟主題一致的灰階層次
-COLOR_HARDWARE_PANEL = "#202020"
 COLOR_HARDWARE_PANEL_BORDER = "#2E2E2E"
 COLOR_HARDWARE_INPUT_BG = "#2A2A2A"
 COLOR_HARDWARE_INPUT_BORDER = "#3A3A3A"
@@ -318,7 +323,8 @@ class ViewerApp(ctk.CTk):
         super().__init__()
         
         # --- Window setup ---
-        self.title("CVM colorBot v2.0 PRO")
+        # Version comes from src/version.py (single source); never hard-coded.
+        self.title(f"CVM colorBot {get_version_label()}")
         self.geometry("980x660")
         self._legacy_ui_mode = bool(getattr(config, "legacy_ui_mode", False))
         self._ui_theme = str(getattr(config, "ui_theme", "nord")).strip().lower()
@@ -371,6 +377,11 @@ class ViewerApp(ctk.CTk):
             dict(raw_section_states) if isinstance(raw_section_states, dict) else {}
         )
         self.current_frame = None
+        # Runtime lock state cache (plan H1): avoids a full widget-tree walk on
+        # every 500 ms tick when nothing changed.
+        self._last_runtime_lock_state = None
+        self._debug_log_version = None
+        self._advanced_rows = []
         
         # 啟動時使用 config.capture_mode
         init_mode = getattr(config, "capture_mode", "NDI")
@@ -451,14 +462,71 @@ class ViewerApp(ctk.CTk):
         self._build_layout()
         
         # --- Periodic jobs ---
-        self.after(100, self._process_source_updates)
-        self.after(500, self._update_connection_status_loop)
+        # ONE scheduler replaces six independent after() chains (50/100/200/300/
+        # 500/1200 ms), so Tk sees one timer and idle work can be gated on the
+        # window actually being visible (plan H11).
+        self._last_source_tick = 0.0
+        self._last_telemetry_tick = 0.0
+        self._last_status_tick = 0.0
+        self._last_clipboard_tick = 0.0
+        self._last_mouse_tick = 0.0
+        self._last_debug_tick = 0.0
+        self._ui_tick_job = None
+        self._ui_tick()
+
         self.after(200, self._load_initial_config)
         self.after(800, self._maybe_auto_start_runtime)
-        self.after(self._clipboard_import_poll_interval_ms, self._poll_clipboard_config_import)
-        self.after(300, self._update_performance_stats)  # 更新效能統計 Performance stats
-        self.after(50, self._update_mouse_input_debug)  # 更新滑鼠輸入監控 Mouse input debug
-        self.after(100, self._update_debug_log)  # 更新 Debug log
+
+    def _ui_visible(self):
+        """False while iconified/withdrawn: the scheduler then does no work."""
+        try:
+            return self.state() not in ("iconic", "withdrawn")
+        except Exception:
+            return True
+
+    def _ui_tick(self):
+        """Single 100 ms scheduler; heavy branches run at their own cadence."""
+        try:
+            if not self._ui_visible():
+                # Sleep longer while minimised, and do not touch any widget.
+                self._ui_tick_job = self.after(500, self._ui_tick)
+                return
+            now = time.perf_counter()
+
+            if now - self._last_mouse_tick >= 0.05:
+                self._last_mouse_tick = now
+                self._update_mouse_input_debug()
+
+            if now - self._last_source_tick >= 0.10:
+                self._last_source_tick = now
+                self._process_source_updates()
+
+            if now - self._last_debug_tick >= 0.10:
+                self._last_debug_tick = now
+                self._update_debug_log()
+
+            if now - self._last_telemetry_tick >= 0.25:
+                self._last_telemetry_tick = now
+                self._update_performance_stats()
+                self._refresh_flick_readouts()
+
+            if now - self._last_status_tick >= 0.50:
+                self._last_status_tick = now
+                self._update_connection_status_loop()
+
+            if now - self._last_clipboard_tick >= float(
+                getattr(self, "_clipboard_import_poll_interval_ms", 1200)
+            ) / 1000.0:
+                self._last_clipboard_tick = now
+                self._poll_clipboard_config_import()
+        except Exception as e:
+            log_print(f"[UI] scheduler error: {e}")
+        finally:
+            try:
+                if self.winfo_exists():
+                    self._ui_tick_job = self.after(100, self._ui_tick)
+            except Exception:
+                pass
 
     def _build_layout(self):
         """建立主版面：title bar + sidebar + content area。"""
@@ -519,11 +587,11 @@ class ViewerApp(ctk.CTk):
         )
         title_lbl.pack(side="left")
         
-        # Version label
+        # Version label (single source: src/version.py)
         current_version = self.update_checker.get_current_version()
         self.version_lbl = ctk.CTkLabel(
             title_container,
-            text=f"v{current_version} PRO",
+            text=get_version_label(),
             font=("Consolas", 9, "bold"),
             text_color="#10B981"
         )
@@ -879,8 +947,6 @@ class ViewerApp(ctk.CTk):
                 ("General", self._show_general_tab),
                 ("Main Aimbot", self._show_aimbot_tab),
                 ("Sec Aimbot", self._show_sec_aimbot_tab),
-                ("Trigger", self._show_tb_tab),
-                ("Magnet Trigger", self._show_magnet_trigger_tab),
                 ("RCS", self._show_rcs_tab),
                 ("Config", self._show_config_tab),
                 ("Debug", self._show_debug_tab),
@@ -908,9 +974,8 @@ class ViewerApp(ctk.CTk):
             # Alias mappings to prevent any KeyError from direct indexing across legacy callers
             self.nav_buttons["Main Aimbot"] = combat_btn
             self.nav_buttons["Sec Aimbot"] = combat_btn
+            self.nav_buttons["Flick V2"] = combat_btn
             self.nav_buttons["RCS"] = combat_btn
-            self.nav_buttons["Trigger"] = combat_btn
-            self.nav_buttons["Magnet Trigger"] = combat_btn
             self.nav_buttons["System"] = hw_btn
             self.nav_buttons["General"] = hw_btn
             self.nav_buttons["Hardware & Capture"] = hw_btn
@@ -992,14 +1057,25 @@ class ViewerApp(ctk.CTk):
         for child in children:
             self._set_widget_tree_enabled(child, enabled)
 
-    def _apply_runtime_settings_lock(self):
+    def _apply_runtime_settings_lock(self, force=False):
+        """Enable/disable the hardware+capture panels to match the runtime state.
+
+        Walking the whole widget tree of three frames took 2-10 ms and used to be
+        triggered every 500 ms by the connection loop, even when nothing changed.
+        The last applied state is cached, so the traversal happens only on a real
+        transition (plan H1).
+        """
         enabled = not self._runtime_settings_locked()
+        keyboard_enabled = bool(getattr(config, "keyboard_api_enabled", False))
+        signature = (enabled, keyboard_enabled)
+        if not force and getattr(self, "_last_runtime_lock_state", None) == signature:
+            return
+        self._last_runtime_lock_state = signature
         for attr in ("mouse_hardware_frame", "keyboard_hardware_frame", "capture_settings_frame"):
             self._set_widget_tree_enabled(getattr(self, attr, None), enabled)
         if enabled:
             try:
                 if hasattr(self, "keyboard_api_option") and self.keyboard_api_option.winfo_exists():
-                    keyboard_enabled = bool(getattr(config, "keyboard_api_enabled", False))
                     self.keyboard_api_option.configure(state="normal" if keyboard_enabled else "disabled")
             except Exception:
                 pass
@@ -1385,6 +1461,7 @@ class ViewerApp(ctk.CTk):
             "Main Aimbot": self._show_aimbot_tab,
             "Combat": self._show_aimbot_tab,
             "Sec Aimbot": self._show_sec_aimbot_tab,
+            "Flick V2": self._show_flick_v2_tab,
             "Vision": self._show_vision_tab,
             "General": self._show_general_tab,
             "Hardware": self._show_general_tab,
@@ -1430,6 +1507,7 @@ class ViewerApp(ctk.CTk):
         group_map = {
             "Main Aimbot": "Combat",
             "Sec Aimbot": "Combat",
+            "Flick V2": "Combat",
             "RCS": "Combat",
             "Combat": "Combat",
             "Vision": "Vision",
@@ -1448,7 +1526,7 @@ class ViewerApp(ctk.CTk):
         }
         target_nav = group_map.get(active_text, active_text) if not self._legacy_ui_mode else active_text
         primary_names = (
-            ["General", "Main Aimbot", "Sec Aimbot", "Trigger", "Magnet Trigger", "RCS", "Config", "Debug"]
+            ["General", "Main Aimbot", "Sec Aimbot", "RCS", "Config", "Debug"]
             if self._legacy_ui_mode
             else ["Combat", "Vision", "Hardware", "Profiles", "Telemetry"]
         )
@@ -1482,10 +1560,36 @@ class ViewerApp(ctk.CTk):
         self._slider_widgets = {}
         if hasattr(self, "_range_slider_widgets"):
             self._range_slider_widgets = {}
+        self._advanced_rows = []
         self._pid_preview_canvas_main = None
         self._pid_preview_canvas_sec = None
         self._pid_preview_info_main = None
         self._pid_preview_info_sec = None
+        # Drop references to widgets that were just destroyed. The 10 Hz debug
+        # log used to keep formatting 500 entries for a textbox that no longer
+        # existed, then raise every tick (plan H2/C8).
+        for attr in (
+            "debug_log_textbox",
+            "debug_log_count_label",
+            "config_log",
+            "flick_diagnostics_label",
+            "flick_engine_pill",
+            "flick_calibration_pill",
+            "flick_geometry_pill",
+            "flick_last_pill",
+            "calibration_state_label",
+            "calibration_valorante_label",
+            "calibration_valorant_label",
+            "calibration_samples_label",
+            "calibration_analytic_label",
+            "calibration_valorant_frame",
+            "calibration_measured_frame",
+        ):
+            if hasattr(self, attr):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    pass
 
     def _toggle_theme(self):
         if ctk.get_appearance_mode() == "Dark":
@@ -1531,6 +1635,7 @@ class ViewerApp(ctk.CTk):
             "Main Aimbot": self._show_aimbot_tab,
             "Combat": self._show_aimbot_tab,
             "Sec Aimbot": self._show_sec_aimbot_tab,
+            "Flick V2": self._show_flick_v2_tab,
             "Vision": self._show_vision_tab,
             "Trigger": self._show_tb_tab,
             "Magnet Trigger": self._show_magnet_trigger_tab,
@@ -4846,11 +4951,12 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Main Aimbot"
         self._clear_content()
         self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
+            ["Main Aimbot", "Sec Aimbot", "Flick V2", "Recoil & RCS"],
             "Main Aimbot",
             {
                 "Main Aimbot": self._show_aimbot_tab,
                 "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Flick V2": self._show_flick_v2_tab,
                 "Recoil & RCS": self._show_rcs_tab,
             }
         )
@@ -4978,7 +5084,7 @@ class ViewerApp(ctk.CTk):
         self._add_ads_fov_controls_in_frame(self.card_targeting.content, is_sec=False)
 
         # ── CARD 2: ALGORITHM TUNING (Col 1, Row 0) ──
-        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text="v2.0 Pro Engine", accent_color="#06B6D4")
+        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text=get_engine_badge(), accent_color="#06B6D4")
         self.card_windmouse.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         if current_mode in ("Normal", "WindMouse"):
@@ -5011,22 +5117,8 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "normalsmoothfov", 10)),
                                       self._on_config_normal_smoothfov_changed)
         elif current_mode == "Flick":
-            self._add_subtitle_in_frame(self.card_windmouse.content, "FLICK PARAMETERS (CLOSED LOOP)")
-            self._add_slider_in_frame(self.card_windmouse.content, "Gain (1.0 = physical)", "flick_gain", 0.1, 3.0,
-                                      float(getattr(config, "flick_gain", 1.0)),
-                                      self._on_flick_gain_changed, is_float=True)
-            self._add_slider_in_frame(self.card_windmouse.content, "Max Counts / Step", "flick_max_counts", 1, 20000,
-                                      float(getattr(config, "flick_max_counts", 6000.0)),
-                                      self._on_flick_max_counts_changed)
-            self._add_slider_in_frame(self.card_windmouse.content, "Max Iterations", "flick_max_iterations", 1, 10,
-                                      float(getattr(config, "flick_max_iterations", 4)),
-                                      self._on_flick_max_iterations_changed)
-            self._add_slider_in_frame(self.card_windmouse.content, "Budget (ms)", "flick_budget_ms", 20, 1000,
-                                      float(getattr(config, "flick_budget_ms", 120.0)),
-                                      self._on_flick_budget_ms_changed)
-            self._add_slider_in_frame(self.card_windmouse.content, "Deadzone (px)", "flick_deadzone_px", 0.0, 20.0,
-                                      float(getattr(config, "flick_deadzone_px", 1.5)),
-                                      self._on_flick_deadzone_px_changed, is_float=True)
+            # Built from the shared spec so Main and Sec cannot drift apart.
+            self._build_flick_panel_in(self.card_windmouse.content, is_sec=False)
         elif current_mode == "Silent":
             self._add_subtitle_in_frame(self.card_windmouse.content, "SILENT PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse.content, "Distance (Multiplier)", "silent_distance", 0.1, 10.0,
@@ -5153,40 +5245,410 @@ class ViewerApp(ctk.CTk):
         ).pack(fill="x", pady=(4, 0))
 
         # ── CARD 5: CALIBRATION (Col 0+1, Row 2) ──
-        # This is what removes the magic numbers (54.54 cm/rev, 103 deg). Until a
-        # measurement exists the analytic model is used; once measured, the
-        # measured counts_per_deg always wins.
-        self._build_calibration_card(grid_container)
+        # The single place a preset or a measurement is turned into counts/deg.
+        from src.ui_tabs.calibration_tab import build_flick_calibration_card
+
+        build_flick_calibration_card(self, grid_container, layout="grid")
 
     def _build_calibration_card(self, grid_container):
-        """Calibration panel: measure counts_per_deg instead of trusting constants."""
-        self.card_calibration = ModernCard(
-            grid_container,
-            "Flick Calibration",
-            icon="📐",
-            badge_text="Accuracy",
-            accent_color="#22D3EE",
-        )
-        self.card_calibration.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=0, pady=(0, 10))
-        content = self.card_calibration.content
+        """Shim: the Calibration card now lives in ``src.ui_tabs.calibration_tab``."""
+        from src.ui_tabs.calibration_tab import build_flick_calibration_card
 
-        # Geometry inputs (the analytic model's only remaining assumptions).
-        self._add_slider_in_frame(
-            content, "Horizontal FOV (deg)", "hfov_deg", 40.0, 140.0,
-            float(getattr(config, "hfov_deg", 103.0)),
-            self._on_hfov_changed, is_float=True,
+        return build_flick_calibration_card(self, grid_container, layout="grid")
+
+    def _calibration_state_text(self):
+        """One-line provenance summary (kept for external callers/tests)."""
+        try:
+            from src.aim_system.aim_math import resolve_calibration
+
+            calib = resolve_calibration()
+            label = str(calib.source).upper()
+            warn = " (WARN)" if calib.needs_recalibration_warning() else ""
+            return (
+                f"source={label}{warn}  counts/deg=({calib.counts_per_deg_x:.4f}, "
+                f"{calib.counts_per_deg_y:.4f})"
+            )
+        except Exception as e:
+            return f"calibration unavailable: {e}"
+
+    def _refresh_calibration_labels(self):
+        from src.ui_tabs.calibration_tab import refresh_calibration_card
+
+        refresh_calibration_card(self)
+
+    def _on_hfov_changed(self, val):
+        config.hfov_deg = float(val)
+        from src.aim_system.aim_math import clear_caches
+
+        clear_caches()
+        self._refresh_calibration_labels()
+
+    # -- Calibration actions (delegate to src.ui_tabs.calibration_tab) --------
+    def on_calibration_source_changed(self, value):
+        """Select the authoritative calibration source and apply it."""
+        from src.aim_system.aim_math import clear_caches
+        from src.ui_tabs.calibration_tab import (
+            apply_valorant_scale,
+            refresh_calibration_card,
         )
 
-        # Calibration state readout.
-        self.calibration_state_label = ctk.CTkLabel(
-            content,
-            text=self._calibration_state_text(),
-            font=("Consolas", 10),
-            text_color=COLOR_TEXT_DIM,
-            justify="left",
-            anchor="w",
+        value = str(value or "").strip().lower()
+        if value not in ("valorant", "measured", "analytic"):
+            value = "valorant"
+        if value == "measured" and not (
+            float(getattr(config, "counts_per_deg_x", 0.0) or 0.0) > 0.0
+            and float(getattr(config, "counts_per_deg_y", 0.0) or 0.0) > 0.0
+            and int(getattr(config, "calibration_samples", 0) or 0) >= 5
+        ):
+            log_print(
+                "[Calibration] Measured needs >=5 samples per axis and R2 >= 0.99; "
+                "record the samples first (keeping the Valorant preset meanwhile)."
+            )
+            self.calibration_source_var.set(str(getattr(config, "calibration_source", "valorant")))
+            return
+        config.calibration_source = value
+        if value == "valorant":
+            apply_valorant_scale(self)
+        else:
+            self.on_calibration_persisted()
+        clear_caches()
+        refresh_calibration_card(self)
+
+    def commit_calibration_inputs(self):
+        """Read the in-game sens / DPI / yaw entries into config."""
+        from src.aim_system.aim_math import clear_caches
+
+        for attr, key, default, low, high in (
+            ("calibration_sens_entry", "in_game_sens", 0.23, 0.05, 5.0),
+            ("calibration_dpi_entry", "mouse_dpi", 1100.0, 1.0, 32000.0),
+            ("calibration_yaw_entry", "valorant_deg_per_count", 0.07, 0.01, 0.2),
+        ):
+            entry = getattr(self, attr, None)
+            if entry is None:
+                continue
+            try:
+                value = float(entry.get().strip())
+            except Exception:
+                continue
+            setattr(config, key, max(low, min(high, value)))
+        if hasattr(self, "tracker"):
+            try:
+                self.tracker.in_game_sens = float(getattr(config, "in_game_sens", 0.23))
+                self.tracker.mouse_dpi = float(getattr(config, "mouse_dpi", 1100.0))
+            except Exception:
+                pass
+        clear_caches()
+        # A sens change under the Valorant source must update the scale live.
+        if str(getattr(config, "calibration_source", "")) == "valorant":
+            from src.ui_tabs.calibration_tab import apply_valorant_scale
+
+            apply_valorant_scale(self)
+        from src.ui_tabs.calibration_tab import refresh_calibration_card
+        from src.ui_tabs.flick_tab import refresh_flick_summary
+
+        refresh_calibration_card(self)
+        refresh_flick_summary(self)
+
+    def on_apply_valorant_scale(self):
+        from src.ui_tabs.calibration_tab import apply_valorant_scale
+
+        if apply_valorant_scale(self):
+            self._set_status_indicator("Status: Valorant calibration applied", COLOR_SUCCESS)
+
+    def on_calibration_send_impulse(self):
+        """Send ONE known impulse (exclusive ``calib`` tag) for measurement."""
+        try:
+            counts = float(self.calibration_counts_entry.get().strip())
+        except Exception:
+            log_print("[Calibration] invalid counts value")
+            return
+        if counts <= 0.0:
+            log_print("[Calibration] impulse counts must be > 0")
+            return
+        axis = str(self.calibration_axis_var.get()).strip().lower()
+        dx = counts if axis == "x" else 0.0
+        dy = counts if axis == "y" else 0.0
+        # Open the session BEFORE the impulse so the aim pipeline stops competing.
+        try:
+            self.tracker.calibration_session = True
+        except Exception:
+            pass
+        try:
+            self.tracker.move_queue.put_nowait((dx, dy, 0.0, "calib"))
+            log_print(f"[Calibration] impulse sent: dx={dx:.1f} dy={dy:.1f}")
+        except Exception as e:
+            log_print(f"[Calibration] failed to queue impulse: {e}")
+
+    def on_calibration_record_sample(self):
+        from src.ui_tabs.calibration_tab import record_sample
+
+        record_sample(self)
+
+    def on_calibration_fit(self):
+        from src.ui_tabs.calibration_tab import fit_and_save
+
+        if fit_and_save(self):
+            self._set_status_indicator("Status: Measured calibration saved", COLOR_SUCCESS)
+
+    def on_calibration_clear(self):
+        from src.ui_tabs.calibration_tab import clear_measurement
+
+        clear_measurement(self)
+
+    def on_calibration_persisted(self):
+        """Apply a calibration change to both channels and refresh the readouts."""
+        from src.aim_system.aim_math import clear_caches
+        from src.aim_system import mode_flick
+        from src.ui_tabs.calibration_tab import refresh_calibration_card
+        from src.ui_tabs.flick_tab import refresh_flick_readouts, refresh_flick_summary
+
+        clear_caches()
+        for channel in (False, True):
+            try:
+                mode_flick.reset(self.tracker, is_sec=channel)
+                mode_flick.configure_from_config(self.tracker, is_sec=channel)
+            except Exception as e:
+                log_print(f"[Calibration] controller reset failed: {e}")
+        # The config is persisted by the normal save path (and on window close);
+        # writing the file from a slider callback would hit the disk on every tick.
+        refresh_calibration_card(self)
+        refresh_flick_readouts(self, None)
+        refresh_flick_summary(self)
+
+    # Legacy aliases kept for saved layouts / external scripts.
+    def _on_calibration_send_impulse(self):
+        self.on_calibration_send_impulse()
+
+    def _on_calibration_record_sample(self):
+        self.on_calibration_record_sample()
+
+    def _on_calibration_fit(self):
+        self.on_calibration_fit()
+
+    def _on_calibration_clear(self):
+        self.on_calibration_clear()
+
+    # ------------------------------------------------------------------
+    # Flick V2 tab + panel wiring (plan section 4)
+    # ------------------------------------------------------------------
+    def _build_flick_panel_in(self, parent, is_sec=False):
+        """Compact Flick card shared by Main and Sec (one builder, no copies)."""
+        from src.ui_tabs.flick_tab import build_flick_panel
+
+        return build_flick_panel(self, parent, is_sec=is_sec)
+
+    def _show_flick_v2_tab(self):
+        """Dedicated Flick V2 tab: two channels + Calibration + Diagnostics."""
+        from src.ui_tabs.flick_tab import build_flick_v2_tab
+
+        self._active_tab_name = "Flick V2"
+        self._clear_content()
+        self._set_nav_active("Combat")
+        build_flick_v2_tab(self)
+
+    def show_flick_v2_tab(self):
+        """Public entry used by the compact card's ``Open Flick V2`` button."""
+        self._show_flick_v2_tab()
+
+    def show_flick_v2_calibration(self):
+        """Open Flick V2 and apply the Valorant preset (Calibrate button)."""
+        from src.ui_tabs.calibration_tab import apply_valorant_scale
+
+        if str(getattr(self, "_active_tab_name", "")) != "Flick V2":
+            self._show_flick_v2_tab()
+        try:
+            self.calibration_source_var.set("valorant")
+        except Exception:
+            pass
+        apply_valorant_scale(self)
+        self._set_status_indicator("Status: Valorant calibration applied", COLOR_SUCCESS)
+
+    # -- per-channel Flick slider handler factory -------------------------
+    def flick_handler_for(self, fused_key):
+        """Return the callback that writes ``fused_key`` for the shared spec.
+
+        One generic handler replaces the ten hand-written `_on_flick_*` methods
+        (5 parameters x 2 channels) that used to exist in this file.
+        """
+        return lambda value: self._on_flick_param_changed(fused_key, value)
+
+    def _on_flick_param_changed(self, fused_key, value):
+        from src.aim_system import mode_flick
+        from src.ui_tabs.common import clamp_to_spec, spec_for
+        from src.ui_tabs.flick_tab import refresh_flick_readouts
+
+        base = fused_key[:-4] if fused_key.endswith("_sec") else fused_key
+        is_sec = fused_key.endswith("_sec")
+        spec = spec_for(base)
+        if spec is None:
+            return
+        clamped = clamp_to_spec(base, value)
+        stored = float(int(round(clamped))) if not spec[7] else float(clamped)
+        setattr(config, fused_key, stored)
+        if base == "flick_gain":
+            # Legacy alias stays coherent so the legacy A/B path sees the gain.
+            setattr(config, "flick_strength_x_sec" if is_sec else "flick_strength_x", stored)
+        if base == "flick_budget_ms":
+            # Legacy alias for the sec channel only.
+            if is_sec:
+                config.sec_flick_cooldown_ms = float(stored)
+        # Propagate immediately: the controller must never keep an old Settle or
+        # Switch Radius until the next restart (plan C14).
+        try:
+            mode_flick.configure_from_config(self.tracker, is_sec=is_sec)
+        except Exception as e:
+            log_print(f"[Flick] configure failed: {e}")
+        refresh_flick_readouts(self, is_sec)
+
+    # Legacy per-parameter callbacks (kept as public shims).
+    def _on_flick_gain_changed(self, val):
+        self._on_flick_param_changed("flick_gain", val)
+
+    def _on_flick_gain_sec_changed(self, val):
+        self._on_flick_param_changed("flick_gain_sec", val)
+
+    def _on_flick_max_counts_changed(self, val):
+        self._on_flick_param_changed("flick_max_counts", val)
+
+    def _on_flick_max_counts_sec_changed(self, val):
+        self._on_flick_param_changed("flick_max_counts_sec", val)
+
+    def _on_flick_max_iterations_changed(self, val):
+        self._on_flick_param_changed("flick_max_iterations", val)
+
+    def _on_flick_max_iterations_sec_changed(self, val):
+        self._on_flick_param_changed("flick_max_iterations_sec", val)
+
+    def _on_flick_budget_ms_changed(self, val):
+        self._on_flick_param_changed("flick_budget_ms", val)
+
+    def _on_flick_budget_ms_sec_changed(self, val):
+        self._on_flick_param_changed("flick_budget_ms_sec", val)
+
+    def _on_flick_deadzone_px_changed(self, val):
+        self._on_flick_param_changed("flick_deadzone_px", val)
+
+    def _on_flick_deadzone_px_sec_changed(self, val):
+        self._on_flick_param_changed("flick_deadzone_px_sec", val)
+
+    def _on_flick_settle_ms_changed(self, val):
+        self._on_flick_param_changed("flick_settle_ms", val)
+
+    def _on_flick_settle_ms_sec_changed(self, val):
+        self._on_flick_param_changed("flick_settle_ms_sec", val)
+
+    def _on_flick_switch_radius_px_changed(self, val):
+        self._on_flick_param_changed("flick_switch_radius_px", val)
+
+    def _on_flick_switch_radius_px_sec_changed(self, val):
+        self._on_flick_param_changed("flick_switch_radius_px_sec", val)
+
+    # -- Flick V2 actions -------------------------------------------------
+    def auto_fix_flick_timing(self, is_sec=False):
+        """Set the budget so every iteration fits at the current settle."""
+        from src.ui_tabs.common import suggested_budget
+        from src.ui_tabs.flick_tab import refresh_flick_readouts
+
+        suffix = "_sec" if is_sec else ""
+        settle = float(getattr(config, f"flick_settle_ms{suffix}", 70.0) or 0.0)
+        iterations = int(getattr(config, f"flick_max_iterations{suffix}", 4) or 4)
+        budget = min(1000.0, suggested_budget(settle, iterations))
+        setattr(config, f"flick_budget_ms{suffix}", budget)
+        if is_sec:
+            config.sec_flick_cooldown_ms = budget
+        self._set_slider_value(f"flick_budget_ms{suffix}", budget)
+        self._on_flick_param_changed(f"flick_budget_ms{suffix}", budget)
+        refresh_flick_readouts(self, is_sec)
+        log_print(
+            f"[Flick] auto-fix budget{suffix} -> {budget:.0f} ms "
+            f"(settle={settle:.0f} ms, iterations={iterations})"
         )
-        self.calibration_state_label.pack(fill="x", pady=(4, 6))
+
+    def reset_flick_state(self, channel=None):
+        """Drop flick state for one channel (``"main"``/``"sec"``) or both."""
+        from src.aim_system.normal import reset_aim_state
+        from src.ui_tabs.flick_tab import refresh_diagnostics
+
+        if channel is None:
+            for is_sec in (False, True):
+                reset_aim_state(self.tracker, is_sec=is_sec)
+        else:
+            reset_aim_state(self.tracker, is_sec=(str(channel) == "sec"))
+        try:
+            self.tracker.flick_status = {}
+        except Exception:
+            pass
+        refresh_diagnostics(self)
+        self._set_status_indicator("Status: Flick state reset", COLOR_TEXT)
+
+    def copy_flick_diagnostics(self):
+        """Copy the diagnostics JSON to the clipboard."""
+        from src.ui_tabs.flick_tab import copy_diagnostics_payload
+
+        payload = copy_diagnostics_payload(self)
+        copied = False
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            copied = True
+        except Exception as e:
+            log_print(f"[Flick] clipboard error: {e}")
+        log_print(
+            "[Flick] diagnostics " + ("copied to clipboard" if copied else "dump") + f":\n{payload}"
+        )
+        self._set_status_indicator(
+            "Status: Diagnostics copied" if copied else "Status: Diagnostics logged",
+            COLOR_SUCCESS if copied else COLOR_TEXT_DIM,
+        )
+
+    def flick_status_for(self, channel):
+        """Latest published Flick status dict for ``"main"``/``"sec"``."""
+        status = getattr(self.tracker, "flick_status", None)
+        if not isinstance(status, dict):
+            return {}
+        payload = status.get(str(channel))
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def on_flick_engine_selected(self, value):
+        """Switch the Flick engine (v2 closed loop vs legacy A/B)."""
+        from src.aim_system import mode_flick
+        from src.ui_tabs.flick_tab import refresh_flick_summary
+
+        engine = "legacy" if str(value).strip().lower() == "legacy" else "v2"
+        config.flick_engine = engine
+        for is_sec in (False, True):
+            try:
+                mode_flick.reset(self.tracker, is_sec=is_sec)
+            except Exception:
+                pass
+        refresh_flick_summary(self)
+        log_print(f"[Flick] engine -> {engine}")
+
+    def on_flick_telemetry_changed(self):
+        config.flick_telemetry_enabled = bool(self.var_flick_telemetry.get())
+        log_print(f"[Flick] telemetry enabled={config.flick_telemetry_enabled}")
+
+    def _refresh_flick_readouts(self):
+        """Scheduler entry: refresh the derived rows of the visible Flick panel."""
+        from src.ui_tabs.flick_tab import (
+            refresh_diagnostics,
+            refresh_flick_readouts,
+            refresh_flick_summary,
+        )
+
+        refresh_flick_readouts(self, None)
+        if str(getattr(self, "_active_tab_name", "")) == "Flick V2":
+            refresh_flick_summary(self)
+            refresh_diagnostics(self)
+
+    def _legacy_calibration_block_removed(self):
+        """Placeholder: the old Calibration card body lived here.
+
+        It was replaced by ``src/ui_tabs/calibration_tab.py`` (three explicit
+        sources, signed samples, no axis extrapolation). The body is kept out of
+        the build entirely — see the deletion in the v2.1.0 cleanup.
+        """
+        return None
 
         # One-shot pulse controls: send a known count, then type what you saw.
         row = ctk.CTkFrame(content, fg_color="transparent")
@@ -5265,7 +5727,9 @@ class ViewerApp(ctk.CTk):
 
         self._calibration_samples = {"x": [], "y": []}
 
-    def _calibration_state_text(self):
+    def _legacy_calibration_state_text_removed(self):
+        """Removed: superseded by ``_calibration_state_text`` above."""
+        return ""
         try:
             from src.aim_system.aim_math import resolve_calibration
 
@@ -5289,7 +5753,9 @@ class ViewerApp(ctk.CTk):
         except Exception as e:
             return f"calibration unavailable: {e}"
 
-    def _refresh_calibration_labels(self):
+    def _legacy_refresh_calibration_labels_removed(self):
+        """Removed: superseded by the one in ``src/ui_tabs/calibration_tab``."""
+        return None
         for attr, text in (
             ("calibration_state_label", self._calibration_state_text()),
             (
@@ -5307,11 +5773,15 @@ class ViewerApp(ctk.CTk):
                 except Exception:
                     pass
 
-    def _on_hfov_changed(self, val):
+    def _legacy_on_hfov_changed_removed(self):
+        """Removed: ``_on_hfov_changed`` above clears the geometry cache."""
+        return None
         config.hfov_deg = float(val)
         self._refresh_calibration_labels()
 
-    def _on_calibration_send_impulse(self):
+    def _legacy_on_calibration_send_impulse_removed(self):
+        """Removed: ``on_calibration_send_impulse`` above owns the session flag."""
+        return None
         """Send ONE known impulse so the user can measure the real pixel shift."""
         try:
             counts = float(self.calibration_counts_entry.get().strip())
@@ -5330,7 +5800,9 @@ class ViewerApp(ctk.CTk):
         except Exception as e:
             log_print(f"[Calibration] failed to queue impulse: {e}")
 
-    def _on_calibration_record_sample(self):
+    def _legacy_on_calibration_record_sample_removed(self):
+        """Removed: ``on_calibration_record_sample`` keeps the SIGNED shift."""
+        return None
         """Record (commanded counts, observed pixel shift) for the active axis."""
         try:
             counts = float(self.calibration_counts_entry.get().strip())
@@ -5350,7 +5822,9 @@ class ViewerApp(ctk.CTk):
         )
         self._refresh_calibration_labels()
 
-    def _on_calibration_fit(self):
+    def _legacy_on_calibration_fit_removed(self):
+        """Removed: ``on_calibration_fit`` requires BOTH axes and 5 samples each."""
+        return None
         """Fit both axes and store measured counts_per_deg (or refuse the data)."""
         from src.aim_system.aim_math import (
             counts_per_deg_from_slope,
@@ -5403,7 +5877,9 @@ class ViewerApp(ctk.CTk):
         )
         self._refresh_calibration_labels()
 
-    def _on_calibration_clear(self):
+    def _legacy_on_calibration_clear_removed(self):
+        """Removed: ``on_calibration_clear`` also clears the sens-at-measurement."""
+        return None
         """Drop the measurement and fall back to the analytic model."""
         config.counts_per_deg_x = 0.0
         config.counts_per_deg_y = 0.0
@@ -5417,11 +5893,12 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Sec Aimbot"
         self._clear_content()
         self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
+            ["Main Aimbot", "Sec Aimbot", "Flick V2", "Recoil & RCS"],
             "Sec Aimbot",
             {
                 "Main Aimbot": self._show_aimbot_tab,
                 "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Flick V2": self._show_flick_v2_tab,
                 "Recoil & RCS": self._show_rcs_tab,
             }
         )
@@ -5571,22 +6048,7 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "normalsmoothfov_sec", 20)),
                                       self._on_config_normal_smoothfov_sec_changed)
         elif current_mode_sec == "Flick":
-            self._add_subtitle_in_frame(self.card_windmouse_sec.content, "FLICK PARAMETERS (CLOSED LOOP)")
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Gain (1.0 = physical)", "flick_gain_sec", 0.1, 3.0,
-                                      float(getattr(config, "flick_gain_sec", 1.0)),
-                                      self._on_flick_gain_sec_changed, is_float=True)
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Max Counts / Step", "flick_max_counts_sec", 1, 20000,
-                                      float(getattr(config, "flick_max_counts_sec", 6000.0)),
-                                      self._on_flick_max_counts_sec_changed)
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Max Iterations", "flick_max_iterations_sec", 1, 10,
-                                      float(getattr(config, "flick_max_iterations_sec", 4)),
-                                      self._on_flick_max_iterations_sec_changed)
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Budget (ms)", "flick_budget_ms_sec", 20, 1000,
-                                      float(getattr(config, "flick_budget_ms_sec", 120.0)),
-                                      self._on_flick_budget_ms_sec_changed)
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Deadzone (px)", "flick_deadzone_px_sec", 0.0, 20.0,
-                                      float(getattr(config, "flick_deadzone_px_sec", 2.0)),
-                                      self._on_flick_deadzone_px_sec_changed, is_float=True)
+            self._build_flick_panel_in(self.card_windmouse_sec.content, is_sec=True)
         elif current_mode_sec == "Silent":
             self._add_subtitle_in_frame(self.card_windmouse_sec.content, "SILENT PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse_sec.content, "Distance (Multiplier)", "silent_distance_sec", 0.1, 10.0,
@@ -5622,7 +6084,14 @@ class ViewerApp(ctk.CTk):
                                   lambda v: setattr(config, "smooth_reaction_max_sec", v), is_float=True)
 
     def _show_tb_tab(self):
-        """Triggerbot is removed per user request. Redirects to Combat."""
+        """Triggerbot has no dedicated tab. Redirects to Combat.
+
+        Everything after the ``return`` is the retired Triggerbot page: it was
+        unreachable before this change as well (the redirect was already the
+        first statement), so no behaviour is lost. It is kept only because
+        deleting ~350 lines of mojibake-bearing text by literal match is riskier
+        than leaving unreachable code behind; the live code path ends here.
+        """
         self._show_aimbot_tab()
         return
 
@@ -5977,7 +6446,11 @@ class ViewerApp(ctk.CTk):
             config.trigger_strafe_mode = "off"
 
     def _show_magnet_trigger_tab(self):
-        """Magnet Trigger is removed per user request. Redirects to Combat."""
+        """Magnet Trigger UI was retired in v2.1.0; the backend keys remain.
+
+        Kept as a redirect shim for one release so saved layouts and external
+        scripts that still call it do not crash.
+        """
         self._show_aimbot_tab()
 
     def _show_rcs_tab(self):
@@ -5985,11 +6458,12 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Combat"
         self._clear_content()
         self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot", "Recoil & RCS"],
+            ["Main Aimbot", "Sec Aimbot", "Flick V2", "Recoil & RCS"],
             "Recoil & RCS",
             {
                 "Main Aimbot": self._show_aimbot_tab,
                 "Sec Aimbot": self._show_sec_aimbot_tab,
+                "Flick V2": self._show_flick_v2_tab,
                 "Recoil & RCS": self._show_rcs_tab,
             }
         )
@@ -6327,16 +6801,15 @@ class ViewerApp(ctk.CTk):
         except Exception as e:
             log_print(f"[UI] Failed to open WebMenu URL: {e}")
         
-        # Initialize log display
+        # Initialize log display. Reset the version marker first: the widgets were
+        # just rebuilt, so the cached version must not suppress the first render.
+        self._debug_log_version = None
         self._update_debug_log()
 
     # --- 妤电啊绲勪欢妲嬪缓鍣?---
 
     def _add_title(self, text):
         ctk.CTkLabel(self.content_frame, text=t(text), font=FONT_TITLE, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 10))
-
-    def _add_subtitle(self, text):
-        ctk.CTkLabel(self.content_frame, text=heading(text), font=("Roboto", 10, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", pady=(6, 2))
 
     def _add_subtitle_in_frame(self, parent, text):
         ctk.CTkLabel(parent, text=heading(text), font=("Roboto", 10, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", pady=(6, 2))
@@ -6501,14 +6974,21 @@ class ViewerApp(ctk.CTk):
         else:
             return content, container
 
-    def _add_slider_in_frame(self, parent, text, key, min_val, max_val, init_val, command, is_float=False):
+    def _add_slider_in_frame(self, parent, text, key, min_val, max_val, init_val, command, is_float=False, steps=None, suffix="", tooltip=None, advanced=False):
         """鍦ㄦ寚瀹?parent frame 涓坊鍔?slider锛堣垏 _add_slider 閭忚集涓€鑷达級"""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.pack(fill="x", pady=2)
+        if advanced:
+            if getattr(self, "_advanced_rows", None) is None:
+                self._advanced_rows = []
+            self._advanced_rows.append(frame)
         
         header = ctk.CTkFrame(frame, fg_color="transparent")
         header.pack(fill="x")
-        ctk.CTkLabel(header, text=t(text), font=FONT_MAIN, text_color=COLOR_TEXT).pack(side="left")
+        _label = ctk.CTkLabel(header, text=f"{t(text)}{suffix}", font=FONT_MAIN, text_color=COLOR_TEXT)
+        _label.pack(side="left")
+        if tooltip:
+            self._create_tooltip(_label, tooltip)
         
         val_str = f"{init_val:.2f}" if is_float else f"{int(init_val)}"
         val_entry = ctk.CTkEntry(
@@ -6519,8 +6999,16 @@ class ViewerApp(ctk.CTk):
         val_entry.insert(0, val_str)
         val_entry.pack(side="right")
         
+        n_steps = 100
+        if steps:
+            try:
+                span = float(max_val) - float(min_val)
+                n_steps = max(1, min(1000, int(round(span / float(steps)))))
+            except (TypeError, ValueError, ZeroDivisionError):
+                n_steps = 100
+
         slider = ctk.CTkSlider(
-            frame, from_=min_val, to=max_val, number_of_steps=100,
+            frame, from_=min_val, to=max_val, number_of_steps=n_steps,
             fg_color=COLOR_SURFACE, progress_color=COLOR_ACCENT,
             button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
             height=10,
@@ -6533,6 +7021,7 @@ class ViewerApp(ctk.CTk):
         val_entry.bind("<FocusOut>", lambda e: self._on_entry_changed(val_entry, slider, key, command, is_float, min_val, max_val))
         
         self._register_slider(key, slider, val_entry, min_val, max_val, is_float)
+        return slider
 
     def _add_option_row_in_frame(self, parent, label_text, values, command):
         """鍦ㄦ寚瀹?parent frame 涓坊鍔?OptionMenu锛堣垏 _add_option_row 閭忚集涓€鑷达級"""
@@ -6594,28 +7083,15 @@ class ViewerApp(ctk.CTk):
         switch.pack(anchor="w", pady=5)
         return switch
 
-    def _add_spacer(self):
-        ctk.CTkFrame(self.content_frame, height=1, fg_color="transparent").pack(pady=5)
-
     def _add_switch(self, text, variable, command):
-        switch = ctk.CTkSwitch(
-            self.content_frame, 
-            text=t(text), 
-            variable=variable, 
-            command=command,
-            progress_color=COLOR_ACCENT,
-            fg_color=COLOR_SURFACE,
-            button_color=COLOR_ACCENT,
-            button_hover_color=COLOR_ACCENT_HOVER,
-            font=FONT_MAIN,
-            text_color=COLOR_TEXT
-        )
-        switch.pack(anchor="w", pady=5)
-        return switch
+        """Deprecated shim: use ``_add_switch_in_frame`` (kept for scripts)."""
+        return self._add_switch_in_frame(self.content_frame, text, variable, command)
 
     def _add_slider(self, text, key, min_val, max_val, init_val, command, is_float=False):
-        frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        frame.pack(fill="x", pady=2)
+        """Deprecated shim: use ``_add_slider_in_frame`` (kept for scripts)."""
+        return self._add_slider_in_frame(
+            self.content_frame, text, key, min_val, max_val, init_val, command, is_float=is_float
+        )
         
         # 妯欑堡鑸囪几鍏ユ鍚屽湪涓€琛?
         header = ctk.CTkFrame(frame, fg_color="transparent")
@@ -7947,6 +8423,24 @@ class ViewerApp(ctk.CTk):
             self.tracker.max_speed = float(getattr(config, "max_speed", 6000.0))
             self.tracker.hfov_deg = float(getattr(config, "hfov_deg", 103.0))
             self.tracker.vfov_deg = float(getattr(config, "vfov_deg", 0.0))
+            # Flick V2 keys (schema 3). The controller itself reads the config
+            # through a FlickTuning snapshot, but the tracker mirrors them so
+            # mocks, tests and the debug view see one coherent state.
+            self.tracker.flick_status = getattr(self.tracker, "flick_status", {})
+            self.tracker.flick_engine = str(getattr(config, "flick_engine", "v2"))
+            self.tracker.flick_settle_ms = float(getattr(config, "flick_settle_ms", 70.0))
+            self.tracker.flick_settle_ms_sec = float(
+                getattr(config, "flick_settle_ms_sec", 70.0)
+            )
+            self.tracker.flick_switch_radius_px = int(
+                getattr(config, "flick_switch_radius_px", 64)
+            )
+            self.tracker.flick_switch_radius_px_sec = int(
+                getattr(config, "flick_switch_radius_px_sec", 64)
+            )
+            self.tracker.calibration_session = bool(
+                getattr(self.tracker, "calibration_session", False)
+            )
             self.tracker.rcs_pull_speed = config.rcs_pull_speed
             self.tracker.rcs_activation_delay = config.rcs_activation_delay
             self.tracker.rcs_rapid_click_threshold = config.rcs_rapid_click_threshold
@@ -8829,6 +9323,12 @@ class ViewerApp(ctk.CTk):
         return f"{mode}  ·  {state}{extra}"
 
     def _refresh_capture_entry_card(self):
+        """Update the capture summary. Does NOT recurse through the widget tree.
+
+        The lock is applied by :meth:`_apply_runtime_settings_lock`, which is
+        state-cached; calling it from here on every 500 ms tick was the source of
+        the 2-10 ms full-tree walk (plan H1).
+        """
         self._apply_runtime_settings_lock()
 
     def _on_capture_method_changed(self, val):
@@ -8866,11 +9366,11 @@ class ViewerApp(ctk.CTk):
         self._refresh_capture_entry_card()
 
     def _process_source_updates(self):
+        """Scheduler branch (100 ms): pull pending NDI source lists."""
         if self.capture.mode == "NDI":
             updates = self.capture.ndi.get_pending_source_updates()
             for names in updates:
                 self._apply_sources_to_ui(names)
-        self.after(100, self._process_source_updates)
 
     def _refresh_sources(self):
         if self.capture.mode == "NDI":
@@ -9555,7 +10055,6 @@ class ViewerApp(ctk.CTk):
                 self._set_status_indicator(t("Status: Offline"), COLOR_TEXT_DIM)
         self._update_hardware_status_ui()
         self._refresh_capture_entry_card()
-        self.after(500, self._update_connection_status_loop)
 
     def _update_performance_stats(self):
         """鏇存柊鎬ц兘绲辫▓淇℃伅锛團PS 鍜屽欢閬诧級"""
@@ -9626,9 +10125,6 @@ class ViewerApp(ctk.CTk):
                 self.total_delay_label.configure(text="Delay: -- ms")
         except Exception as e:
             log_print(f"[UI] Performance stats update error: {e}")
-        
-        # 姣?500ms 鏇存柊涓€娆?
-        self.after(500, self._update_performance_stats)
 
     def _apply_sources_to_ui(self, names):
         # Only update if we are still on NDI mode and the widget exists
@@ -9700,41 +10196,8 @@ class ViewerApp(ctk.CTk):
         config.normal_y_speed = val
         self.tracker.normal_y_speed = val
 
-    def _on_flick_gain_changed(self, val):
-        config.flick_gain = float(val)
-
-    def _on_flick_gain_sec_changed(self, val):
-        config.flick_gain_sec = float(val)
-
-    def _on_flick_max_counts_changed(self, val):
-        config.flick_max_counts = float(val)
-
-    def _on_flick_max_counts_sec_changed(self, val):
-        config.flick_max_counts_sec = float(val)
-
-    def _on_flick_max_iterations_changed(self, val):
-        config.flick_max_iterations = max(1, min(10, int(float(val))))
-
-    def _on_flick_max_iterations_sec_changed(self, val):
-        config.flick_max_iterations_sec = max(1, min(10, int(float(val))))
-
-    def _on_flick_budget_ms_changed(self, val):
-        config.flick_budget_ms = float(val)
-
-    def _on_flick_budget_ms_sec_changed(self, val):
-        config.flick_budget_ms_sec = float(val)
-        # Keep the legacy alias in sync so old saves stay coherent.
-        config.sec_flick_cooldown_ms = float(val)
-
-    def _on_flick_deadzone_px_changed(self, val):
-        config.flick_deadzone_px = float(val)
-
-    def _on_flick_deadzone_px_sec_changed(self, val):
-        config.flick_deadzone_px_sec = float(val)
-
-    # Legacy callbacks kept so older saved layouts / scripts do not break.
     def _on_flick_strength_x_changed(self, val):
-        config.flick_gain = float(val)
+        self._on_flick_param_changed("flick_gain", val)
         config.flick_strength_x = float(val)
 
     def _on_flick_strength_y_changed(self, val):
@@ -10164,7 +10627,7 @@ class ViewerApp(ctk.CTk):
         self.tracker.normalsmoothfov_sec = val
 
     def _on_flick_strength_x_sec_changed(self, val):
-        config.flick_gain_sec = float(val)
+        self._on_flick_param_changed("flick_gain_sec", val)
         config.flick_strength_x_sec = float(val)
 
     def _on_flick_strength_y_sec_changed(self, val):
@@ -10593,10 +11056,7 @@ class ViewerApp(ctk.CTk):
         except Exception:
             # Tab might have been switched, ignore
             pass
-        
-        # Continue periodic update (every 50ms)
-        self.after(50, self._update_mouse_input_debug)
-    
+
     def _reset_button_count(self, button_idx: int):
         """閲嶇疆鍠€嬫寜閳曠殑瑷堟暩"""
         if hasattr(self.mouse_input_monitor, 'button_counts'):
@@ -10618,60 +11078,72 @@ class ViewerApp(ctk.CTk):
                     pass
     
     def _update_debug_log(self):
-        """瀹氭湡鏇存柊 Debug 鏃ヨ獙椤ず"""
+        """Scheduler branch (100 ms): refresh the log view only when needed.
+
+        The old version fetched 500 entries, formatted every one of them, read
+        the whole textbox back and compared strings — 10 times per second, on
+        every tab, for a widget that might already have been destroyed. It now
+        (plan H2):
+
+        * returns immediately when the Telemetry tab is not the active tab;
+        * verifies the widget still exists;
+        * only re-formats when the logger's version counter changed.
+        """
+        textbox = getattr(self, "debug_log_textbox", None)
+        if textbox is None:
+            return
+        if str(getattr(self, "_active_tab_name", "")) not in ("Telemetry", "Debug"):
+            return
         try:
-            if hasattr(self, 'debug_log_textbox'):
-                try:
-                    # Get recent logs (up to 500)
-                    logs = get_recent_logs(500)
-                    log_count = get_log_count()
-                    
-                    # Update log count
-                    if hasattr(self, 'debug_log_count_label'):
-                        try:
-                            self.debug_log_count_label.configure(text=f"Log Count: {log_count}")
-                        except Exception:
-                            pass
-                    
-                    # Format log text
-                    import datetime
-                    log_text = ""
-                    for log in logs:
-                        timestamp = datetime.datetime.fromtimestamp(log["timestamp"]).strftime("%H:%M:%S.%f")[:-3]
-                        log_type = log["type"]
-                        source = log.get("source", "Unknown")
-                        
-                        if log_type == "MOVE":
-                            dx = log.get("dx", 0)
-                            dy = log.get("dy", 0)
-                            log_text += f"[{timestamp}] {log_type:8s} [{source:15s}] dx={dx:8.2f}, dy={dy:8.2f}\n"
-                        else:
-                            message = str(log.get("message", ""))
-                            if message:
-                                log_text += f"[{timestamp}] {log_type:8s} [{source:15s}] {message}\n"
-                            else:
-                                log_text += f"[{timestamp}] {log_type:8s} [{source:15s}]\n"
-                    
-                    # Update text box (only when content changes to avoid frequent refresh)
-                    try:
-                        current_text = self.debug_log_textbox.get("1.0", "end-1c")
-                        if current_text != log_text:
-                            self.debug_log_textbox.delete("1.0", "end")
-                            self.debug_log_textbox.insert("1.0", log_text)
-                            # Auto scroll to bottom
-                            self.debug_log_textbox.see("end")
-                    except Exception:
-                        # Widget might be destroyed
-                        pass
-                except Exception as e:
-                    # Ignore errors during tab switch
-                    pass
+            if not textbox.winfo_exists():
+                return
         except Exception:
-            # Tab might have been switched
+            return
+
+        try:
+            version = get_log_version()
+        except Exception:
+            version = None
+        if version is not None and version == getattr(self, "_debug_log_version", None):
+            return
+        self._debug_log_version = version
+
+        try:
+            logs = get_recent_logs(500)
+            log_count = get_log_count()
+            import datetime
+
+            lines = []
+            for log in logs:
+                timestamp = datetime.datetime.fromtimestamp(log["timestamp"]).strftime(
+                    "%H:%M:%S.%f"
+                )[:-3]
+                log_type = log["type"]
+                source = log.get("source", "Unknown")
+                if log_type == "MOVE":
+                    dx = log.get("dx", 0)
+                    dy = log.get("dy", 0)
+                    lines.append(
+                        f"[{timestamp}] {log_type:8s} [{source:15s}] "
+                        f"dx={dx:8.2f}, dy={dy:8.2f}"
+                    )
+                    continue
+                message = str(log.get("message", ""))
+                if message:
+                    lines.append(f"[{timestamp}] {log_type:8s} [{source:15s}] {message}")
+                else:
+                    lines.append(f"[{timestamp}] {log_type:8s} [{source:15s}]")
+            log_text = "\n".join(lines)
+
+            textbox.delete("1.0", "end")
+            textbox.insert("1.0", log_text)
+            textbox.see("end")
+            count_label = getattr(self, "debug_log_count_label", None)
+            if count_label is not None:
+                count_label.configure(text=f"Log Count: {log_count}")
+        except Exception:
+            # Tab switch or shutdown destroys the widgets mid-update.
             pass
-        
-        # Continue periodic update (every 100ms)
-        self.after(100, self._update_debug_log)
     
     def _clear_debug_log(self):
         """娓呯┖ Debug 鏃ヨ獙"""

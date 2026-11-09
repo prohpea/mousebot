@@ -5,18 +5,30 @@ The heavy lifting lives in :mod:`src.aim_system.flick_controller` (closed loop,
 budgeted, direction-preserving). This module is only the adapter between the
 dispatcher signature and the controller, plus the state kept on the tracker.
 
+Two performance/behaviour rules (plan H6/C14):
+
+* ``FlickTuning`` freezes the config once per frame and ``configure()`` is only
+  called when its signature actually changed. Geometry/calibration come from the
+  ``aim_math`` caches, so the hot path no longer rebuilds dataclasses or runs
+  trigonometry on every frame.
+* ``configure()`` propagates **every** knob, including ``settle_ms`` and
+  ``switch_radius_px``. Omitting them meant the Settle/Switch sliders wrote the
+  config but the live controller silently kept its old values.
+
 Legacy path: setting ``config.flick_engine = "legacy"`` routes to the old
-open-loop impulse for A/B comparison. It is scheduled for removal at step 10 of
-the plan and must not be the default.
+open-loop impulse for A/B comparison. It must never be the default.
 """
 
-from .aim_math import resolve_calibration, resolve_geometry
+from .aim_math import resolve_calibration_cached, resolve_geometry
 from .flick_controller import FlickController, _cfg_get
+from .tuning import FlickTuning, snapshot_flick_tuning
 from src.utils.debug_logger import log_move, log_print
 
 _STATE_ATTR = "_flick_state_{channel}"
 _CONTROLLER_ATTR = "_flick_controller_{channel}"
+_TUNING_SIGNATURE_ATTR = "_flick_tuning_sig_{channel}"
 _QUEUE_TAG = "flick"
+_STATUS_ATTR = "flick_status"
 
 
 def _channel(is_sec):
@@ -40,27 +52,92 @@ def _target_key(dx, dy, target_id=None):
     return (float(dx), float(dy))
 
 
+def _telemetry_wanted(tuning=None, app=None):
+    """Publish status only when the user asked for it or is looking at it."""
+    if tuning is not None and tuning.telemetry_enabled:
+        return True
+    try:
+        from src.utils.config import config
+
+        if bool(getattr(config, "flick_telemetry_enabled", False)):
+            return True
+    except Exception:
+        pass
+    tab = str(getattr(app, "_active_tab_name", "")) if app is not None else ""
+    return tab in ("Flick V2", "Main Aimbot", "Sec Aimbot")
+
+
+def _publish_status(tracker, is_sec, controller, tuning, app=None):
+    """Store a small dict on ``tracker.flick_status[channel]`` (atomic rebind)."""
+    if not _telemetry_wanted(tuning, app):
+        return
+    status = getattr(tracker, _STATUS_ATTR, None)
+    if not isinstance(status, dict):
+        status = {}
+    payload = controller.status()
+    payload["engine"] = tuning.engine
+    status[_channel(is_sec)] = payload
+    # Rebind rather than mutate: the UI thread may be reading the old dict.
+    tracker.flick_status = status
+
+
 def _get_controller(tracker, is_sec, frame=None):
+    """Return the channel controller, reconfiguring it only when needed."""
+    attr = _CONTROLLER_ATTR.format(channel=_channel(is_sec))
+    tuning = snapshot_flick_tuning(is_sec=is_sec, tracker=tracker)
+    signature_attr = _TUNING_SIGNATURE_ATTR.format(channel=_channel(is_sec))
+    controller = getattr(tracker, attr, None)
+
+    if controller is None:
+        geometry = resolve_geometry(frame=frame, tracker=tracker)
+        controller = FlickController(
+            geometry=geometry,
+            calibration=resolve_calibration_cached(tracker=tracker),
+            gain=tuning.gain,
+            max_counts=tuning.max_counts,
+            max_iterations=tuning.max_iterations,
+            budget_ms=tuning.budget_ms,
+            deadzone_px=tuning.deadzone_px,
+            settle_ms=tuning.settle_ms,
+            switch_radius_px=float(tuning.switch_radius_px),
+        )
+        setattr(tracker, attr, controller)
+        setattr(tracker, signature_attr, tuning.signature())
+        return controller, tuning
+
+    signature = tuning.signature()
+    if getattr(tracker, signature_attr, None) != signature:
+        # Geometry/calibration are cache hits unless the frame changed shape or
+        # the user moved a calibration/sensitivity value.
+        controller.configure(
+            geometry=resolve_geometry(frame=frame, tracker=tracker),
+            calibration=resolve_calibration_cached(tracker=tracker),
+            **tuning.for_controller(),
+        )
+        setattr(tracker, signature_attr, signature)
+    elif frame is not None:
+        # Same tuning, but the frame may still have changed size (capture switch,
+        # FOV crop). The geometry cache makes this a signature comparison.
+        controller.configure(geometry=resolve_geometry(frame=frame, tracker=tracker))
+    return controller, tuning
+
+
+def configure_from_config(tracker, is_sec=False):
+    """Force a reconfigure (used by the UI callbacks after a slider change)."""
     attr = _CONTROLLER_ATTR.format(channel=_channel(is_sec))
     controller = getattr(tracker, attr, None)
     if controller is None:
-        controller = FlickController.from_config(is_sec=is_sec, tracker=tracker, frame=frame)
-        setattr(tracker, attr, controller)
-        return controller
-
-    suffix = "_sec" if is_sec else ""
+        return None
+    tuning = snapshot_flick_tuning(is_sec=is_sec, tracker=tracker)
     controller.configure(
-        geometry=resolve_geometry(frame=frame, tracker=tracker),
-        calibration=resolve_calibration(tracker=tracker),
-        gain=_cfg_get(None, f"flick_gain{suffix}", controller.gain, tracker),
-        max_counts=_cfg_get(None, f"flick_max_counts{suffix}", controller.max_counts, tracker),
-        max_iterations=_cfg_get(
-            None, f"flick_max_iterations{suffix}", controller.max_iterations, tracker
-        ),
-        budget_ms=_cfg_get(None, f"flick_budget_ms{suffix}", controller.budget_ms, tracker),
-        deadzone_px=_cfg_get(
-            None, f"flick_deadzone_px{suffix}", controller.deadzone_px, tracker
-        ),
+        geometry=resolve_geometry(tracker=tracker),
+        calibration=resolve_calibration_cached(tracker=tracker),
+        **tuning.for_controller(),
+    )
+    setattr(
+        tracker,
+        _TUNING_SIGNATURE_ATTR.format(channel=_channel(is_sec)),
+        tuning.signature(),
     )
     return controller
 
@@ -95,8 +172,7 @@ def apply(dx, dy, distance_to_center, tracker, is_sec=False, frame=None, target_
 
         return legacy_normal._apply_flick_aim(dx, dy, tracker, is_sec)
 
-    controller = _get_controller(tracker, is_sec, frame=frame)
-    # ``_get_controller`` already refreshed geometry/calibration for this frame.
+    controller, tuning = _get_controller(tracker, is_sec, frame=frame)
     step = controller.step(
         dx,
         dy,
@@ -106,6 +182,13 @@ def apply(dx, dy, distance_to_center, tracker, is_sec=False, frame=None, target_
     )
 
     setattr(tracker, _STATE_ATTR.format(channel=_channel(is_sec)), controller.state)
+    _publish_status(
+        tracker,
+        is_sec,
+        controller,
+        tuning,
+        app=getattr(tracker, "app", None),
+    )
 
     if not step.move:
         return step
@@ -148,3 +231,12 @@ def describe(tracker, is_sec=False):
     if controller is None:
         return "FlickController(not initialised)"
     return controller.describe()
+
+
+def status(tracker, is_sec=False):
+    """Latest published status dict for a channel (or an empty dict)."""
+    status_map = getattr(tracker, _STATUS_ATTR, None)
+    if not isinstance(status_map, dict):
+        return {}
+    payload = status_map.get(_channel(is_sec))
+    return dict(payload) if isinstance(payload, dict) else {}
