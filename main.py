@@ -610,7 +610,7 @@ class AimTracker:
                     print("Erreur dans _estimate_head_positions:", e)
 
         targets_all = targets
-        use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", False))
+        use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", True))
         if targets_all and use_temporal_smoothing:
             targets_all = self._target_smoother.stabilize(targets_all, frame.xres / 2.0, frame.yres / 2.0)
             self.last_target = self._target_smoother.last_target

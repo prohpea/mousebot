@@ -406,15 +406,21 @@ def _apply_flick_aim(dx, dy, tracker, is_sec=False):
     Flick / One-Tap mode:
     Calculate true angular mouse counts and dispatch instant crisp snap to head.
     """
+    # Deadzone check to eliminate jitter when crosshair is already inside head hitbox
+    distance_error = math.hypot(dx, dy)
+    deadzone = float(getattr(config, "sec_aim_deadzone", 2.2 if is_sec else 1.5))
+    if distance_error <= deadzone:
+        return
+
     sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
 
     counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
 
     if is_sec:
-        strength_x = float(getattr(config, "flick_strength_x_sec", 0.090))
-        strength_y = float(getattr(config, "flick_strength_y_sec", 0.075))
-        max_step_counts = float(getattr(config, "sec_max_step_counts", 26.0))
+        strength_x = float(getattr(config, "flick_strength_x_sec", 0.035))
+        strength_y = float(getattr(config, "flick_strength_y_sec", 0.030))
+        max_step_counts = float(getattr(config, "sec_max_step_counts", 8.0))
         label = "Sec Aimbot (One-Tap Flick)"
     else:
         strength_x = float(getattr(config, "flick_strength_x", 0.70))
@@ -432,7 +438,7 @@ def _apply_flick_aim(dx, dy, tracker, is_sec=False):
 
     ddx, ddy = tracker._clip_movement(out_x, out_y)
     qdx, qdy = _quantize_with_residual(tracker, ddx, ddy, is_sec=is_sec)
-    if qdx == 0 and qdy == 0 and (abs(dx) + abs(dy)) >= 0.5:
+    if qdx == 0 and qdy == 0 and distance_error >= 3.5:
         if abs(dx) >= abs(dy):
             qdx = 1 if dx > 0 else -1
         else:
@@ -750,8 +756,8 @@ def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
     # 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩锛堣垏 Normal 妯″紡涓€鑷达級
     if is_sec:
         counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
-        ndx = counts_x * (x_speed / 100.0) * 0.090
-        ndy = counts_y * (y_speed / 100.0) * 0.075
+        ndx = counts_x * (x_speed / 100.0) * 0.035
+        ndy = counts_y * (y_speed / 100.0) * 0.030
     else:
         ndx, ndy = calculate_movement(dx, dy, sens, dpi)
         ndx *= x_speed

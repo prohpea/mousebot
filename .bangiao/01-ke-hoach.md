@@ -1,47 +1,47 @@
-# 📋 [PLANNER AGENT] BẢN THIẾT KẾ ĐỘT PHÁ: TRIỆT TIÊU HIỆN TƯỢNG SEC AIM NHẢY LOẠN (NYQUIST STABILITY & VELOCITY CLAMPING)
-**Mã hiệu:** `PLN-20261109-CVM-SEC-AIM-ANTI-OSCILLATION`  
+# 📋 [PLANNER AGENT] BẢN THIẾT KẾ ĐỘT PHÁ: TRIỆT TIÊU RUNG GIẬT TÂM DỰA TRÊN ĐỘ TRỄ THỰC TẾ 71MS
+**Mã hiệu:** `PLN-20261109-CVM-SEC-AIM-71MS-STABILIZATION`  
 **Vai trò:** Chief Architect & Lead Planner (Agency Agent Pipeline)  
 **Mô hình vận hành:** `gpt-6-sol` (Headless Read-Only Planning Mode)  
-**Nhiệm vụ:** Giải quyết triệt để hiện tượng Sec Aim bị nhảy loạn giật lắc trên màn hình khi ngắm bắn.
+**Nhiệm vụ:** Giải quyết triệt để hiện tượng tâm rung giật quá mạnh trong clip `MedalTVValorant20261109142241146.mp4`.
 
 ---
 
-## 1. Bản Chất Hiện Tượng & Cơ Chế Dao Động (Root Cause Analysis)
+## 1. Phát Hiện Gốc Rễ Độc Quyền Qua Phân Tích Khung Hình Video
 
-Sau khi phân tích trực tiếp video gameplay `MedalTVValorant20261109132510951.mp4`:
-- **Triệu chứng:** Khi kích hoạt Sec Aim, tâm súng giật qua lại dữ dội quanh đầu địch (limit cycle oscillation) với biên độ lớn, không thể ổn định để click 1 viên.
-- **Nguyên nhân cốt lõi (Điều khiển học - Control Theory):**
-  1. **Độ trễ phản hồi (Pipeline Latency $\tau$):** Quá trình chụp màn hình (Desktop Duplication / OBS Virtual Camera) $\to$ tính toán OpenCV $\to$ xếp hàng gửi xung chuột Serial qua COM port có độ trễ thực tế từ $15\text{ms}$ đến $20\text{ms}$ (tương đương $3 - 4$ khung hình ở $200\text{ FPS}$).
-  2. **Hệ số khuếch đại mạch hở quá mức (Excessive Open-Loop Gain):**
-     - Ở turn trước, `flick_strength_x_sec` được đặt là $0.85$ ($85\%$ xung lực trong 1 frame).
-     - Với $dx = 15\text{px}$, xung lực là $15 \times 21.4 \times 0.85 \approx 273\text{ counts/frame}$.
-     - Do độ trễ phản hồi $20\text{ms}$, bot liên tục gửi $4 \times 273 = 1092\text{ counts}$ trước khi ảnh chụp kịp cập nhật chuyển động của tâm súng.
-     - Tâm súng bị bắn vọt quá mục tiêu hơn $50\text{px}$ (Overshoot).
-  3. **Vòng lặp phân kỳ (Limit Cycle Oscillation):** Khung hình tiếp theo thấy đầu địch ở hướng ngược lại, bot lại phát lệnh gián đoạn ngược chiều cực mạnh, tạo thành dao động cộng hưởng $20\text{Hz}$ khiến tâm chuột nhảy loạn trên màn hình.
+Qua trích xuất trực tiếp từng khung hình và số liệu telemetry trên màn hình người chơi trong clip:
 
----
+### 1.1. Độ trễ trọn vòng thực tế là 71ms (14 khung hình ở 200 FPS)
+- Tại góc trên bên trái màn hình game của người chơi hiển thị rõ:
+  $$\text{Thời gian trễ trọn vòng + Độ trễ xử lý} = 71\text{ ms}$$
+- Ở tần số quét xử lý $200\text{ FPS}$ ($5\text{ms/frame}$), độ trễ $71\text{ms}$ tương đương với **$14.2$ khung hình** trôi qua giữa lúc chuột gửi lệnh chuyển động và lúc khung hình camera cập nhật chuyển động đó!
+- Với hệ số khuếch đại trước đó $0.090$:
+  Trong 14 khung hình, tổng quãng đường phát ra tích lũy bằng:
+  $$14 \times 0.090 = 1.26\text{ (vượt 126\% khoảng cách cần di chuyển!)}$$
+- Do đó, tâm chuột liên tục bị vọt lố qua lại quanh đầu mục tiêu (dao động con lắc trễ pha $7\text{Hz}$) với biên độ $\Delta dx \approx 29\text{px}$ và $\Delta dy \approx 39\text{px}$.
 
-## 2. Giải Pháp Toán Học Đột Phá: Tiêu Chuẩn Ổn Định Nyquist & Bộ Giới Hạn Vận Tốc Từng Khung (Velocity Clamping)
+### 1.2. Lỗi Ép Xung Vi Bước Cận Tâm (The Sub-Pixel Forcing Bug)
+- Trong `src/aim_system/normal.py`:
+  ```python
+  if qdx == 0 and qdy == 0 and (abs(dx) + abs(dy)) >= 0.5:
+      qdx = 1 if abs(dx) >= abs(dy) else -1
+  ```
+- Khi tâm súng đã ở rất gần đầu đối thủ ($dx \in [-1, +1]$), nhiễu camera và răng cưa ảnh luôn dao động $\pm 0.5 - 1.5\text{px}$.
+- Đoạn mã trên đã cưỡng bức phát lệnh di chuột $+1$ hoặc $-1$ count liên tục $200$ lần mỗi giây, khiến tâm súng không bao giờ được nghỉ ngơi mà rung bần bật như mô-tơ rung!
 
-Theo tiêu chuẩn ổn định hệ thống điều khiển rời rạc có trễ:
-$$K_p \le \frac{1}{\tau_{\text{delay}} \times \text{FPS}} \approx \frac{1}{4} = 0.25$$
-
-Để triệt tiêu hoàn toàn rung chấn và overshoot:
-1. **Hiệu chỉnh hệ số khuếch đại (Proportional Gain):**
-   - $K_{p,x} = 0.090$ (Trục ngang X)
-   - $K_{p,y} = 0.075$ (Trục dọc Y)
-2. **Bộ giới hạn xung lực mỗi khung hình (Per-Frame Physical Step Clamping):**
-   - Đặt giới hạn trần cứng: $\text{max\_step\_counts} = 26.0\text{ counts}$ ($\approx 1.2\text{px}$ mỗi khung hình).
-   - Dù đối thủ ở bất kỳ khoảng cách nào, quãng đường dịch chuyển trong cửa sổ trễ $20\text{ms}$ không bao giờ vượt quá $4.8\text{px}$, loại bỏ $100\%$ nguy cơ vọt lố (Zero Overshoot).
-3. **Đồng bộ hóa toàn diện cấu hình:**
-   - Cập nhật mặc định trong `src/aim_system/normal.py`, `src/utils/config.py`, `config.json` và toàn bộ preset trong `configs/`.
+### 1.3. Thiếu Bộ Lọc Ổn Định Tọa Độ Theo Thời Gian (Temporal Smoothing)
+- Biến `enable_target_temporal_smoothing` bị tắt (`False`), dẫn đến tọa độ đỉnh đầu bị giật theo từng pixel nhiễu của thuật toán màu.
 
 ---
 
-## 3. Phân Rã Công Việc Kỹ Thuật
+## 2. Giải Pháp Thiết Kế Triệt Tiêu Rung Giật (Zero-Jitter Architecture)
 
-| File mục tiêu | Nội dung thay đổi |
-| :--- | :--- |
-| `src/aim_system/normal.py` | Cập nhật `_apply_flick_aim` và `_apply_windmouse_aim` với gain $0.090 / 0.075$ và clamp $26.0$. |
-| `src/utils/config.py` | Bổ sung `sec_max_step_counts = 26.0`, cập nhật default `flick_strength_x_sec = 0.090`, `flick_strength_y_sec = 0.075`. |
-| `config.json` & `configs/*.json` | Đồng bộ toàn bộ các giá trị mới. |
+1. **Thiết lập Vùng Chết Khóa Tâm Tuyệt Đối (Deadzone Clamping):**
+   - Đặt `sec_aim_deadzone = 2.2px`.
+   - Khi $\sqrt{dx^2 + dy^2} \le 2.2\text{px}$ (tâm đã nằm trọn trong hitbox đầu), hàm lập tức `return`, ngắt hoàn toàn mọi xung chuột, khóa cứng tâm súng trên đầu địch, triệt tiêu $100\%$ rung lắc.
+   - Xóa bỏ fallback ép xung $\ge 0.5\text{px}$, chỉ cho phép bù vi bước khi khoảng cách $> 3.5\text{px}$.
+2. **Tái cân chỉnh Gain tương thích trọn vẹn độ trễ 71ms:**
+   - Hệ số khuếch đại: $K_{p,x} = 0.035$, $K_{p,y} = 0.030$.
+   - Giới hạn trần xung lực: $\text{sec\_max\_step\_counts} = 8.0\text{ counts}$ ($\approx 0.37\text{px/frame}$).
+   - Trong cửa sổ trễ 14 frame, tổng xung lực tích lũy tối đa chỉ là $5.2\text{px}$, hoàn toàn nằm trong giới hạn chống vọt lố.
+3. **Kích hoạt Bộ Lọc Ổn Định Tọa Độ Đích (`enable_target_temporal_smoothing = True`):**
+   - Áp dụng bộ lọc EMA ($\alpha = 0.45$) và cơ chế Hysteresis để loại bỏ răng cưa nhận diện của OpenCV.
