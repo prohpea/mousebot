@@ -1,92 +1,67 @@
-# 📋 [PLANNER AGENT] BÁO CÁO PHÂN TÍCH & KẾ HOẠCH XỬ LÝ LỖI KHỰNG TÂM / DỪNG TRACKING GẦN ĐẦU
-**Mã hiệu:** `PLAN-20261109-CVM-CLOSE-RANGE-STALL-FIX`  
-**Vai trò:** Lead Solutions Architect & Mouse Kinematics Specialist (Agency Agent Pipeline)  
-**Mô hình vận hành:** `gpt-6-sol` (Headless Read-Only Mode)  
-**Dự án:** CVM-colorBot v2.0 PRO - Micro-Correction & Deadzone Elimination  
-**Khách hàng/Ủy thác:** User  
-**Hiện tượng thực tế từ video người dùng:** Tốc độ lia tâm vào đầu bị chậm; khi tâm di chuyển đến gần khu vực đầu (còn cách khoảng 5 - 10 pixel) thì chuột **ngừng hẳn, không chịu tracking tiếp vào đầu**.  
+# 📋 [PLANNER AGENT] BẢN THIẾT KẾ & KẾ HOẠCH KHẮC PHỤC LỖI TÂM KÉO QUÁ CAO (HEAD LOCK OVERSHOOT)
+**Mã hiệu:** `PLN-20261109-CVM-AIM-OVER-HEAD-FIX`  
+**Vai trò:** Chief Architect & Lead Planner (Agency Agent Pipeline)  
+**Mô hình vận hành:** `gpt-6-sol` (Headless Read-Only Planning Mode)  
+**Tệp mục tiêu:** `main.py`, `src/utils/config.py`, `config.json`, `configs/*.json`
 
 ---
 
-## 1. Phân Tích Động Học & Phát Hiện Điểm Nghẽn Chí Mạng (Kinematic Root Cause)
+## 1. Bản Chất Kỹ Thuật Của Hiện Tượng "Kéo Quá Cao"
 
-Qua phân tích động lực học chuột với thông số của người dùng (**DPI 1100, In-game Sens 0.23**), Planner đã tìm ra chính xác nguyên nhân vì sao chuột bị "ngừng hẳn" khi tới gần đầu:
+Người dùng phản ánh: *"giờ thì lại kéo quá cao"*.  
+Sau khi thẩm tra toàn diện luồng tính toán tọa độ đích $Y$ (`cy`) và động học di chuyển chuột trục dọc:
 
-### 1.1. Công thức quy đổi góc quay chuột (`deg_per_count`)
-Tại Sens $0.23$ và DPI $1100$:
-$$\text{cm\_per\_rev} = \frac{54.54}{0.23} \approx 237.13\text{ cm}$$
-$$\text{count\_per\_cm} = \frac{1100}{2.54} \approx 433.07\text{ count/cm}$$
-$$\text{deg\_per\_count} = \frac{360.0}{237.13 \times 433.07} \approx \mathbf{0.003506}$$
+### 1.1. Lỗi định vị đỉnh đầu thay vì tâm đầu (`main.py` dòng 918-924)
+- Trong hàm `_estimate_head_positions`:
+  ```python
+  top_head_cutoff = np.min(ys) + max(4, int(upper_h * 0.40))
+  top_head_ys = ys[ys <= top_head_cutoff]
+  if len(top_head_ys) > 0:
+      heady_base = float(my1 + np.median(top_head_ys))
+  ```
+- Biến `np.min(ys)` là dòng pixel có màu tím/vàng **cao nhất** của nhân vật (chóp nón / đỉnh tóc).
+- Việc lọc `ys <= top_head_cutoff` rồi lấy `np.median(top_head_ys)` dẫn tới việc `heady_base` được neo cứng vào khoảng cách chỉ $2 - 4\text{px}$ bên dưới mép trên của bounding box.
+- Trong Valorant, chiều cao cơ thể người từ đỉnh đầu đến cằm chiếm khoảng $15\% - 18\%$ tổng chiều cao cơ thể. Tâm điểm của hitbox đầu (mũi / mắt / miệng) nằm ở cự ly khoảng **$11\% - 14\%$ tính từ đỉnh đầu**.
+- Việc gán `heady_base` ở vị trí sát rạt đỉnh tóc khiến tâm ngắm bị kéo lên đỉnh đầu hoặc lơ lửng bên trên đầu địch trong không trung!
 
-### 1.2. Hiện tượng "Vùng Chết Kép" (Double Deadzone Bug)
-Khi tâm súng đang cách đầu đối thủ khoảng $5 \sim 10\text{ pixel}$ trên màn hình:
-$$\text{ndy} = \text{pixel\_distance} \times \text{deg\_per\_count} \times \text{y\_speed}$$
-Với khoảng cách $8\text{px}$ và $y\_speed = 56$:
-$$\text{ndy} = 8 \times 0.003506 \times 56 = \mathbf{1.57\text{ count}}$$
-Với khoảng cách $5\text{px}$:
-$$\text{ndy} = 5 \times 0.003506 \times 56 = \mathbf{0.98\text{ count}}$$
+### 1.2. Giá trị âm của `aim_offsetY` gây kéo ngược lên trời
+- Trong `src/aim_system/normal.py`:
+  $$dy = (cy + \text{aim\_offsetY}) - \text{center\_y}$$
+- Hệ tọa độ màn hình Windows: gốc $(0,0)$ ở góc trên bên trái, trục $Y$ càng nhỏ thì càng hướng lên đỉnh màn hình (trời).
+- Hiện tại cấu hình mặc định đang đặt:
+  $$\text{aim\_offsetY} = -2, \quad \text{aim\_offsetY\_sec} = -4$$
+- Giá trị âm đã vô tình **trừ thêm 2 đến 4 pixel** theo trục $Y$, đẩy điểm ngắm lên cao hơn nữa ra ngoài hitbox đầu địch!
 
-Khi giá trị này được đưa vào bộ xử lý `windmouse_smooth.py`, nó lập tức va vào **2 bức tường chặn cứng**:
-1. **Bức tường 1 (Dòng 230 `windmouse_smooth.py`):**
-   ```python
-   distance = math.hypot(dx, dy)
-   if distance < 1.0:
-       return []  # <-- BỊ TRIỆT TIÊU! TRẢ VỀ RỖNG!
-   ```
-   Khi khoảng cách dưới $5\text{px}$ màn hình ($ndy = 0.98 < 1.0$), thuật toán coi đây là vùng chết và **trả về danh sách di chuyển rỗng (`[]`)**! Chuột hoàn toàn đứng im!
-2. **Bức tường 2 (Dòng 43 `windmouse_smooth.py` trong hàm `wind_mouse`):**
-   ```python
-   target_area = max(2.0, distance * config.smooth_target_area_ratio)
-   if distance_squared < target_area * target_area:
-       break  # <-- BỊ CẮT VÒNG LẶP NGAY DÒNG ĐẦU TIÊN!
-   ```
-   Giá trị `target_area` bị fix cứng tối thiểu là **`2.0`**!
-   Với bất kỳ khoảng cách nào dưới $10\text{px}$ màn hình ($ndy = 1.57 \sim 1.96 < 2.0$), vòng lặp WindMouse coi như đã "vào đích" và `break` ngay tức khắc mà không tạo ra bất kỳ bước di chuột nào!
-
-### 1.3. Nguyên nhân gây "Tốc độ lia tâm chậm" (Speed Choke)
-Tại `normal.py` và `windmouse_smooth.py`:
-- `smooth_close_range = 30.0`
-- `smooth_close_speed = 0.15` (Bị bóp nghẹt chỉ còn **15% tốc độ** khi vào cự ly 30 count).
-- `smooth_max_step_ratio = 0.08` (Bị nhân thêm hệ số 0.08).
-$\rightarrow$ Tốc độ di chuột thực tế bị giảm tới $98\%$, khiến tâm lê từng pixel cực kỳ chậm chạp trước khi đâm sầm vào vùng chết và đứng yên!
+### 1.3. Vận tốc trục dọc quá lớn (`normal_y_speed = 68.0`) tạo quán tính vượt đỉnh (Overshoot)
+- Trong Valorant, kẻ địch chủ yếu di chuyển ngang (A-D strafe). Biên độ di chuyển trục dọc rất hẹp ($5\text{px} - 15\text{px}$).
+- Việc đẩy `normal_y_speed` lên $68.0$ kết hợp với lực hút trọng trường WindMouse khiến gia tốc trục $Y$ tăng vọt, chuột bị "văng" vượt qua đầu trước khi kịp hãm tốc.
 
 ---
 
-## 2. Giải Pháp Thiết Kế Kỹ Thuật (Kinematic Architecture Redesign)
+## 2. Kế Hoạch Cải Tiến Kỹ Thuật (Specification)
 
-1. **Xóa bỏ Vùng Chết (Deadzone Elimination) & Thêm Cơ chế Vi chỉnh (Micro-Correction):**
-   - Giảm ngưỡng hủy di chuyển từ $1.0$ xuống **$0.2$** (chỉ dừng khi đã chạm tâm đầu sai số $< 0.2\text{px}$).
-   - Trong khoảng $0.2 \le \text{distance} < 1.0$: Kích hoạt bộ vi chỉnh phát lệnh di chuột tối thiểu $\pm 1\text{px}$ liên tục cho đến khi dính chặt tâm đầu, triệt tiêu 100% tình trạng khựng chuột.
-2. **Thu nhỏ `target_area` trong thuật toán `wind_mouse`:**
-   - Đổi `target_area = max(0.2, distance * 0.01)` (thay vì `max(2.0, ...)`).
-   - Đảm bảo vòng lặp WindMouse tính toán chi tiết từng bước micro-step đến tận milimet cuối cùng.
-3. **Khai phóng Tốc độ bám cự ly gần (Unleash Close-Range Tracking Speed):**
-   - Nâng `smooth_close_speed` từ `0.15` lên **`0.55`** (tăng gấp 3.6 lần độ nhạy khi áp sát đầu).
-   - Nâng `smooth_max_step_ratio` từ `0.08` lên **`0.22`**.
-   - Tăng tốc độ cấu hình trong `config.json`:
-     - `normal_x_speed`: `95.0` (từ 80.0)
-     - `normal_y_speed`: `68.0` (từ 56.0)
-     - `normalsmooth`: giảm từ `10` xuống `6` để loại bỏ độ trễ kéo rê chuột.
-     - `wm_min_step`: `1.2` | `wm_max_step`: `12.0` (cho phép bứt tốc lia nhanh và dứt khoát).
+### 2.1. Tái cấu trúc hàm tinh chỉnh tọa độ đầu trong `main.py`
+- Thay vì lấy trung vị của các pixel sát mép đỉnh nón/tóc:
+  - Xác định `head_top = np.min(ys)` (đỉnh viền đầu).
+  - Tính khoảng cách từ đỉnh đầu xuống tâm đầu thực tế:
+    $$\Delta y_{\text{head\_center}} = \max(3.0, \text{height} \times 0.11)$$
+  - Tọa độ tâm đầu chuẩn xác:
+    $$\text{heady\_base} = \text{my1} + \text{head\_top} + \Delta y_{\text{head\_center}}$$
+  - Đồng thời cho phép áp dụng bù trừ người dùng nếu có (`offset_y`).
+- Cập nhật tỷ lệ ước tính hình học mặc định `head_estimate_ratio` từ `0.09` lên `0.13` (phòng trường hợp không có mask).
 
----
+### 2.2. Chuẩn hóa `aim_offsetY` về giá trị cân bằng
+- Đổi `aim_offsetY = 0` (hoặc `+1` để hơi ghìm về phía cằm/cổ, tối ưu cho burst/spray chống giật đạn).
+- Đổi `aim_offsetY_sec = 0`.
 
-## 3. Bản Vẽ Phân Bổ File Cho Coder (Scope of Work)
-1. **`src/aim_system/windmouse_smooth.py`**:
-   - Viết lại điều kiện deadzone và cơ chế micro-step fallback.
-   - Hiệu chỉnh `target_area` trong `wind_mouse`.
-2. **`src/aim_system/normal.py`**:
-   - Cập nhật `_WindMouseConfig`: `smooth_close_speed = 0.55`, `smooth_max_step_ratio = 0.22`.
-3. **`config.json` & Presets**:
-   - Tối ưu hóa tốc độ và độ mượt nhạy cho 253 eDPI.
-4. **Đồng bộ GitHub Private repo**.
+### 2.3. Điều chỉnh vận tốc trục dọc `normal_y_speed`
+- Giảm `normal_y_speed` từ `68.0` xuống **`48.0`** (giữ nguyên `normal_x_speed = 95.0`).
+- Giúp trục dọc di chuyển đầm chắc, triệt tiêu hoàn toàn hiện tượng văng vượt quá đầu.
 
 ---
 
-## 4. Tiêu Chuẩn Nghiệm Thu (Acceptance Criteria - AC)
-- [ ] **AC-1:** Ở khoảng cách từ $1\text{px} \sim 10\text{px}$, hệ thống KHÔNG ĐƯỢC trả về đường dẫn rỗng (`[]`).
-- [ ] **AC-2:** Cơ chế Micro-correction phát tín hiệu di chuột liên tục ở cự ly $< 1.0$ count.
-- [ ] **AC-3:** `smooth_close_speed == 0.55` giúp lia tâm nhanh, dứt khoát, không bị lờ đờ.
-- [ ] **AC-4:** Đẩy commit lên GitHub Private repo thành công và lập biên bản đầy đủ tại `.bangiao/`.
-
-**Lệnh chuyển giao:** Bàn giao bản thiết kế sang cho **Coder Agent (`deepseek-v4.1-flash`)** thi công ngay.
+## 3. Danh Mục File Can Thiệp
+1. `main.py`: Cập nhật logic `_estimate_head_positions`.
+2. `src/utils/config.py`: Chuẩn hóa default `aim_offsetY = 0`, `head_estimate_ratio = 0.13`.
+3. `config.json`: Đặt `aim_offsetY: 0`, `aim_offsetY_sec: 0`, `normal_y_speed: 48.0`, `head_estimate_ratio: 0.13`.
+4. `configs/*.json`: Đồng bộ toàn bộ các profile cấu hình hiện hành.
