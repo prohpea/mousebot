@@ -218,8 +218,8 @@
     "normal_y_speed_sec": 52.0,
     "normalsmooth_sec": 4,
     "normalsmoothfov_sec": 28,
-    "flick_strength_x_sec": 0.85,
-    "flick_strength_y_sec": 0.75,
+    "flick_strength_x_sec": 0.09,
+    "flick_strength_y_sec": 0.075,
     "fovsize_sec": 30.0,
     "ads_fov_enabled_sec": false,
     "ads_fovsize_sec": 30.0,
@@ -365,5 +365,6 @@
     "mouse_lock_main_y": false,
     "mouse_lock_sec_x": false,
     "mouse_lock_sec_y": false,
-    "target_fps": 144
+    "target_fps": 144,
+    "sec_max_step_counts": 26.0
 }

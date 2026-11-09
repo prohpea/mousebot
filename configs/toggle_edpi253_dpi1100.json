@@ -217,8 +217,8 @@
     "normal_y_speed_sec": 52.0,
     "normalsmooth_sec": 4,
     "normalsmoothfov_sec": 28,
-    "flick_strength_x_sec": 0.85,
-    "flick_strength_y_sec": 0.75,
+    "flick_strength_x_sec": 0.09,
+    "flick_strength_y_sec": 0.075,
     "fovsize_sec": 30.0,
     "ads_fov_enabled_sec": false,
     "ads_fovsize_sec": 30.0,
@@ -367,5 +367,6 @@
     "target_fps": 144,
     "anti_tremor_deadband": 1.0,
     "smooth_reaction_min": 0.035,
-    "smooth_reaction_max": 0.07
+    "smooth_reaction_max": 0.07,
+    "sec_max_step_counts": 26.0
 }

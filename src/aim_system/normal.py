@@ -412,21 +412,23 @@ def _apply_flick_aim(dx, dy, tracker, is_sec=False):
     counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
 
     if is_sec:
-        strength_x = float(getattr(config, "flick_strength_x_sec", 0.85))
-        strength_y = float(getattr(config, "flick_strength_y_sec", 0.75))
+        strength_x = float(getattr(config, "flick_strength_x_sec", 0.090))
+        strength_y = float(getattr(config, "flick_strength_y_sec", 0.075))
+        max_step_counts = float(getattr(config, "sec_max_step_counts", 26.0))
         label = "Sec Aimbot (One-Tap Flick)"
     else:
         strength_x = float(getattr(config, "flick_strength_x", 0.70))
         strength_y = float(getattr(config, "flick_strength_y", strength_x))
+        max_step_counts = float(getattr(config, "flick_max_step_counts", 999.0))
         label = "Main Aimbot (Flick)"
 
-    strength_x = max(0.01, min(2.0, strength_x))
+    strength_x = max(0.001, min(2.0, strength_x))
     if strength_y <= 0.0:
         strength_y = strength_x
-    strength_y = max(0.01, min(2.0, strength_y))
+    strength_y = max(0.001, min(2.0, strength_y))
 
-    out_x = counts_x * strength_x
-    out_y = counts_y * strength_y
+    out_x = max(-max_step_counts, min(max_step_counts, counts_x * strength_x))
+    out_y = max(-max_step_counts, min(max_step_counts, counts_y * strength_y))
 
     ddx, ddy = tracker._clip_movement(out_x, out_y)
     qdx, qdy = _quantize_with_residual(tracker, ddx, ddy, is_sec=is_sec)
@@ -748,8 +750,8 @@ def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
     # 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩锛堣垏 Normal 妯″紡涓€鑷达級
     if is_sec:
         counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
-        ndx = counts_x * (x_speed / 100.0) * 0.85
-        ndy = counts_y * (y_speed / 100.0) * 0.75
+        ndx = counts_x * (x_speed / 100.0) * 0.090
+        ndy = counts_y * (y_speed / 100.0) * 0.075
     else:
         ndx, ndy = calculate_movement(dx, dy, sens, dpi)
         ndx *= x_speed
