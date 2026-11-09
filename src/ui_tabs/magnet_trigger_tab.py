@@ -39,12 +39,21 @@ def _build_normal_params(app, parent):
 
 
 def _build_flick_params(app, parent):
-    app._add_slider_in_frame(parent, "Strength X", "magnet_flick_strength_x", 0.01, 5.0,
-                             float(getattr(config, "magnet_flick_strength_x", 5.0)),
-                             lambda v: _set_float(app, "magnet_flick_strength_x", v), is_float=True)
-    app._add_slider_in_frame(parent, "Strength Y", "magnet_flick_strength_y", 0.01, 5.0,
-                             float(getattr(config, "magnet_flick_strength_y", 5.0)),
-                             lambda v: _set_float(app, "magnet_flick_strength_y", v), is_float=True)
+    app._add_slider_in_frame(parent, "Gain (1.0 = physical)", "magnet_flick_gain", 0.1, 3.0,
+                             float(getattr(config, "magnet_flick_gain", getattr(config, "flick_gain", 1.0))),
+                             lambda v: _set_float(app, "magnet_flick_gain", v), is_float=True)
+    app._add_slider_in_frame(parent, "Max Counts / Step", "magnet_flick_max_counts", 1, 20000,
+                             float(getattr(config, "magnet_flick_max_counts", 6000.0)),
+                             lambda v: _set_float(app, "magnet_flick_max_counts", v))
+    app._add_slider_in_frame(parent, "Max Iterations", "magnet_flick_max_iterations", 1, 10,
+                             float(getattr(config, "magnet_flick_max_iterations", 4)),
+                             lambda v: _set_int(app, "magnet_flick_max_iterations", v))
+    app._add_slider_in_frame(parent, "Budget (ms)", "magnet_flick_budget_ms", 20, 1000,
+                             float(getattr(config, "magnet_flick_budget_ms", 120.0)),
+                             lambda v: _set_float(app, "magnet_flick_budget_ms", v))
+    app._add_slider_in_frame(parent, "Deadzone (px)", "magnet_flick_deadzone_px", 0.0, 20.0,
+                             float(getattr(config, "magnet_flick_deadzone_px", 1.5)),
+                             lambda v: _set_float(app, "magnet_flick_deadzone_px", v), is_float=True)
 
 
 def _build_silent_params(app, parent):

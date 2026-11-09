@@ -5011,13 +5011,22 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "normalsmoothfov", 10)),
                                       self._on_config_normal_smoothfov_changed)
         elif current_mode == "Flick":
-            self._add_subtitle_in_frame(self.card_windmouse.content, "FLICK PARAMETERS")
-            self._add_slider_in_frame(self.card_windmouse.content, "Strength X", "flick_strength_x", 0.01, 5.0,
-                                      float(getattr(config, "flick_strength_x", 5.0)),
-                                      self._on_flick_strength_x_changed, is_float=True)
-            self._add_slider_in_frame(self.card_windmouse.content, "Strength Y", "flick_strength_y", 0.01, 5.0,
-                                      float(getattr(config, "flick_strength_y", 5.0)),
-                                      self._on_flick_strength_y_changed, is_float=True)
+            self._add_subtitle_in_frame(self.card_windmouse.content, "FLICK PARAMETERS (CLOSED LOOP)")
+            self._add_slider_in_frame(self.card_windmouse.content, "Gain (1.0 = physical)", "flick_gain", 0.1, 3.0,
+                                      float(getattr(config, "flick_gain", 1.0)),
+                                      self._on_flick_gain_changed, is_float=True)
+            self._add_slider_in_frame(self.card_windmouse.content, "Max Counts / Step", "flick_max_counts", 1, 20000,
+                                      float(getattr(config, "flick_max_counts", 6000.0)),
+                                      self._on_flick_max_counts_changed)
+            self._add_slider_in_frame(self.card_windmouse.content, "Max Iterations", "flick_max_iterations", 1, 10,
+                                      float(getattr(config, "flick_max_iterations", 4)),
+                                      self._on_flick_max_iterations_changed)
+            self._add_slider_in_frame(self.card_windmouse.content, "Budget (ms)", "flick_budget_ms", 20, 1000,
+                                      float(getattr(config, "flick_budget_ms", 120.0)),
+                                      self._on_flick_budget_ms_changed)
+            self._add_slider_in_frame(self.card_windmouse.content, "Deadzone (px)", "flick_deadzone_px", 0.0, 20.0,
+                                      float(getattr(config, "flick_deadzone_px", 1.5)),
+                                      self._on_flick_deadzone_px_changed, is_float=True)
         elif current_mode == "Silent":
             self._add_subtitle_in_frame(self.card_windmouse.content, "SILENT PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse.content, "Distance (Multiplier)", "silent_distance", 0.1, 10.0,
@@ -5142,6 +5151,267 @@ class ViewerApp(ctk.CTk):
             command=lambda v: setattr(config, "audio_feedback_enabled", v),
             accent_color="#BD93F9"
         ).pack(fill="x", pady=(4, 0))
+
+        # ── CARD 5: CALIBRATION (Col 0+1, Row 2) ──
+        # This is what removes the magic numbers (54.54 cm/rev, 103 deg). Until a
+        # measurement exists the analytic model is used; once measured, the
+        # measured counts_per_deg always wins.
+        self._build_calibration_card(grid_container)
+
+    def _build_calibration_card(self, grid_container):
+        """Calibration panel: measure counts_per_deg instead of trusting constants."""
+        self.card_calibration = ModernCard(
+            grid_container,
+            "Flick Calibration",
+            icon="📐",
+            badge_text="Accuracy",
+            accent_color="#22D3EE",
+        )
+        self.card_calibration.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=0, pady=(0, 10))
+        content = self.card_calibration.content
+
+        # Geometry inputs (the analytic model's only remaining assumptions).
+        self._add_slider_in_frame(
+            content, "Horizontal FOV (deg)", "hfov_deg", 40.0, 140.0,
+            float(getattr(config, "hfov_deg", 103.0)),
+            self._on_hfov_changed, is_float=True,
+        )
+
+        # Calibration state readout.
+        self.calibration_state_label = ctk.CTkLabel(
+            content,
+            text=self._calibration_state_text(),
+            font=("Consolas", 10),
+            text_color=COLOR_TEXT_DIM,
+            justify="left",
+            anchor="w",
+        )
+        self.calibration_state_label.pack(fill="x", pady=(4, 6))
+
+        # One-shot pulse controls: send a known count, then type what you saw.
+        row = ctk.CTkFrame(content, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(row, text="Test impulse (counts):", font=FONT_MAIN, text_color=COLOR_TEXT).pack(side="left")
+        self.calibration_counts_entry = ctk.CTkEntry(row, width=80, height=25, justify="center")
+        self.calibration_counts_entry.insert(0, "100")
+        self.calibration_counts_entry.pack(side="left", padx=(8, 8))
+
+        self.calibration_axis_var = tk.StringVar(value="x")
+        ctk.CTkOptionMenu(
+            row,
+            values=["x", "y"],
+            variable=self.calibration_axis_var,
+            width=70,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            row,
+            text="Send impulse",
+            width=110,
+            command=self._on_calibration_send_impulse,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_NAV_HOVER_BG,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+        ).pack(side="left")
+
+        row2 = ctk.CTkFrame(content, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(row2, text="Measured shift (px):", font=FONT_MAIN, text_color=COLOR_TEXT).pack(side="left")
+        self.calibration_px_entry = ctk.CTkEntry(row2, width=80, height=25, justify="center")
+        self.calibration_px_entry.insert(0, "0")
+        self.calibration_px_entry.pack(side="left", padx=(8, 8))
+        ctk.CTkButton(
+            row2,
+            text="Record sample",
+            width=110,
+            command=self._on_calibration_record_sample,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_NAV_HOVER_BG,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+        ).pack(side="left")
+
+        row3 = ctk.CTkFrame(content, fg_color="transparent")
+        row3.pack(fill="x", pady=(4, 0))
+        self.calibration_samples_label = ctk.CTkLabel(
+            row3, text="Samples: 0", font=("Consolas", 10), text_color=COLOR_TEXT_DIM
+        )
+        self.calibration_samples_label.pack(side="left")
+
+        ctk.CTkButton(
+            row3,
+            text="Fit & save",
+            width=110,
+            command=self._on_calibration_fit,
+            fg_color="#10B981",
+            hover_color="#059669",
+            text_color="#04120C",
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            row3,
+            text="Clear",
+            width=80,
+            command=self._on_calibration_clear,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_NAV_HOVER_BG,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+        ).pack(side="right")
+
+        self._calibration_samples = {"x": [], "y": []}
+
+    def _calibration_state_text(self):
+        try:
+            from src.aim_system.aim_math import resolve_calibration
+
+            calib = resolve_calibration()
+            if calib.is_measured:
+                warn = ""
+                if calib.needs_recalibration_warning():
+                    warn = (
+                        f"\nWARN measured scale differs from analytic by "
+                        f"{calib.divergence_from_analytic * 100:+.1f}%"
+                    )
+                return (
+                    f"source=MEASURED  counts/deg=({calib.counts_per_deg_x:.4f}, "
+                    f"{calib.counts_per_deg_y:.4f}){warn}"
+                )
+            return (
+                f"source=ANALYTIC  counts/deg=({calib.counts_per_deg_x:.4f}, "
+                f"{calib.counts_per_deg_y:.4f})  "
+                f"— calibrate to remove 54.54 / {float(getattr(config, 'hfov_deg', 103.0)):.1f}"
+            )
+        except Exception as e:
+            return f"calibration unavailable: {e}"
+
+    def _refresh_calibration_labels(self):
+        for attr, text in (
+            ("calibration_state_label", self._calibration_state_text()),
+            (
+                "calibration_samples_label",
+                "Samples: x={0}, y={1}".format(
+                    len(self._calibration_samples.get("x", [])),
+                    len(self._calibration_samples.get("y", [])),
+                ),
+            ),
+        ):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(text=text)
+                except Exception:
+                    pass
+
+    def _on_hfov_changed(self, val):
+        config.hfov_deg = float(val)
+        self._refresh_calibration_labels()
+
+    def _on_calibration_send_impulse(self):
+        """Send ONE known impulse so the user can measure the real pixel shift."""
+        try:
+            counts = float(self.calibration_counts_entry.get().strip())
+        except Exception:
+            log_print("[Calibration] invalid counts value")
+            return
+        axis = str(self.calibration_axis_var.get()).strip().lower()
+        dx = counts if axis == "x" else 0.0
+        dy = counts if axis == "y" else 0.0
+        try:
+            # A dedicated tag: the queue merges per tag, so a calibration pulse
+            # must never be folded into a live flick/track command (that would
+            # invalidate the measurement).
+            self.tracker.move_queue.put_nowait((dx, dy, 0.0, "calib"))
+            log_print(f"[Calibration] impulse sent: dx={dx:.1f} dy={dy:.1f}")
+        except Exception as e:
+            log_print(f"[Calibration] failed to queue impulse: {e}")
+
+    def _on_calibration_record_sample(self):
+        """Record (commanded counts, observed pixel shift) for the active axis."""
+        try:
+            counts = float(self.calibration_counts_entry.get().strip())
+            observed_px = abs(float(self.calibration_px_entry.get().strip()))
+        except Exception:
+            log_print("[Calibration] invalid sample values")
+            return
+        if counts <= 0 or observed_px <= 0:
+            log_print("[Calibration] counts and measured shift must be > 0")
+            return
+        axis = str(self.calibration_axis_var.get()).strip().lower()
+        axis = "y" if axis == "y" else "x"
+        self._calibration_samples.setdefault(axis, []).append((observed_px, counts))
+        log_print(
+            f"[Calibration] sample {axis}: {counts:.1f} counts -> {observed_px:.2f} px "
+            f"({len(self._calibration_samples[axis])} total)"
+        )
+        self._refresh_calibration_labels()
+
+    def _on_calibration_fit(self):
+        """Fit both axes and store measured counts_per_deg (or refuse the data)."""
+        from src.aim_system.aim_math import (
+            counts_per_deg_from_slope,
+            fit_calibration,
+            resolve_geometry,
+        )
+
+        results = {}
+        for axis in ("x", "y"):
+            samples = self._calibration_samples.get(axis, [])
+            fit = fit_calibration(samples, min_r2=0.99)
+            if fit is None:
+                continue
+            results[axis] = fit
+
+        if not results:
+            log_print(
+                "[Calibration] fit rejected: need >=2 points per axis with R^2 >= 0.99 "
+                "(measure at least 5 points x 4 directions)"
+            )
+            return
+
+        geometry = resolve_geometry(frame=getattr(self.tracker, "_aim_frame", None))
+        xy = (
+            results["x"][0] if "x" in results else (
+                results["y"][0] * geometry.focal_x / max(geometry.focal_y, 1e-9)
+            )
+        )
+        yy = (
+            results["y"][0] if "y" in results else (
+                results["x"][0] * geometry.focal_y / max(geometry.focal_x, 1e-9)
+            )
+        )
+        cpd_x, cpd_y = counts_per_deg_from_slope(geometry, xy, yy)
+        if cpd_x <= 0 or cpd_y <= 0:
+            log_print("[Calibration] fit produced a non-positive scale; keeping analytic model")
+            return
+
+        config.counts_per_deg_x = float(cpd_x)
+        config.counts_per_deg_y = float(cpd_y)
+        config.calibration_r2 = float(
+            min((fit[2] for fit in results.values()), default=0.0)
+        )
+        config.calibration_samples = int(
+            sum(len(self._calibration_samples.get(a, [])) for a in ("x", "y"))
+        )
+        log_print(
+            f"[Calibration] saved counts_per_deg=({cpd_x:.4f}, {cpd_y:.4f}) "
+            f"R2={config.calibration_r2:.4f}"
+        )
+        self._refresh_calibration_labels()
+
+    def _on_calibration_clear(self):
+        """Drop the measurement and fall back to the analytic model."""
+        config.counts_per_deg_x = 0.0
+        config.counts_per_deg_y = 0.0
+        config.calibration_r2 = 0.0
+        config.calibration_samples = 0
+        self._calibration_samples = {"x": [], "y": []}
+        log_print("[Calibration] measurement cleared; using analytic model")
+        self._refresh_calibration_labels()
 
     def _show_sec_aimbot_tab(self):
         self._active_tab_name = "Sec Aimbot"
@@ -5301,13 +5571,22 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "normalsmoothfov_sec", 20)),
                                       self._on_config_normal_smoothfov_sec_changed)
         elif current_mode_sec == "Flick":
-            self._add_subtitle_in_frame(self.card_windmouse_sec.content, "FLICK PARAMETERS")
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Strength X", "flick_strength_x_sec", 0.01, 5.0,
-                                      float(getattr(config, "flick_strength_x_sec", 5.0)),
-                                      self._on_flick_strength_x_sec_changed, is_float=True)
-            self._add_slider_in_frame(self.card_windmouse_sec.content, "Strength Y", "flick_strength_y_sec", 0.01, 5.0,
-                                      float(getattr(config, "flick_strength_y_sec", 5.0)),
-                                      self._on_flick_strength_y_sec_changed, is_float=True)
+            self._add_subtitle_in_frame(self.card_windmouse_sec.content, "FLICK PARAMETERS (CLOSED LOOP)")
+            self._add_slider_in_frame(self.card_windmouse_sec.content, "Gain (1.0 = physical)", "flick_gain_sec", 0.1, 3.0,
+                                      float(getattr(config, "flick_gain_sec", 1.0)),
+                                      self._on_flick_gain_sec_changed, is_float=True)
+            self._add_slider_in_frame(self.card_windmouse_sec.content, "Max Counts / Step", "flick_max_counts_sec", 1, 20000,
+                                      float(getattr(config, "flick_max_counts_sec", 6000.0)),
+                                      self._on_flick_max_counts_sec_changed)
+            self._add_slider_in_frame(self.card_windmouse_sec.content, "Max Iterations", "flick_max_iterations_sec", 1, 10,
+                                      float(getattr(config, "flick_max_iterations_sec", 4)),
+                                      self._on_flick_max_iterations_sec_changed)
+            self._add_slider_in_frame(self.card_windmouse_sec.content, "Budget (ms)", "flick_budget_ms_sec", 20, 1000,
+                                      float(getattr(config, "flick_budget_ms_sec", 120.0)),
+                                      self._on_flick_budget_ms_sec_changed)
+            self._add_slider_in_frame(self.card_windmouse_sec.content, "Deadzone (px)", "flick_deadzone_px_sec", 0.0, 20.0,
+                                      float(getattr(config, "flick_deadzone_px_sec", 2.0)),
+                                      self._on_flick_deadzone_px_sec_changed, is_float=True)
         elif current_mode_sec == "Silent":
             self._add_subtitle_in_frame(self.card_windmouse_sec.content, "SILENT PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse_sec.content, "Distance (Multiplier)", "silent_distance_sec", 0.1, 10.0,
@@ -7664,6 +7943,10 @@ class ViewerApp(ctk.CTk):
             if hasattr(self.tracker, "_target_smoother"):
                 self.tracker._target_smoother.switch_confirm_frames = int(self.tracker.switch_confirm_frames)
                 self.tracker._target_smoother.ema_alpha = float(self.tracker.ema_alpha)
+            # Frame geometry / calibration / flick budget
+            self.tracker.max_speed = float(getattr(config, "max_speed", 6000.0))
+            self.tracker.hfov_deg = float(getattr(config, "hfov_deg", 103.0))
+            self.tracker.vfov_deg = float(getattr(config, "vfov_deg", 0.0))
             self.tracker.rcs_pull_speed = config.rcs_pull_speed
             self.tracker.rcs_activation_delay = config.rcs_activation_delay
             self.tracker.rcs_rapid_click_threshold = config.rcs_rapid_click_threshold
@@ -9417,7 +9700,41 @@ class ViewerApp(ctk.CTk):
         config.normal_y_speed = val
         self.tracker.normal_y_speed = val
 
+    def _on_flick_gain_changed(self, val):
+        config.flick_gain = float(val)
+
+    def _on_flick_gain_sec_changed(self, val):
+        config.flick_gain_sec = float(val)
+
+    def _on_flick_max_counts_changed(self, val):
+        config.flick_max_counts = float(val)
+
+    def _on_flick_max_counts_sec_changed(self, val):
+        config.flick_max_counts_sec = float(val)
+
+    def _on_flick_max_iterations_changed(self, val):
+        config.flick_max_iterations = max(1, min(10, int(float(val))))
+
+    def _on_flick_max_iterations_sec_changed(self, val):
+        config.flick_max_iterations_sec = max(1, min(10, int(float(val))))
+
+    def _on_flick_budget_ms_changed(self, val):
+        config.flick_budget_ms = float(val)
+
+    def _on_flick_budget_ms_sec_changed(self, val):
+        config.flick_budget_ms_sec = float(val)
+        # Keep the legacy alias in sync so old saves stay coherent.
+        config.sec_flick_cooldown_ms = float(val)
+
+    def _on_flick_deadzone_px_changed(self, val):
+        config.flick_deadzone_px = float(val)
+
+    def _on_flick_deadzone_px_sec_changed(self, val):
+        config.flick_deadzone_px_sec = float(val)
+
+    # Legacy callbacks kept so older saved layouts / scripts do not break.
     def _on_flick_strength_x_changed(self, val):
+        config.flick_gain = float(val)
         config.flick_strength_x = float(val)
 
     def _on_flick_strength_y_changed(self, val):
@@ -9800,6 +10117,7 @@ class ViewerApp(ctk.CTk):
         mode_value = self._aim_mode_display_to_value(val)
         config.mode = mode_value
         self.tracker.mode = mode_value
+        self._reset_aim_state_after_mode_change(is_sec=False)
         # 閲嶆柊娓叉煋 Aimbot tab 浠ラ’绀哄皪鎳夋ā寮忕殑鍙冩暩
         self._show_aimbot_tab()
         # 閲嶆柊楂樹寒姝ｇ⒑鐨勫皫鑸寜閳?
@@ -9809,10 +10127,24 @@ class ViewerApp(ctk.CTk):
         mode_value = self._aim_mode_display_to_value(val)
         config.mode_sec = mode_value
         self.tracker.mode_sec = mode_value
+        self._reset_aim_state_after_mode_change(is_sec=True)
         # 閲嶆柊娓叉煋 Sec Aimbot tab 浠ラ’绀哄皪鎳夋ā寮忕殑鍙冩暩
         self._show_sec_aimbot_tab()
         # 閲嶆柊楂樹寒姝ｇ⒑鐨勫皫鑸寜閳?
         self._set_nav_active("Sec Aimbot")
+
+    def _reset_aim_state_after_mode_change(self, is_sec):
+        """Drop stale per-mode state so a newly selected mode starts clean.
+
+        Without this, a spent flick budget or a PID integrator from the previous
+        mode leaks into the new one.
+        """
+        try:
+            from src.aim_system.normal import reset_aim_state
+
+            reset_aim_state(self.tracker, is_sec=is_sec)
+        except Exception as e:
+            log_print(f"[UI] aim state reset error: {e}")
     
     # Sec Aimbot Callbacks
     def _on_normal_x_speed_sec_changed(self, val): 
@@ -9832,6 +10164,7 @@ class ViewerApp(ctk.CTk):
         self.tracker.normalsmoothfov_sec = val
 
     def _on_flick_strength_x_sec_changed(self, val):
+        config.flick_gain_sec = float(val)
         config.flick_strength_x_sec = float(val)
 
     def _on_flick_strength_y_sec_changed(self, val):

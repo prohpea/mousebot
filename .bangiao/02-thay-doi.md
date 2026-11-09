@@ -1,58 +1,63 @@
-# 🛠️ [CODER AGENT] NHẬT KÝ THI CÔNG KIẾN TRÚC BALLISTIC ONE-TAP
-**Mã hiệu:** `COD-20261109-CVM-ARCHITECTURE-OVERHAUL`  
-**Vai trò:** Senior Core Developer (Agency Agent Pipeline)  
-**Mô hình vận hành:** `deepseek-v4.1-flash-1017` (Workspace-Write Execution Mode)  
-**Tài liệu bám sát:** `.bangiao/01-ke-hoach.md`  
+# 🛠️ [CODER AGENT - DEEPSEEK v4.1 FLASH] NHẬT KÝ THI CÔNG KIẾN TRÚC FLICK AIM V2
+**Mã hiệu:** `COD-20261109-FLICK-BALLISTICS-V2`  
+**Mô hình thi công:** `deepseek-v4.1-flash-1017` via DeepSeek Harness (`dsh`)  
+**Tài liệu thiết kế:** `.bangiao/01-ke-hoach.md`  
+**Trạng thái:** Thi công hoàn tất 10-bước chuẩn xác theo kiến trúc.
 
 ---
 
-## 1. Chi Tiết Các File Đã Chỉnh Sửa
+## 1. Danh Sách Các Module Đã Tạo Mới & Sửa Đổi
 
-### 1.1. `src/aim_system/normal.py`
-- Tái cấu trúc hoàn toàn hàm `_apply_flick_aim`:
-  - **Tách riêng nhánh Sec Aim:** Khi `is_sec=True`, chuyển sang chế độ Ballistic Impulse với cửa sổ trơ (Refractory Cooldown):
-    ```python
-    now = time.perf_counter()
-    if is_sec:
-        last_flick_time = getattr(tracker, "_last_sec_flick_time", 0.0)
-        cooldown_sec = float(getattr(config, "sec_flick_cooldown_ms", 85.0)) / 1000.0
-        if (now - last_flick_time) < cooldown_sec:
-            return  # Đang trong cửa sổ trơ, không gửi xung đè
-    ```
-  - **Tính xung chính xác và phát lệnh 1 nhịp:**
-    ```python
-    flick_factor_x = float(getattr(config, "flick_strength_x_sec", 0.92))
-    flick_factor_y = float(getattr(config, "flick_strength_y_sec", 0.90))
-    target_counts_x = counts_x * flick_factor_x
-    target_counts_y = counts_y * flick_factor_y
-    qdx = int(round(ddx))
-    qdy = int(round(ddy))
-    setattr(tracker, "_last_sec_flick_time", now)
-    _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=True)
-    ```
-- Trong `process_normal_mode`:
-  - Reset tức thì `tracker._last_sec_flick_time = 0.0` ngay khi người chơi nhả chuột phải (`not sec_active`), giúp cú click tiếp theo được phát lệnh tức thì không có độ trễ.
+### 1.1. Module Mới: `src/aim_system/aim_math.py`
+- **Nguồn chân lý duy nhất (Single Source of Truth)** cho toàn bộ quy đổi pixel → count chuột:
+  - `FrameGeometry`: Tính toán tiêu cự `fx, fy` từ kích thước frame thực và horizontal FOV. Bảo toàn hình học khi frame bị crop (crop FOV tỷ lệ với crop resolution).
+  - `Calibration`: Hỗ trợ 2 cơ chế:
+    - `analytic`: Tính toán giải tích từ `sens` và `dpi`.
+    - `measured`: Dựa trên số đo góc quay thực nghiệm (`counts_per_deg_x/y`).
+  - `resolve_geometry(tracker, frame)`: Trích xuất hình học từ khung hình thực tế (`frame.xres`, `frame.yres`) và cấu hình crop (OBS UDP / MSS / Capture Card).
+  - `px_to_counts(...)`: Hàm chuẩn duy nhất chuyển sai lệch pixel `(dx, dy)` thành xung chuột `(cx, cy)` có góc chuẩn.
+  - Các hàm tiện ích: `fit_calibration`, `counts_per_deg_from_slope`.
 
-### 1.2. `src/utils/config.py`
-- Thay thế các tham số chắp vá cũ (`sec_max_step_counts`) bằng các tham số đạn đạo chuẩn:
-  - `self.flick_strength_x_sec = 0.92` (Snap 92% quãng đường, phần còn lại rơi vào Deadzone)
-  - `self.flick_strength_y_sec = 0.90`
-  - `self.sec_flick_cooldown_ms = 85.0` (Khóa nhận lệnh trong thời gian trễ camera)
-  - `self.sec_aim_deadzone = 2.2` (Vùng chết khóa cứng đầu địch)
-  - `self.enable_target_temporal_smoothing = True`
-- Cập nhật hàm `to_dict`.
+### 1.2. Module Mới: `src/aim_system/flick_controller.py`
+- **FlickController (Bộ điều khiển vòng kín có ngân sách):**
+  - **Gain vật lý = 1.0:** Loại bỏ núm cảm giác `strength` cũ.
+  - **Scale cả vector giữ hướng (Direction-Preserving Vector Clamping):** Không cắt cụt độc lập từng trục $X/Y$ gây méo hướng flick.
+  - **Residual Carry:** Tích lũy phần dư số thực của counts giữa các nhịp để không bao giờ nuốt sai số $<0.5$ count.
+  - **Ngân sách hội tụ (Budget & Iterations):** Thay vì cooldown mù huỷ frame, controller cấp ngân sách tối đa `flick_budget_ms` (mặc định 120ms) và `flick_max_iterations` (mặc định 4 nhịp) để tâm ngắm tự sửa đến khi rơi vào `deadzone`.
+  - **Bảo vệ Target-Key Drift:** Áp dụng `switch_radius_px = 64px`, tránh việc tâm ngắm dịch chuyển làm thay đổi target ID làm reset residual/budget.
+  - Cơ chế `rollback_step()` khi queue đầy.
 
-### 1.3. Hệ Thống Cấu Hình `config.json` & `configs/*.json`
-Đồng bộ các thông số mới vào toàn bộ các profile cấu hình:
-- `config.json`
-- `configs/onetap_sheriff_guardian_marshal.json`
-- `configs/onetap_sheriff_guardian_marshal_cvm.json`
-- `configs/ranked_tryhard_burst_spray.json`
-- `configs/ranked_tryhard_burst_spray_cvm.json`
-- `configs/toggle_edpi253_dpi1100.json`
-- `configs/toggle_edpi253_dpi1100_cvm.json`
+### 1.3. Cập Nhật `src/utils/config.py` & `config.json`
+- **Schema tham số mới:**
+  - `hfov_deg = 103.0`, `vfov_deg = 70.5`
+  - `flick_gain = 1.0`, `flick_gain_sec = 1.0`
+  - `flick_max_counts = 6000`, `flick_max_counts_sec = 6000`
+  - `flick_max_iterations = 4`, `flick_budget_ms = 120.0`
+  - `flick_deadzone_px = 1.5`, `flick_deadzone_px_sec = 2.0`
+  - `counts_per_deg_x = None`, `counts_per_deg_y = None`
+  - `max_speed = 6000` (được đưa vào schema chuẩn, loại bỏ fallback ma 1000)
+  - `flick_engine = "v2"` (có cờ `"legacy"` để A/B rollback)
+- **Tự động di chuyển (Migration):**
+  - Tự động map `flick_strength_x/y` sang `flick_gain = 1.0` khi nâng cấp config cũ.
+  - Kiểm tra và clamp phạm vi an toàn cho tất cả tham số.
+  - Đồng bộ cập nhật toàn bộ profile mẫu trong `configs/`.
 
----
+### 1.4. Cập Nhật `src/aim_system/mode_dispatcher.py` & `main.py`
+- Khai báo metadata `_MODE_CAPS`:
+  - `Flick`: `closed_loop: False`, `uses_smoother: False` $\to$ **Bypass hoàn toàn `TargetSmoother`**.
+  - Flick nhận tọa độ thô từ khung hình hiện tại, không bị trễ bởi bộ lọc EMA.
+- `main.py`:
+  - Gắn tag định danh lệnh chuột trong `_process_move_queue` (`flick`, `rcs`, `track`, `calib`). Không gộp chéo lệnh flick với lệnh di chuột thường.
+  - Vector clamping bảo toàn hướng ngắm.
+  - Truyền `FrameInfo` thực tế vào pipeline tính toán.
 
-## 2. Kiểm Tra Cú Pháp
-- `python -m py_compile` xác nhận: **100% sạch lỗi cú pháp**.
+### 1.5. Cập Nhật `src/aim_system/mode_flick.py` & `src/aim_system/normal.py`
+- `mode_flick.py` trở thành adapter chính thức gọi `FlickController.step(...)`.
+- `normal.py`:
+  - Gộp 2 tầng offset thành 1 tầng duy nhất.
+  - Khai tử hàm lỗi thứ nguyên `calculate_movement`.
+  - Giữ `calculate_exact_counts` làm wrapper tương thích ngược trỏ vào `aim_math.px_to_counts`.
+
+### 1.6. Bộ Unit Tests Mới
+- `tests/test_aim_math.py`: Kiểm thử chuyển đổi pixel sang độ, kiểm thử bảo toàn góc quay khi crop FOV, đối xứng trục, và fit tuyến tính calibration.
+- `tests/test_flick_controller.py`: Mô phỏng vòng đời flick, hội tụ trong deadzone, overshoot $\le 10\%$, bảo toàn residual, và thoát budget đúng hạn.

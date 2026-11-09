@@ -117,6 +117,23 @@ class Config:
         self.ads_fovsize = 100
         self.ads_key = "Right Mouse Button"
         self.ads_key_type = "hold"  # hold, toggle
+
+        # --- Frame geometry (single source of truth: aim_math) ---
+        # hfov_deg describes the horizontal FOV of the raster analysed by the
+        # detector (after any centre crop). vfov_deg is derived from the aspect
+        # ratio when left at 0.
+        self.hfov_deg = 103.0
+        self.vfov_deg = 0.0            # 0 = derive from aspect ratio
+        self.cm_per_rev = 54.54        # legacy analytic constant, superseded by calibration
+        # Conversion engine for the CLOSED-LOOP modes (Normal/PID/NCAF/WindMouse/
+        # Bezier). "legacy" preserves existing speed/smoothing tuning; "v2" uses
+        # physical counts from aim_math and needs retuning. Rollback flag.
+        self.aim_engine = "legacy"
+        self.counts_per_deg_x = 0.0    # measured calibration (0 = not measured)
+        self.counts_per_deg_y = 0.0    # measured calibration (0 = not measured)
+        self.calibration_r2 = 0.0      # quality of the stored measurement
+        self.calibration_samples = 0   # how many points produced it
+
         self.tbfovsize = 5 
         self.trigger_ads_fov_enabled = False
         self.trigger_ads_fovsize = 5
@@ -189,8 +206,13 @@ class Config:
         self.magnet_normal_y_speed = 3.0
         self.magnet_normalsmooth = 30.0
         self.magnet_normalsmoothfov = 30.0
-        self.magnet_flick_strength_x = 5.0
-        self.magnet_flick_strength_y = 5.0
+        self.magnet_flick_gain = 1.0
+        self.magnet_flick_max_counts = 6000.0
+        self.magnet_flick_max_iterations = 4
+        self.magnet_flick_budget_ms = 120.0
+        self.magnet_flick_deadzone_px = 1.5
+        self.magnet_flick_strength_x = 1.0   # legacy alias only
+        self.magnet_flick_strength_y = 1.0   # legacy alias only
         self.magnet_silent_distance = 1.0
         self.magnet_silent_delay = 100.0
         self.magnet_silent_move_delay = 500.0
@@ -242,19 +264,36 @@ class Config:
         self.normalsmoothfov = 30
 
         # --- Flick Aim ---
-        self.flick_strength_x = 5.0
-        self.flick_strength_y = 5.0
-        
+        # gain is a PHYSICAL gain (1.0 = geometrically correct). The legacy
+        # flick_strength_* keys are kept only for backward-compatible loading and
+        # are never applied as a feel multiplier.
+        self.flick_engine = "v2"          # "v2" (closed loop) | "legacy"
+        self.flick_gain = 1.0
+        self.flick_max_counts = 6000.0    # per-impulse budget, in counts
+        self.flick_max_iterations = 4
+        self.flick_budget_ms = 120.0      # convergence budget, not a blind lockout
+        self.flick_settle_ms = 70.0        # wait for camera pipeline before measuring again
+        self.flick_deadzone_px = 1.5
+        self.flick_strength_x = 1.0       # legacy, migrated into flick_gain
+        self.flick_strength_y = 1.0       # legacy, migrated into flick_gain
+
         # --- Secondary Aimbot ---
         self.enableaim_sec = True
         self.normal_x_speed_sec = 105.0
         self.normal_y_speed_sec = 52.0
         self.normalsmooth_sec = 4
         self.normalsmoothfov_sec = 28
-        self.flick_strength_x_sec = 0.92
-        self.flick_strength_y_sec = 0.90
-        self.sec_flick_cooldown_ms = 85.0
+        self.flick_gain_sec = 1.0
+        self.flick_max_counts_sec = 6000.0
+        self.flick_max_iterations_sec = 4
+        self.flick_budget_ms_sec = 120.0
+        self.flick_settle_ms_sec = 70.0
+        self.flick_deadzone_px_sec = 2.0
+        self.flick_strength_x_sec = 1.0   # legacy, migrated into flick_gain_sec
+        self.flick_strength_y_sec = 1.0   # legacy, migrated into flick_gain_sec
+        self.sec_flick_cooldown_ms = 120.0  # legacy, now an alias of flick_budget_ms_sec
         self.sec_aim_deadzone = 2.2
+        self.max_speed = 6000.0           # real schema key, no longer a phantom 1000
         self.fovsize_sec = 30.0
         self.ads_fov_enabled_sec = False
         self.ads_fovsize_sec = 30.0
@@ -615,6 +654,11 @@ class Config:
             "magnet_normal_y_speed": self.magnet_normal_y_speed,
             "magnet_normalsmooth": self.magnet_normalsmooth,
             "magnet_normalsmoothfov": self.magnet_normalsmoothfov,
+            "magnet_flick_gain": self.magnet_flick_gain,
+            "magnet_flick_max_counts": self.magnet_flick_max_counts,
+            "magnet_flick_max_iterations": self.magnet_flick_max_iterations,
+            "magnet_flick_budget_ms": self.magnet_flick_budget_ms,
+            "magnet_flick_deadzone_px": self.magnet_flick_deadzone_px,
             "magnet_flick_strength_x": self.magnet_flick_strength_x,
             "magnet_flick_strength_y": self.magnet_flick_strength_y,
             "magnet_silent_distance": self.magnet_silent_distance,
@@ -665,6 +709,27 @@ class Config:
             "normal_y_speed": self.normal_y_speed,
             "normalsmooth": self.normalsmooth,
             "normalsmoothfov": self.normalsmoothfov,
+
+            # Frame geometry & calibration (one source of truth: aim_math)
+            "hfov_deg": self.hfov_deg,
+            "vfov_deg": self.vfov_deg,
+            "cm_per_rev": self.cm_per_rev,
+            "aim_engine": self.aim_engine,
+            "counts_per_deg_x": self.counts_per_deg_x,
+            "counts_per_deg_y": self.counts_per_deg_y,
+            "calibration_r2": self.calibration_r2,
+            "calibration_samples": self.calibration_samples,
+            "max_speed": self.max_speed,
+
+            # Flick Aim (v2 closed loop)
+            "flick_engine": self.flick_engine,
+            "flick_gain": self.flick_gain,
+            "flick_max_counts": self.flick_max_counts,
+            "flick_max_iterations": self.flick_max_iterations,
+            "flick_budget_ms": self.flick_budget_ms,
+            "flick_settle_ms": self.flick_settle_ms,
+            "flick_deadzone_px": self.flick_deadzone_px,
+            # legacy aliases kept for backward-compatible files
             "flick_strength_x": self.flick_strength_x,
             "flick_strength_y": self.flick_strength_y,
             
@@ -674,9 +739,15 @@ class Config:
             "normal_y_speed_sec": self.normal_y_speed_sec,
             "normalsmooth_sec": self.normalsmooth_sec,
             "normalsmoothfov_sec": self.normalsmoothfov_sec,
+            "flick_gain_sec": self.flick_gain_sec,
+            "flick_max_counts_sec": self.flick_max_counts_sec,
+            "flick_max_iterations_sec": self.flick_max_iterations_sec,
+            "flick_budget_ms_sec": self.flick_budget_ms_sec,
+            "flick_settle_ms_sec": self.flick_settle_ms_sec,
+            "flick_deadzone_px_sec": self.flick_deadzone_px_sec,
             "flick_strength_x_sec": self.flick_strength_x_sec,
             "flick_strength_y_sec": self.flick_strength_y_sec,
-            "sec_flick_cooldown_ms": getattr(self, "sec_flick_cooldown_ms", 85.0),
+            "sec_flick_cooldown_ms": getattr(self, "sec_flick_cooldown_ms", 120.0),
             "sec_aim_deadzone": getattr(self, "sec_aim_deadzone", 2.2),
             "fovsize_sec": self.fovsize_sec,
             "ads_fov_enabled_sec": self.ads_fov_enabled_sec,
@@ -1068,8 +1139,12 @@ class Config:
             ("magnet_normal_y_speed", 3.0, 0.01, 2000.0),
             ("magnet_normalsmooth", 30.0, 0.01, 1000.0),
             ("magnet_normalsmoothfov", 30.0, 1.0, 1000.0),
-            ("magnet_flick_strength_x", 5.0, 0.01, 5.0),
-            ("magnet_flick_strength_y", 5.0, 0.01, 5.0),
+            ("magnet_flick_gain", 1.0, 0.1, 3.0),
+            ("magnet_flick_max_counts", 6000.0, 1.0, 20000.0),
+            ("magnet_flick_budget_ms", 120.0, 20.0, 1000.0),
+            ("magnet_flick_deadzone_px", 1.5, 0.0, 20.0),
+            ("magnet_flick_strength_x", 1.0, 0.01, 5.0),
+            ("magnet_flick_strength_y", 1.0, 0.01, 5.0),
             ("magnet_silent_distance", 1.0, 0.1, 10.0),
             ("magnet_silent_delay", 100.0, 0.0, 2000.0),
             ("magnet_silent_move_delay", 500.0, 0.0, 2000.0),
@@ -1106,6 +1181,7 @@ class Config:
             except Exception:
                 parsed = float(default)
             setattr(self, key, max(float(lower_bound), min(float(upper_bound), parsed)))
+        self._migrate_and_validate_flick(data)
         try:
             self.magnet_trigger_confirm_frames = max(
                 1, min(10, int(getattr(self, "magnet_trigger_confirm_frames", 1)))
@@ -1122,6 +1198,12 @@ class Config:
             self.magnet_bezier_segments = max(1, min(30, int(getattr(self, "magnet_bezier_segments", 8))))
         except Exception:
             self.magnet_bezier_segments = 8
+        try:
+            self.magnet_flick_max_iterations = max(
+                1, min(10, int(getattr(self, "magnet_flick_max_iterations", 4)))
+            )
+        except Exception:
+            self.magnet_flick_max_iterations = 4
         if self.magnet_pid_kp_min > self.magnet_pid_kp_max:
             self.magnet_pid_kp_min, self.magnet_pid_kp_max = (
                 self.magnet_pid_kp_max,
@@ -1260,7 +1342,158 @@ class Config:
             )
         except Exception:
             self.trigger_strafe_manual_neutral_ms = 0
-    
+
+    # ------------------------------------------------------------------
+    # Flick / geometry migration + validation
+    # ------------------------------------------------------------------
+    def _migrate_and_validate_flick(self, data=None):
+        """Migrate legacy flick keys and clamp every new knob into a sane range.
+
+        Legacy ``flick_strength_x/y`` behaved as a *feel multiplier* on top of an
+        already-wrong scale (1.8 / 0.55). It is retired: gain is physical and
+        defaults to 1.0. The migration never silently multiplies anything.
+        """
+        source = data if isinstance(data, dict) else {}
+
+        def _has(key):
+            return key in source
+
+        # --- primary channel ------------------------------------------------
+        if not _has("flick_gain"):
+            legacy_x = source.get("flick_strength_x")
+            legacy_y = source.get("flick_strength_y")
+            self.flick_gain = 1.0
+            if legacy_x is not None or legacy_y is not None:
+                log_print(
+                    f"[Config] WARN flick_strength_x={legacy_x} flick_strength_y={legacy_y} "
+                    "has been retired; flick_gain reset to 1.0 (physical gain). "
+                    "Run the Calibration panel to get an accurate counts_per_deg."
+                )
+        if not _has("flick_max_counts"):
+            # Legacy max_speed was a phantom key that always fell back to 1000 and
+            # truncated every flick. Never inherit that value.
+            self.flick_max_counts = 6000.0
+        if not _has("flick_budget_ms"):
+            self.flick_budget_ms = 120.0
+        if not _has("flick_max_iterations"):
+            self.flick_max_iterations = 4
+        if not _has("flick_deadzone_px"):
+            legacy_deadzone = source.get("aim_deadzone")
+            self.flick_deadzone_px = (
+                max(0.0, min(20.0, float(legacy_deadzone)))
+                if legacy_deadzone is not None
+                else 1.5
+            )
+
+        # --- secondary channel ----------------------------------------------
+        if not _has("flick_gain_sec"):
+            legacy_x = source.get("flick_strength_x_sec")
+            legacy_y = source.get("flick_strength_y_sec")
+            self.flick_gain_sec = 1.0
+            if legacy_x is not None or legacy_y is not None:
+                log_print(
+                    f"[Config] WARN flick_strength_x_sec={legacy_x} flick_strength_y_sec={legacy_y} "
+                    "has been retired; flick_gain_sec reset to 1.0 (physical gain)."
+                )
+        if not _has("flick_max_counts_sec"):
+            self.flick_max_counts_sec = 6000.0
+        if not _has("flick_budget_ms_sec"):
+            legacy_cooldown = source.get("sec_flick_cooldown_ms")
+            if legacy_cooldown is not None:
+                try:
+                    self.flick_budget_ms_sec = max(20.0, min(1000.0, float(legacy_cooldown)))
+                except Exception:
+                    self.flick_budget_ms_sec = 120.0
+                log_print(
+                    f"[Config] sec_flick_cooldown_ms={legacy_cooldown} is now a convergence "
+                    f"budget (flick_budget_ms_sec={self.flick_budget_ms_sec}); "
+                    "frames are no longer discarded."
+                )
+            else:
+                self.flick_budget_ms_sec = 120.0
+        if not _has("flick_max_iterations_sec"):
+            self.flick_max_iterations_sec = 4
+        if not _has("flick_deadzone_px_sec"):
+            legacy_deadzone = source.get("sec_aim_deadzone")
+            self.flick_deadzone_px_sec = (
+                max(0.0, min(20.0, float(legacy_deadzone)))
+                if legacy_deadzone is not None
+                else 2.0
+            )
+
+        # --- engine selector -----------------------------------------------
+        engine = str(getattr(self, "flick_engine", "v2") or "v2").strip().lower()
+        self.flick_engine = "legacy" if engine == "legacy" else "v2"
+        aim_engine = str(getattr(self, "aim_engine", "legacy") or "legacy").strip().lower()
+        self.aim_engine = "v2" if aim_engine == "v2" else "legacy"
+
+        # --- clamping -------------------------------------------------------
+        def _clamp(fname, default, lower, upper):
+            try:
+                value = float(getattr(self, fname, default))
+            except Exception:
+                value = float(default)
+            if value != value or value in (float("inf"), float("-inf")):
+                value = float(default)
+            setattr(self, fname, max(float(lower), min(float(upper), value)))
+
+        def _clamp_int(fname, default, lower, upper):
+            try:
+                value = int(getattr(self, fname, default))
+            except Exception:
+                value = int(default)
+            setattr(self, fname, max(int(lower), min(int(upper), value)))
+
+        _clamp("flick_gain", 1.0, 0.1, 3.0)
+        _clamp("flick_gain_sec", 1.0, 0.1, 3.0)
+        _clamp("flick_max_counts", 6000.0, 1.0, 20000.0)
+        _clamp("flick_max_counts_sec", 6000.0, 1.0, 20000.0)
+        _clamp_int("flick_max_iterations", 4, 1, 10)
+        _clamp_int("flick_max_iterations_sec", 4, 1, 10)
+        _clamp("flick_budget_ms", 120.0, 20.0, 1000.0)
+        _clamp("flick_budget_ms_sec", 120.0, 20.0, 1000.0)
+        _clamp("flick_settle_ms", 70.0, 0.0, 500.0)
+        _clamp("flick_settle_ms_sec", 70.0, 0.0, 500.0)
+        _clamp("flick_deadzone_px", 1.5, 0.0, 20.0)
+        _clamp("flick_deadzone_px_sec", 2.0, 0.0, 20.0)
+        _clamp("max_speed", 6000.0, 1.0, 20000.0)
+        _clamp("hfov_deg", 103.0, 40.0, 140.0)
+        _clamp("vfov_deg", 0.0, 0.0, 140.0)
+        _clamp("cm_per_rev", 54.54, 1.0, 500.0)
+        _clamp("flick_strength_x", 1.0, 0.01, 5.0)
+        _clamp("flick_strength_y", 1.0, 0.01, 5.0)
+        _clamp("flick_strength_x_sec", 1.0, 0.01, 5.0)
+        _clamp("flick_strength_y_sec", 1.0, 0.01, 5.0)
+        _clamp("sec_flick_cooldown_ms", 120.0, 20.0, 1000.0)
+
+        # Mirror the legacy aliases AFTER clamping, so the legacy A/B path uses the
+        # same (clamped) gain as the v2 path instead of an unclamped stale value.
+        self.flick_strength_x = float(self.flick_gain)
+        self.flick_strength_y = float(self.flick_gain)
+        self.flick_strength_x_sec = float(self.flick_gain_sec)
+        self.flick_strength_y_sec = float(self.flick_gain_sec)
+        self.sec_flick_cooldown_ms = float(self.flick_budget_ms_sec)
+
+        # measured calibration: 0 means "not measured", anything else must be sane
+        for fname in ("counts_per_deg_x", "counts_per_deg_y"):
+            try:
+                value = float(getattr(self, fname, 0.0) or 0.0)
+            except Exception:
+                value = 0.0
+            if value != value or value in (float("inf"), float("-inf")) or value < 0.0:
+                value = 0.0
+            setattr(self, fname, min(value, 100000.0))
+        # Keep the pair consistent: a half-measured calibration is not usable.
+        if (float(self.counts_per_deg_x) > 0.0) != (float(self.counts_per_deg_y) > 0.0):
+            self.counts_per_deg_x = 0.0
+            self.counts_per_deg_y = 0.0
+            log_print(
+                "[Config] WARN only one axis was calibrated; ignoring the measurement "
+                "and falling back to the analytic model."
+            )
+        _clamp("calibration_r2", 0.0, 0.0, 1.0)
+        _clamp_int("calibration_samples", 0, 0, 10000)
+
     def save_to_file(self, filename="config.json"):
         """Save configuration atomically."""
         try:

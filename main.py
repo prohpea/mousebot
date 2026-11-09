@@ -98,7 +98,8 @@ class AimTracker:
         self.mode_sec = getattr(config, "mode_sec", "Normal")
         self.selected_mouse_button = getattr(config, "selected_mouse_button", 3)
         self.selected_tb_btn= getattr(config, "selected_tb_btn", 3)
-        self.max_speed = float(getattr(config, "max_speed", 1000.0))
+        # Real schema key now (config.py defines it). Never a phantom 1000.
+        self.max_speed = float(getattr(config, "max_speed", 6000.0))
 
         # --- Main Aimbot Offset & Aim Type ---
         self.aim_offsetX = float(getattr(config, "aim_offsetX", 0))
@@ -184,30 +185,57 @@ class AimTracker:
         閫欐槸涓€鍊嬬劇闄愬惊鐠帮紝鐩村埌绶氱▼琚祩姝€?        """
         while not self._stop_event.is_set() or not self.move_queue.empty():
             try:
-                dx, dy, delay = self.move_queue.get(timeout=0.1)
+                dx, dy, delay, tag = self._unpack_move_item(self.move_queue.get(timeout=0.1))
                 latest_only = bool(getattr(config, "aim_latest_frame_priority", True))
                 if latest_only:
                     # Keep only the newest N commands, then merge them.
                     # This preserves immediate latest-frame behavior while avoiding
                     # dropped Bezier/WindMouse sub-steps that cause jitter.
-                    pending = [(dx, dy, delay)]
+                    #
+                    # Commands are merged ONLY within the same tag. A flick impulse
+                    # must never be summed with (or replaced by) a tracking step,
+                    # and RCS must never be folded into an aimbot command.
+                    pending = [(dx, dy, delay, tag)]
                     while True:
                         try:
-                            pending.append(self.move_queue.get_nowait())
+                            pending.append(
+                                self._unpack_move_item(self.move_queue.get_nowait())
+                            )
                         except queue.Empty:
                             break
+
+                    # Group by tag, preserving the order tags first appeared.
+                    order = []
+                    for item in pending:
+                        if item[3] not in order:
+                            order.append(item[3])
+
                     max_batch = max(
                         1,
                         int(getattr(config, "move_queue_merge_batch", self._move_batch_size)),
                     )
-                    if len(pending) > max_batch:
-                        pending = pending[-max_batch:]
-                    merged_dx = float(sum(float(item[0]) for item in pending))
-                    merged_dy = float(sum(float(item[1]) for item in pending))
-                    merged_delay = min(
-                        (max(0.0, float(item[2])) for item in pending),
-                        default=0.0,
-                    )
+                    merged_dx = 0.0
+                    merged_dy = 0.0
+                    merged_delay = None
+                    for item_tag in order:
+                        group = [it for it in pending if it[3] == item_tag]
+                        # Batchable tags keep only the newest N commands; impulse
+                        # tags (flick/calib) stay whole, and rcs keeps its cadence
+                        # (summing many 80 Hz ticks into one move would spike the
+                        # recoil compensation into a single jump).
+                        if item_tag in ("track", "rcs") and len(group) > max_batch:
+                            group = group[-max_batch:]
+                        for item in group:
+                            merged_dx += float(item[0])
+                            merged_dy += float(item[1])
+                            item_delay = max(0.0, float(item[2]))
+                            merged_delay = (
+                                item_delay
+                                if merged_delay is None
+                                else min(merged_delay, item_delay)
+                            )
+                    if merged_delay is None:
+                        merged_delay = 0.0
                 else:
                     merged_dx = float(dx)
                     merged_dy = float(dy)
@@ -227,19 +255,45 @@ class AimTracker:
                 print(f"[Move Queue Error] {e}")
                 time.sleep(0.01)
 
+    @staticmethod
+    def _unpack_move_item(item):
+        """Accept both tagged ``(dx, dy, delay, tag)`` and legacy 3-tuples."""
+        try:
+            length = len(item)
+        except TypeError:
+            raise ValueError(f"invalid move queue item: {item!r}")
+        if length >= 4:
+            return item[0], item[1], item[2], item[3]
+        if length == 3:
+            return item[0], item[1], item[2], "track"
+        raise ValueError(f"invalid move queue item: {item!r}")
+
     def _clip_movement(self, dx, dy):
         """
-        闄愬埗绉诲嫊閫熷害
-        
-        灏囩Щ鍕曡窛闆㈤檺鍒跺湪鏈€澶ч€熷害绡勫湇鍏э紝闃叉绉诲嫊閬庡揩銆?        
+        Clamp a movement request to the configured budget.
+
+        The WHOLE vector is scaled so its magnitude fits ``max_speed``; direction
+        is preserved. Clipping each axis independently (the old ``np.clip``) bends
+        every oversized diagonal towards 45 degrees and truncates flick impulses
+        without changing their direction of error.
+
         Args:
-            dx: X 鏂瑰悜鐨勭Щ鍕曡窛闆?            dy: Y 鏂瑰悜鐨勭Щ鍕曡窛闆?            
+            dx: X movement (mouse counts)
+            dy: Y movement (mouse counts)
+
         Returns:
-            tuple: (clipped_dx, clipped_dy) 闄愬埗寰岀殑绉诲嫊璺濋洟
+            tuple: (clipped_dx, clipped_dy)
         """
-        clipped_dx = np.clip(dx, -abs(self.max_speed), abs(self.max_speed))
-        clipped_dy = np.clip(dy, -abs(self.max_speed), abs(self.max_speed))
-        return float(clipped_dx), float(clipped_dy)
+        limit = abs(float(getattr(self, "max_speed", 0.0) or 0.0))
+        dx_f = float(dx)
+        dy_f = float(dy)
+        if limit <= 0.0:
+            return dx_f, dy_f
+        magnitude = math.hypot(dx_f, dy_f)
+        if magnitude <= limit or magnitude <= 1e-12:
+            return dx_f, dy_f
+        scale = limit / magnitude
+        return dx_f * scale, dy_f * scale
 
     def _track_loop(self):
         """
@@ -432,6 +486,27 @@ class AimTracker:
         except Exception:
             pass
 
+    def _active_modes_use_smoother(self):
+        """True when at least one ACTIVE aimbot mode wants temporal smoothing.
+
+        Modes advertise ``uses_smoother`` via ``mode_dispatcher.get_mode_caps``.
+        Flick/Silent are one-shot: smoothing their door-knock target means aiming
+        at the past with no chance to correct.
+        """
+        try:
+            from src.aim_system.mode_dispatcher import mode_uses_smoother
+
+            modes = []
+            if getattr(config, "enableaim", False):
+                modes.append(getattr(config, "mode", "Normal"))
+            if getattr(config, "enableaim_sec", False):
+                modes.append(getattr(config, "mode_sec", "Normal"))
+            if not modes:
+                return True
+            return any(mode_uses_smoother(mode) for mode in modes)
+        except Exception:
+            return True
+
     def _filter_targets_with_anti_smoke(self, targets, target_bboxes, mask, frame_shape, detector):
         """Filter targets using nearest bbox contour checks from anti-smoke detector."""
         if not targets or not target_bboxes or detector is None:
@@ -611,6 +686,13 @@ class AimTracker:
 
         targets_all = targets
         use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", True))
+        if use_temporal_smoothing and not self._active_modes_use_smoother():
+            # Every active mode is one-shot/open-loop (e.g. Flick): aim at the RAW
+            # position of the current frame. An EMA plus a 3-frame switch hold
+            # makes a single impulse fire at where the target USED to be, and there
+            # is no second measurement to correct it.
+            use_temporal_smoothing = False
+            self._target_smoother.reset()
         if targets_all and use_temporal_smoothing:
             targets_all = self._target_smoother.stabilize(targets_all, frame.xres / 2.0, frame.yres / 2.0)
             self.last_target = self._target_smoother.last_target

@@ -27,34 +27,43 @@ _y_release_state = {
 }
 
 
-def _rcs_pull_loop(controller, pull_speed):
+def _rcs_pull_loop(controller, pull_speed, move_queue=None):
     """
-    RCS 下拉循環
-    
-    持續發送向下移動指令（Y 軸正值）
-    
+    RCS pull loop.
+
+    Movement is pushed onto the shared move queue with the ``"rcs"`` tag when a
+    queue is available, instead of calling ``controller.move()`` directly. Direct
+    calls bypass the queue and therefore race the aimbot on the same Y axis (the
+    flick and the recoil compensation could both write the same frame).
+
     Args:
-        controller: 滑鼠控制器
-        pull_speed: 下拉速度（1-20）
+        controller: Mouse controller (fallback when no queue is provided)
+        pull_speed: Pull speed (1-20)
+        move_queue: Optional shared queue accepting ``(dx, dy, delay, tag)``
     """
-    # 將 pull_speed 轉換為實際移動量
-    # pull_speed 範圍是 1-20，轉換為像素移動量
-    # 可以根據需要調整這個轉換公式
-    move_amount = pull_speed * 0.5  # 每個循環移動的像素數
-    
+    # pull_speed is 1-20; convert to a per-loop movement amount.
+    move_amount = pull_speed * 0.5
+
     while True:
         with _rcs_state["rcs_lock"]:
             if not _rcs_state["is_active"]:
                 break
-        
-        # 發送向下移動指令（Y 軸正值）
+
         try:
-            controller.move(0, move_amount)
+            if move_queue is not None:
+                try:
+                    move_queue.put_nowait((0, move_amount, 0.0, "rcs"))
+                except Exception:
+                    # Queue full: drop this tick instead of blocking the loop.
+                    pass
+            else:
+                # Legacy fallback (no queue wired): direct controller call.
+                controller.move(0, move_amount)
         except Exception as e:
             log_print(f"[RCS] Move error: {e}")
             break
-        
-        # 控制循環頻率（約 80 FPS）
+
+        # ~80 FPS loop
         time.sleep(1.0 / 80.0)
 
 
@@ -102,28 +111,29 @@ def check_rcs_activation(activation_delay, rapid_click_threshold):
     return False
 
 
-def start_rcs(controller, pull_speed):
+def start_rcs(controller, pull_speed, move_queue=None):
     """
-    啟動 RCS
-    
+    Start RCS.
+
     Args:
-        controller: 滑鼠控制器
-        pull_speed: 下拉速度（1-20）
+        controller: Mouse controller (fallback when no queue is available)
+        pull_speed: Pull speed (1-20)
+        move_queue: Optional shared queue; when given, RCS movement is tagged
+            ``"rcs"`` and serialised with the aimbot instead of racing it.
     """
     with _rcs_state["rcs_lock"]:
         if _rcs_state["is_active"]:
-            return  # 已經啟動
-        
+            return  # already running
+
         _rcs_state["is_active"] = True
-        
-        # 如果線程正在運行，先停止它
+
+        # If the thread is still alive, reuse it.
         if _rcs_state["rcs_thread"] is not None and _rcs_state["rcs_thread"].is_alive():
             return
-        
-        # 創建新的 RCS 線程
+
         _rcs_state["rcs_thread"] = threading.Thread(
             target=_rcs_pull_loop,
-            args=(controller, pull_speed),
+            args=(controller, pull_speed, move_queue),
             daemon=True
         )
         _rcs_state["rcs_thread"].start()
@@ -149,28 +159,29 @@ def is_rcs_active():
         return _rcs_state["is_active"]
 
 
-def process_rcs(controller, pull_speed, activation_delay, rapid_click_threshold):
+def process_rcs(controller, pull_speed, activation_delay, rapid_click_threshold, move_queue=None):
     """
-    處理 RCS 邏輯（每幀調用）
-    
+    Handle RCS every frame.
+
     Args:
-        controller: 滑鼠控制器
-        pull_speed: 下拉速度（1-20）
-        activation_delay: 啟動延遲（毫秒）
-        rapid_click_threshold: 快速點擊閾值（毫秒）
-        
+        controller: Mouse controller (fallback when no queue is provided)
+        pull_speed: Pull speed (1-20)
+        activation_delay: Activation delay (ms)
+        rapid_click_threshold: Rapid click threshold (ms)
+        move_queue: Optional shared queue; RCS commands are tagged ``"rcs"``
+
     Returns:
-        bool: RCS 是否正在運行（用於 Aimbot 整合）
+        bool: whether RCS is currently active (for aimbot integration)
     """
     if not getattr(config, "enablercs", False):
         stop_rcs()
         return False
     
-    # 檢查是否應該啟動 RCS
+    # Check whether RCS should engage
     should_activate = check_rcs_activation(activation_delay, rapid_click_threshold)
     
     if should_activate:
-        start_rcs(controller, pull_speed)
+        start_rcs(controller, pull_speed, move_queue=move_queue)
     else:
         # 檢查左鍵是否還按下，如果沒有按下則停止 RCS
         if not is_binding_pressed(getattr(config, "rcs_keybind", 0)):
