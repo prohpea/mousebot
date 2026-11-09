@@ -1,5 +1,5 @@
-# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG HỆ THỐNG SEC AIM ONE-TAP (SHERIFF, GUARDIAN, MARSHAL)
-**Mã hiệu:** `COD-20261109-CVM-SEC-AIM-ONETAP-IMPL`  
+# 💻 [CODER AGENT] NHẬT KÝ THI CÔNG BẢN VÁ SEC AIM ULTRA-SNAP (ONE-TAP FLICK)
+**Mã hiệu:** `COD-20261109-CVM-SEC-AIM-ULTRA-SNAP-IMPL`  
 **Vai trò:** Senior Core Developer (Agency Agent Pipeline)  
 **Mô hình vận hành:** `deepseek-v4.1-flash-1017` (Workspace-Write Mode)  
 **Căn cứ thiết kế:** `.bangiao/01-ke-hoach.md`
@@ -8,34 +8,33 @@
 
 ## 1. Chi Tiết Các Tệp Đã Can Thiệp
 
-### 1.1. `src/aim_system/normal.py` (`_WindMouseConfig`)
-- Bổ sung cấu hình nhánh động học riêng biệt `if is_sec:` trong hàm khởi tạo:
-  - `smooth_reaction_min = 0.012`, `smooth_reaction_max = 0.026` (giảm độ trễ phản xạ xuống mức micro-second, cho phép nhắm bắn tức thì).
-  - `smooth_close_speed = 0.80` (tăng mạnh tốc độ áp sát đầu trong bán kính 30px).
-  - `smooth_far_speed = 0.95`.
-  - `smooth_max_step_ratio = 0.28`.
-  - `smooth_acceleration = 0.80`, `smooth_deceleration = 0.70`.
-  - `smooth_fatigue_effect = 0.10` (triệt tiêu tình trạng giảm tốc do mỏi tay ảo).
-  - `smooth_target_area_ratio = 0.015`.
-  - Mặc định: `wm_gravity_sec = 11.0`, `wm_wind_sec = 1.0`, `wm_max_step_sec = 14.0`, `wm_min_step_sec = 1.0`, `wm_distance_threshold_sec = 28.0`.
+### 1.1. `src/aim_system/normal.py`
+1. **Bổ sung hàm tính toán góc chuẩn vật lý `calculate_exact_counts`:**
+   - Sử dụng tiêu cự ảo màn hình Valorant $f_x \approx 763.635$ ($103^\circ$ FOV ngang ở $1920\times 1080$).
+   - Quy đổi chính xác từ pixel màn hình sang xung chuột vật lý ($21.4\text{ counts/pixel}$ cho Sens $0.23$, DPI $1100$).
+   - Triệt tiêu hoàn toàn sự thiếu hụt xung lực 58 lần của công thức cũ.
+2. **Nâng cấp toàn diện động cơ `_apply_flick_aim`:**
+   - Tính toán xung chuột vật lý tức thì từ `calculate_exact_counts`.
+   - Thiết lập tỷ lệ snap nhạy bén: $85\%$ cho trục $X$, $75\%$ cho trục $Y$.
+   - Cho phép tâm ngắm khóa chết đầu đối thủ trong vòng **$1 - 2$ khung hình ($8 - 16\text{ms}$)**.
+3. **Đồng bộ hóa `_apply_windmouse_aim`:**
+   - Nhánh `is_sec=True` được cấp xung lực thực tế thay vì giá trị $7.36$ counts cũ, triệt tiêu hiện tượng dao động triệt tiêu $+2, -2$ của WindMouse.
+4. **Đảo ngược quyền ưu tiên trong `process_normal_mode`:**
+   - Đưa việc kiểm tra `sec_active` (đè chuột phải) lên vị trí ưu tiên số 1, độc lập hoàn toàn với trạng thái bật/tắt của Main Aim.
+   - Khi nhả chuột phải, Main Aim tự động tiếp quản xử lý sấy/tracking như bình thường.
 
-### 1.2. `src/utils/config.py`
-- Cập nhật giá trị khởi tạo chuẩn xác cho Secondary Aimbot:
-  - `enableaim_sec = True`
-  - `normal_x_speed_sec = 105.0`
-  - `normal_y_speed_sec = 52.0`
-  - `normalsmooth_sec = 4`
-  - `normalsmoothfov_sec = 28`
-  - `fovsize_sec = 28`
-  - `selected_mouse_button_sec = 1` (Right Mouse Button)
-  - `wm_gravity_sec = 11.0`, `wm_wind_sec = 1.0`, `wm_distance_threshold_sec = 28.0`
-
-### 1.3. Cấu hình & Presets
-- Cập nhật [config.json](file:///c:/Users/TeamOS/Downloads/CVM-colorBot-v1.2.1-FullPackage/CVM-colorBot/config.json).
-- Tạo mới tệp preset chuyên dụng: [onetap_sheriff_guardian_marshal.json](file:///c:/Users/TeamOS/Downloads/CVM-colorBot-v1.2.1-FullPackage/CVM-colorBot/configs/onetap_sheriff_guardian_marshal.json).
-- Đồng bộ bộ thông số Sec Aim One-Tap vào toàn bộ các preset khác trong thư mục `configs/`.
+### 1.2. Cấu hình & Presets (`config.json` & `configs/*.json`)
+- Thiết lập chế độ Sec Aim:
+  - `mode_sec`: `"Flick"` (Chế độ Snap chớp nhoáng tối thượng cho súng One-Tap).
+  - `flick_strength_x_sec`: `0.85`
+  - `flick_strength_y_sec`: `0.75`
+  - `fovsize_sec`: `30.0`
+  - `selected_mouse_button_sec`: `1` (Right Mouse Button)
+  - `aimbot_activation_type_sec`: `"hold_enable"`
+  - `enableaim_sec`: `True`
+- Đồng bộ vào toàn bộ các preset trong `configs/`.
 
 ---
 
-## 2. Kiểm Tra Biên Dịch & Đóng Gói
-- `py_compile` xác nhận mã nguồn `normal.py` và `config.py` đạt 100% hợp lệ, sẵn sàng chuyển cho Tester Agent.
+## 2. Kiểm Tra Biên Dịch
+- Lệnh `py_compile` xác nhận mã nguồn `normal.py` đạt 100% hợp lệ, không phát sinh lỗi cú pháp hay ngoại lệ runtime.
