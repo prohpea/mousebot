@@ -655,13 +655,27 @@ class _WindMouseConfig:
     """WindMouse 鎵€闇€鐨勯厤缃寘瑁濆櫒"""
     def __init__(self, is_sec=False):
         if is_sec:
-            self.smooth_gravity = float(getattr(config, "wm_gravity_sec", 9.0))
-            self.smooth_wind = float(getattr(config, "wm_wind_sec", 3.0))
-            self.smooth_max_step = float(getattr(config, "wm_max_step_sec", 15.0))
-            self.smooth_min_step = float(getattr(config, "wm_min_step_sec", 2.0))
+            self.smooth_gravity = float(getattr(config, "wm_gravity_sec", 11.0))
+            self.smooth_wind = float(getattr(config, "wm_wind_sec", 1.0))
+            self.smooth_max_step = float(getattr(config, "wm_max_step_sec", 14.0))
+            self.smooth_min_step = float(getattr(config, "wm_min_step_sec", 1.0))
             self.smooth_min_delay = float(getattr(config, "wm_min_delay_sec", 0.001))
             self.smooth_max_delay = float(getattr(config, "wm_max_delay_sec", 0.003))
-            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold_sec", 50.0))
+            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold_sec", 28.0))
+            
+            # Profile "One-Tap Precision" (Sheriff / Guardian / Marshal) — instant laser snap
+            self.smooth_reaction_min = 0.012
+            self.smooth_reaction_max = 0.026
+            self.smooth_close_range = 30.0
+            self.smooth_close_speed = 0.80
+            self.smooth_far_range = 160.0
+            self.smooth_far_speed = 0.95
+            self.smooth_fatigue_effect = 0.10
+            self.smooth_max_step_ratio = 0.28
+            self.smooth_target_area_ratio = 0.015
+            self.smooth_acceleration = 0.80
+            self.smooth_deceleration = 0.70
+            self.smooth_micro_corrections = 1
         else:
             self.smooth_gravity = float(getattr(config, "wm_gravity", 9.0))
             self.smooth_wind = float(getattr(config, "wm_wind", 3.0))
@@ -671,19 +685,19 @@ class _WindMouseConfig:
             self.smooth_max_delay = float(getattr(config, "wm_max_delay", 0.003))
             self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold", 50.0))
         
-        # Profile "Burst & Spray" — ultra-responsive humanized tracking for head lock
-        self.smooth_reaction_min = 0.035
-        self.smooth_reaction_max = 0.070
-        self.smooth_close_range = 35.0
-        self.smooth_close_speed = 0.55
-        self.smooth_far_range = 200.0
-        self.smooth_far_speed = 0.85
-        self.smooth_fatigue_effect = 0.3
-        self.smooth_max_step_ratio = 0.22
-        self.smooth_target_area_ratio = 0.02
-        self.smooth_acceleration = 0.65
-        self.smooth_deceleration = 0.55
-        self.smooth_micro_corrections = 1
+            # Profile "Burst & Spray" — ultra-responsive humanized tracking for head lock
+            self.smooth_reaction_min = 0.035
+            self.smooth_reaction_max = 0.070
+            self.smooth_close_range = 35.0
+            self.smooth_close_speed = 0.55
+            self.smooth_far_range = 200.0
+            self.smooth_far_speed = 0.85
+            self.smooth_fatigue_effect = 0.3
+            self.smooth_max_step_ratio = 0.22
+            self.smooth_target_area_ratio = 0.02
+            self.smooth_acceleration = 0.65
+            self.smooth_deceleration = 0.55
+            self.smooth_micro_corrections = 1
 
 
 def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
