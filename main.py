@@ -894,12 +894,12 @@ class AimTracker:
 
         center_x = (effective_x1 + effective_x2) / 2.0
         headx_base = center_x + effective_width * (offset_x / 100.0)
-        # Geometric head ratio (0.09 = ~9% of height, dead center on forehead/eyes)
-        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.09))
+        # Geometric head ratio (0.13 = ~13% of height, dead center on eyes/nose/chin)
+        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.13))
         heady_base = float(y1) + float(height) * base_head_ratio + effective_height * (offset_y / 100.0)
 
         # One-pass refinement from the already computed global mask.
-        # Refines both X and Y to lock directly onto the actual head contour!
+        # Refines both X and Y to lock directly onto the true head hitbox center!
         if mask is not None:
             mx1 = max(0, min(int(x1), mask.shape[1] - 1))
             my1 = max(0, min(int(y1), mask.shape[0] - 1))
@@ -914,13 +914,14 @@ class AimTracker:
                 if len(xs) >= min_pixels:
                     # Head X: median of upper mask pixels (centers horizontally on head)
                     headx_base = float(mx1 + int(np.median(xs)))
-                    # Head Y: refine directly to the upper head cluster center!
-                    top_head_cutoff = np.min(ys) + max(4, int(upper_h * 0.40))
-                    top_head_ys = ys[ys <= top_head_cutoff]
-                    if len(top_head_ys) > 0:
-                        heady_base = float(my1 + np.median(top_head_ys))
-                    else:
-                        heady_base = float(my1 + np.min(ys) + max(2.0, upper_h * 0.15))
+                    # Head Y: refine directly to the head center (eyes/nose/mouth)
+                    # np.min(ys) is the top crown of head/hair outline
+                    head_top = float(np.min(ys))
+                    # Head center sits ~11-13% of total body height below top of crown
+                    head_center_offset = max(3.0, float(height) * 0.11)
+                    heady_base = float(my1) + head_top + head_center_offset
+                    if offset_y != 0:
+                        heady_base += effective_height * (offset_y / 100.0)
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
