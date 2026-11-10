@@ -8,7 +8,15 @@ import re
 # (global hotkey, tray, start hidden). Every value is validated here so a hand
 # edited config.json can never produce a window outside the screen or a hotkey
 # that RegisterHotKey would reject.
-CURRENT_CONFIG_SCHEMA = 4
+CURRENT_CONFIG_SCHEMA = 5
+
+# --- Stream / feedback ports (schema 5, plan C1) ---------------------------
+# OBS xUDP plugin always sends the video stream to UDP 5000. The bot must bind
+# the same port or it "connects" successfully and then shows FPS = 0 forever.
+DEFAULT_UDP_PORT = "5000"
+DEFAULT_AUDIO_FEEDBACK_PORT = 4455
+# Ports that were baked into older builds/configs and are migrated once.
+_LEGACY_UDP_PORTS = ("", "1234", "3110")
 
 _GEOMETRY_RE = re.compile(r"^\s*(\d{3,4})\s*x\s*(\d{3,4})\s*$")
 _POSITION_RE = re.compile(r"^\s*([+-]\d{1,5})\s*([+-]\d{1,5})\s*$")
@@ -515,8 +523,9 @@ class Config:
         self.zmq_ip = "192.168.10.25"
         self.zmq_port = 5555
         self.udp_ip = "0.0.0.0"
-        self.udp_port = "3110"
+        self.udp_port = DEFAULT_UDP_PORT
         self.audio_feedback_ip = "192.168.10.3"
+        self.audio_feedback_port = DEFAULT_AUDIO_FEEDBACK_PORT
         self.audio_feedback_enabled = True
         self.teleport_host = ""
         self.teleport_port = "0"
@@ -1001,6 +1010,9 @@ class Config:
             "udp_ip": self.udp_ip,
             "udp_port": self.udp_port,
             "audio_feedback_ip": getattr(self, "audio_feedback_ip", "192.168.10.3"),
+            "audio_feedback_port": int(
+                getattr(self, "audio_feedback_port", DEFAULT_AUDIO_FEEDBACK_PORT)
+            ),
             "audio_feedback_enabled": bool(getattr(self, "audio_feedback_enabled", True)),
             "teleport_host": self.teleport_host,
             "teleport_port": self.teleport_port,
@@ -1063,9 +1075,68 @@ class Config:
     
     def from_dict(self, data):
         """從字典載入配置"""
-        for key, value in data.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+
+        # --- Schema 4 -> 5: đồng bộ cổng stream v2.1 (plan §3.2) ----------
+        # Runs BEFORE every other validation (including
+        # _migrate_and_validate_flick, which rewrites self.config_schema at the
+        # end), so the schema is read from the raw payload, not from the object.
+        raw_schema = 1
+        if isinstance(data, dict):
+            try:
+                raw_schema = int(data.get("config_schema", 1))
+            except Exception:
+                raw_schema = 1
+
+        def _norm_port_str(value, default):
+            try:
+                parsed = int(str(value).strip())
+            except Exception:
+                return str(default)
+            return str(parsed) if 1 <= parsed <= 65535 else str(default)
+
+        def _norm_port_int(value, default):
+            try:
+                parsed = int(str(value).strip())
+            except Exception:
+                return int(default)
+            return parsed if 1 <= parsed <= 65535 else int(default)
+
+        raw_udp_port = str(getattr(self, "udp_port", "")).strip()
+        if raw_schema < 5 and raw_udp_port in _LEGACY_UDP_PORTS:
+            self.udp_port = DEFAULT_UDP_PORT
+            log_print(
+                f"[Config] schema {raw_schema} -> 5: udp_port migrated from "
+                f"{raw_udp_port or '<empty>'} to {DEFAULT_UDP_PORT} "
+                "(OBS xUDP v2.1)"
+            )
+        else:
+            normalized_udp_port = _norm_port_str(raw_udp_port, DEFAULT_UDP_PORT)
+            if normalized_udp_port != raw_udp_port:
+                log_print(
+                    f"[Config] WARN udp_port={raw_udp_port!r} is not a valid port; "
+                    f"using {normalized_udp_port}"
+                )
+            self.udp_port = normalized_udp_port
+
+        self.audio_feedback_port = _norm_port_int(
+            getattr(self, "audio_feedback_port", DEFAULT_AUDIO_FEEDBACK_PORT),
+            DEFAULT_AUDIO_FEEDBACK_PORT,
+        )
+        self.udp_ip = str(getattr(self, "udp_ip", "0.0.0.0")).strip() or "0.0.0.0"
+        self.audio_feedback_ip = (
+            str(getattr(self, "audio_feedback_ip", "192.168.10.3")).strip()
+            or "192.168.10.3"
+        )
+        self.toggle_feedback_method = (
+            "zmq"
+            if str(getattr(self, "toggle_feedback_method", "udp")).strip().lower() == "zmq"
+            else "udp"
+        )
+
         try:
             self.target_fps = max(1, min(1000, int(getattr(self, "target_fps", 200))))
         except Exception:
@@ -1851,7 +1922,11 @@ class Config:
                 with open(filename, 'r') as f:
                     data = json.load(f)
                 self.from_dict(data)
-                log_print(f"[Config] Configuration loaded from {filename}")
+                log_print(
+                    f"[Config] Configuration loaded from {filename} "
+                    f"(udp_port={self.udp_port}, "
+                    f"audio_feedback_port={getattr(self, 'audio_feedback_port', 4455)})"
+                )
         except Exception as e:
             log_print(f"[Config] Failed to load configuration: {e}")
     

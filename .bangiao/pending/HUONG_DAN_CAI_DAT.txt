@@ -1,0 +1,125 @@
+# CVM-colorBot v1.2.1 & xUDP-VeloNet Plugin Full Package
+HƯỚNG DẪN CÀI ĐẶT TRÊN MÁY MỚI / CHIA SẺ
+
+Bộ cài đặt này bao gồm đầy đủ 2 thành phần:
+1. `OBS-xUDP-Plugin`: Plugin OBS truyền hình ảnh siêu tốc qua UDP 5000 có kèm
+   TurboJPEG và tích hợp Audio Feedback Beep (UDP 4455 - phát tiếng bíp vào tai
+   nghe PC1 khi bật/tắt Toggle).
+2. `CVM-colorBot`: Bộ bot v1.2.1 với:
+   - Thuật toán WindMouse mượt, chống rung tay, chống giật súng (Recoil).
+   - Cấu hình chuẩn v2.1: Sens 0.23 / DPI 1100 / WindMouse main / Flick sec.
+   - Receiver UDP v2.1: ghép mảnh 8-byte header, deadline 5.0 ms, slot size-1.
+   - Tự động gửi tín hiệu mạng đổi trạng thái Toggle sang OBS trên PC 1.
+
+---
+
+## BẢNG CỔNG (ĐỌC TRƯỚC)
+
+| Kênh              | Giao thức | Cổng | Máy bind | Máy gửi     |
+|-------------------|-----------|------|----------|-------------|
+| Video stream      | UDP       | 5000 | Máy 2    | Máy 1 (OBS) |
+| Toggle beep       | UDP       | 4455 | Máy 1    | Máy 2 (bot) |
+| OBS WebSocket     | TCP       | 4455 | Máy 1    | tool        |
+
+- Video stream **luôn** là UDP 5000 (plugin gửi, bot bind).
+- Beep là **UDP** 4455 — khác OBS WebSocket **TCP** 4455.
+- `dhz_port` / `ferrum_dhz_port` = "5000" là cổng **đích trên hộp DHZ**,
+  không phải cổng bind của bot.
+
+---
+
+## BƯỚC 1: CÀI ĐẶT OBS PLUGIN (TRÊN MÁY CHƠI GAME / MÁY OBS)
+
+1. Mở thư mục `OBS-xUDP-Plugin`.
+2. Chuột phải `install.bat` → **Run as administrator** (hoặc `.\install.ps1`
+   trong PowerShell as admin).
+3. Script tự động:
+   - Dò OBS Studio qua Registry (`HKLM:\SOFTWARE\OBS Studio`), Uninstall
+     entry, Steam library, ổ C/D/E. OBS cài ở ổ nào cũng tìm được; nếu không
+     tìm thấy sẽ hỏi đường dẫn (tối đa 3 lần) hoặc dùng
+     `.\install.ps1 -ObsPath "D:\obs-studio"`.
+   - Copy plugin vào `obs-plugins\64bit` và `turbojpeg.dll` vào
+     `bin\64bit` + `C:\libjpeg-turbo64\bin\`.
+   - Tạo Windows Firewall rules đúng chiều:
+     UDP 4455 In (beep), UDP 5000 Out (RemotePort), UDP 5000 In.
+     Chạy 2 lần không tạo rule trùng. Bỏ qua bằng `-SkipFirewall` hoặc
+     `-SkipLocalReceiverRule`.
+   - Cảnh báo nếu thiếu **VC++ 2015–2022 x64**
+     (`https://aka.ms/vs/17/release/vc_redist.x64.exe`) — không tự tải.
+   - Exit code: `0` thành công · `2` đã cài nhưng có cảnh báo · `1` lỗi.
+4. Khởi động lại OBS Studio và cấu hình filter (xem Bước 2).
+
+---
+
+## BƯỚC 2: CẤU HÌNH OBS (CHUẨN 144 FPS)
+
+* `Settings → Video`: FPS Type = **Integer FPS Values**, FPS Value = **144**.
+* Filter **Color Correction** trên Game Capture:
+  - Output Resolution: **320x320** (1:1)
+  - Max Network FPS: **144**
+  - JPEG Quality: **80–85**
+  - **Target IP = IP LAN của Máy 2**
+  - **Target Port = 5000**
+  - Color Enhancement / Enhance Purple Tones: BẬT (Purple)
+  - Enhancement Strength: 1.50–2.00 · Contrast Crush: 0.80–1.00
+  - Reduce Background Colors / Outline Thickening: BẬT
+
+Chuẩn màu Purple v2.1: HSV **H [120,160], S ≥ 188, V ≥ 115**.
+
+Vì sao 144 FPS: chu kỳ 6.9444 ms; deadline ghép mảnh 5.0 ms (72% chu kỳ) để
+frame lỗi bị hủy **trước** frame kế tiếp. Đặt FPS cao hơn (ví dụ 240) làm chu
+kỳ ngắn hơn deadline → dễ ghép nhầm frame; nếu buộc phải dùng, truyền
+`reassembly_timeout=0.004` cho receiver.
+
+---
+
+## BƯỚC 3: CÀI ĐẶT VÀ CHẠY BOT (TRÊN MÁY 2)
+
+1. Cài **Python 3.11 (hoặc 3.10) bản 64-bit** (bắt buộc 64-bit, tích
+   "Add Python to PATH"):
+   https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe
+2. Mở thư mục `CVM-colorBot`, chạy `run.bat`.
+   *(Lần đầu trên máy mới, bot tự nhận gói offline wheels trong thư mục để cài
+   trong vài giây, không cần mạng.)*
+3. Kiểm tra cấu hình chuẩn v2.1 trong `config.json`
+   (dự phòng: `config.burst_spray.json`):
+   - `config_schema: 5`
+   - Sens **0.23** · DPI **1100**
+   - `mode`: **WindMouse** · `mode_sec`: **Flick**
+   - `udp_ip`: **0.0.0.0** · `udp_port`: **5000**
+   - `audio_feedback_ip`: **IP LAN của Máy 1** · `audio_feedback_port`: **4455**
+   - `toggle_feedback_method`: `udp`
+   - `capture_mode`: `UDP` · `target_fps`: 144 · `capture_fps`: 144.0
+4. Trong UI: **Capture = UDP**, IP = `0.0.0.0`, Port = `5000` → Connect.
+   Dòng gợi ý dưới ô Port ghi "Stream UDP 5000 · Beep UDP 4455".
+5. Nếu `config.json` cũ (schema 4, port 3110) được nạp, bot tự migration một
+   lần và ghi log:
+   `[Config] schema 4 -> 5: udp_port migrated from 3110 to 5000 (OBS xUDP v2.1)`.
+
+---
+
+## BƯỚC 4: KIỂM TRA KẾT NỐI
+
+- UI hiển thị **FPS > 0** (~144) và **Delay < 3 ms**.
+- Telemetry/log có `[UDP] listening on 0.0.0.0:5000 rcvbuf=... timer=True`.
+- Bật/tắt aim → tai nghe PC1 kêu bíp; log `[NetworkFeedback] UDP beep target
+  -> <IP PC1>:4455`.
+
+---
+
+## BẢNG LỖI THƯỜNG GẶP
+
+| Triệu chứng | Nguyên nhân thường gặp | Cách xử lý |
+|---|---|---|
+| FPS = 0, Delay = 0 | Port lệch (OBS ≠ bot), firewall PC2 chặn UDP 5000 | Đặt Target Port = 5000 và bot Port = 5000; mở UDP 5000 In trên PC2 |
+| Log `[UDP] bind ... failed` | `receiver_ultra_fast.py` hoặc bot instance khác đang giữ cổng 5000 | Đóng tiến trình đó, hoặc đổi port ở **cả** OBS và bot |
+| Có frame nhưng méo/xanh | Frame phân mảnh lỗi, TurboJPEG thiếu/sai 64-bit | Xem `bad_frames`, `decode_errors`, `oversize_packets`; cài `turbojpeg.dll` 64-bit |
+| `timeout_drops` tăng liên tục | Mạng Wi-Fi chập chờn, mất mảnh | Dùng LAN/Ethernet; giữ 144 FPS |
+| Beep không kêu | Sai `audio_feedback_ip`, thiếu rule UDP 4455 In trên PC1 | Đặt IP PC1, mở UDP 4455 In (UDP, không phải TCP) |
+| Beep không kêu + log có "ZMQ unavailable" | Chọn `toggle_feedback_method = zmq` nhưng thiếu module | Đặt `toggle_feedback_method = udp` |
+| `install.ps1` báo thiếu VC++ | Chưa cài VC++ 2015–2022 x64 | Cài `vc_redist.x64.exe` rồi mở lại OBS |
+| `install.ps1` không tìm thấy OBS | OBS portable / MSIX / ổ lạ | `.\install.ps1 -ObsPath "D:\obs-studio"` |
+
+---
+
+Chúc bạn trải nghiệm mượt mà!

@@ -1,37 +1,30 @@
-Bạn là Planner trong Dây chuyền 4 Agent (/ship).
-Hãy đọc kỹ yêu cầu từ người dùng và toàn bộ mã nguồn của dự án (đặc biệt: src/ui.py, main.py, src/utils/config.py, src/ui_tabs/, tests/):
+# YÊU CẦU DỰ ÁN: ĐỒNG BỘ & NÂNG CẤP OBS XUDP PLUGIN & UDP RECEIVER (v2.1)
 
-YÊU CẦU NGƯỜI DÙNG:
-"tôi nghĩ là nên tối ưu lại giao diện UI hiện tại
-- có 2 biến thể là Simple và Pro đúng không, vậy thì ở dạng Simple hãy làm đơn giản hóa giao diện tool để khi ở dạng thu nhỏ không bị giật khựng UI
-- biến thể Pro thì giữ nguyên tất cả như hiện tại khi mở full màn hình 
-- Xem lại tool laucher giao diện UI rất khó chọn khi đã ẩn đi"
+## Mục Tiêu & Phạm Vi:
+1. **Đồng bộ hóa cổng kết nối UDP giữa OBS Plugin (PC 1) và Bot (PC 2):**
+   - Đặt cổng mặc định đồng nhất là **5000** trên toàn bộ hệ thống (`CVM-colorBot/config.json`, `OBS_UDP.py`, `capture_service.py`, `OBS-xUDP-Plugin/config.json`, `HUONG_DAN_SU_DUNG.txt`).
+   - Đảm bảo cơ chế tự động fallback và cấu hình IP/Port của Audio Feedback (UDP 4455) thông suốt, có thông báo log rõ ràng.
 
-NHIỆM VỤ CỦA PLANNER:
-1. Phân tích nguyên nhân gốc:
-   - Tại sao ở dạng thu nhỏ / Simple mode hiện tại lại bị giật khựng UI (do cấu trúc lồng nhau của CTkScrollableFrame, sidebar, hàng chục collapsible sections và các timer tick cập nhật liên tục DOM).
-   - Tại sao tool launcher / giao diện UI rất khó chọn khi đã ẩn đi hoặc minimize (do xung đột giữa overrideredirect(True), Win32 WS_EX_APPWINDOW, binding <Map> trên toàn bộ widget con, và thiếu cơ chế restore / global hotkey khi chơi game fullscreen).
-2. Thiết kế kiến trúc giải pháp chi tiết:
-   - Kiến trúc Simple Mode:
-     + Kích thước thu nhỏ gọn gàng (ví dụ geometry 560x540 hoặc tương đương).
-     + Layout tinh gọn, không chia sidebar cồng kềnh, chỉ hiển thị Dashboard cốt lõi:
-       1) Master Switch (START / STOP Engine) + Telemetry badge (FPS, Ping, Connection).
-       2) Main Aim card (Mode, Aim Key, FOV, Speed/Smooth).
-       3) Sec Aim / Flick card (Toggle, Aim Key, FOV, Gain).
-       4) Quick Trigger & RCS switches.
-       5) Active Profile selector.
-       6) Nút toggle sang Pro Mode ("⭐ Pro Mode").
-     + Tránh giật khựng: Giảm tải widget DOM, dừng vẽ các canvas/đồ thị nâng cao ở Simple mode.
-   - Kiến trúc Pro Mode:
-     + Giữ nguyên 100% tất cả 5 pillar navigation (Combat, Vision, Hardware, Profiles, Telemetry), các tab con (Flick V2, Calibration, RCS, Color, Hotkeys...).
-     + Geometry đầy đủ chuẩn (980x660) hoặc Full màn hình.
-     + Lưu trạng thái `ui_pro_mode` bền vững vào config.
-   - Xử lý triệt để Tool Launcher & Ẩn/Hiện UI:
-     + Chuẩn hóa Taskbar Integration trên Windows: Sửa `_on_minimize`, `_on_window_map` (chỉ xử lý khi `event.widget == self`), đảm bảo click vào icon trên Taskbar sẽ luôn restore (deiconify + lift + focus).
-     + Bổ sung Global Hotkey toàn cục (mặc định phím `Insert`, lưu trong `config.ui_toggle_hotkey`): Bấm `Insert` ở bất kỳ đâu (kể cả trong game fullscreen) sẽ lập tức Ẩn/Hiện UI tool.
-3. Kế hoạch phân rã công việc cho Coder, Tester, Reviewer.
-4. Danh sách các file cần chỉnh sửa, bổ sung.
-5. Danh sách test case kiểm thử cụ thể (Unit test, GUI lifecycle test, hotkey test).
+2. **Nâng cấp `CVM-colorBot/src/capture/OBS_UDP.py`:**
+   - Kế thừa và tích hợp các công nghệ siêu tốc từ `OBS-xUDP-Plugin/receiver_ultra_fast.py`:
+     - Bộ ghép mảnh gói tin `FrameReassembler` với **Deadline Timeout 5.0ms** (chu kỳ 144 FPS là 6.94ms; gói tin bị trễ hoặc rớt mảnh quá 5ms sẽ bị drop ngay lập tức, triệt tiêu hoàn toàn lag tích lũy buffer bloat).
+     - Hỗ trợ cả 2 dạng packet: Single-packet (SOI `\xff\xd8`) và Fragmented packet (Header 8 bytes: `[total_size (4B)] [frag_idx (2B)] [total_frags (2B)]`).
+     - Tích hợp `WindowsTimer(1ms)` (`timeBeginPeriod(1)`) và `set_high_thread_priority()` cho luồng nhận và giải mã frame.
+     - Tối ưu giải mã phần cứng TurboJPEG và OpenCV fallback; hàng đợi size-1 slot đơn bảo đảm frame nhận được luôn là frame mới nhất.
+     - Giữ nguyên 100% tương thích ngược API với `capture_service.py` (`get_current_frame()`, `connect()`, `disconnect()`, `get_performance_stats()`, v.v.).
 
-Ghi toàn bộ bản vẽ chi tiết vào file: .bangiao/01-ke-hoach.md
-Kỷ luật Planner: Chỉ đọc mã nguồn và lập bản vẽ kế hoạch, TUYỆT ĐỐI KHÔNG SỬA CODE.
+3. **Nâng cấp bộ cài đặt `OBS-xUDP-Plugin`:**
+   - Cập nhật `OBS-xUDP-Plugin/install.ps1`:
+     - Tự động dò tìm thư mục OBS Studio thông qua Registry Windows (`HKLM:\SOFTWARE\OBS Studio`), đường dẫn mặc định `C:\Program Files\obs-studio`, ổ `D:\`, `E:\`, và Steam library.
+     - Tự động thêm rule Windows Defender Firewall cho OBS Studio và mở các cổng cần thiết (UDP Inbound 4455 cho Beep, UDP Outbound/Inbound 5000).
+     - Kiểm tra sự tồn tại của VC++ 2015-2022 Redistributable (x64) và cảnh báo người dùng nếu thiếu.
+     - Cập nhật thông điệp hiển thị chuẩn 144 FPS & Purple v2.1.
+   - Cập nhật `HUONG_DAN_SU_DUNG.txt` và `HUONG_DAN_CAI_DAT.txt`:
+     - Hướng dẫn rõ ràng cách cấu hình IP PC 1 / PC 2, giải thích cổng 5000 (Stream) và cổng 4455 (Beep).
+
+4. **Đồng bộ cấu hình mẫu trong `OBS-xUDP-Plugin`:**
+   - Cập nhật `config.json` và `cvm_config_optimized.json` trong `OBS-xUDP-Plugin` khớp với cấu hình chuẩn v2.1 (Sens 0.23, DPI 1100, WindMouse main, Flick sec, port 5000).
+
+5. **Kiểm thử tự động:**
+   - Mở rộng `tests/test_udp_receiver_latency.py` kiểm tra ghép mảnh gói UDP, deadline timeout 5ms, giải mã TurboJPEG và OpenCV fallback.
+   - Đảm bảo toàn bộ test suite (`python -m unittest discover -s tests`) vượt qua 100%.

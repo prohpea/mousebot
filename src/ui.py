@@ -434,7 +434,7 @@ class ViewerApp(ctk.CTk):
         
         # --- Capture control cache (restore from config) ---
         self.saved_udp_ip = getattr(config, "udp_ip", "127.0.0.1")
-        self.saved_udp_port = getattr(config, "udp_port", "1234")
+        self.saved_udp_port = getattr(config, "udp_port", "5000")
         self.saved_teleport_host = str(getattr(config, "teleport_host", ""))
         self.saved_teleport_port = str(getattr(config, "teleport_port", "0"))
         self.saved_teleport_stream_key = str(getattr(config, "teleport_stream_key", ""))
@@ -1845,7 +1845,7 @@ class ViewerApp(ctk.CTk):
             payload["ndi_source"] = selected
         elif mode == "UDP":
             ip = str(getattr(self, "saved_udp_ip", getattr(config, "udp_ip", "127.0.0.1")))
-            port = str(getattr(self, "saved_udp_port", getattr(config, "udp_port", "1234")))
+            port = str(getattr(self, "saved_udp_port", getattr(config, "udp_port", "5000")))
             if hasattr(self, "udp_ip_entry") and self.udp_ip_entry.winfo_exists():
                 ip = self.udp_ip_entry.get().strip()
             if hasattr(self, "udp_port_entry") and self.udp_port_entry.winfo_exists():
@@ -1904,7 +1904,7 @@ class ViewerApp(ctk.CTk):
                 return self.capture.connect_ndi(selected)
             if mode == "UDP":
                 ip = str(payload.get("udp_ip") or getattr(config, "udp_ip", "127.0.0.1"))
-                port = str(payload.get("udp_port") or getattr(config, "udp_port", "1234"))
+                port = str(payload.get("udp_port") or getattr(config, "udp_port", "5000"))
                 self.saved_udp_ip = ip
                 self.saved_udp_port = port
                 config.udp_ip = ip
@@ -4530,6 +4530,13 @@ class ViewerApp(ctk.CTk):
             # 缍佸畾浜嬩欢浠ュ鏅備繚瀛?
             self.udp_port_entry.bind("<KeyRelease>", self._on_udp_port_changed)
             self.udp_port_entry.bind("<FocusOut>", self._on_udp_port_changed)
+
+            # Static hint (no i18n key on purpose: the i18n tests pin the key set).
+            ctk.CTkLabel(
+                self.capture_content_frame,
+                text="Stream UDP 5000 \u00b7 Beep UDP 4455",
+                font=("Roboto", 9), text_color=COLOR_TEXT_DIM
+            ).pack(anchor="w", pady=(0, 3))
             
             # UDP FOV 瑁佸垏瑷畾
             self._add_spacer_in_frame(self.capture_content_frame)
@@ -5774,7 +5781,7 @@ class ViewerApp(ctk.CTk):
         ModernSwitch(
             self.card_humanization.content,
             "Audio Feedback",
-            "Phát tiếng bíp tai nghe OBS khi bật/tắt (UDP 4455)",
+            "Beep qua UDP 4455 tới PC1 (OBS plugin)",
             init_val=bool(getattr(config, "audio_feedback_enabled", True)),
             command=lambda v: setattr(config, "audio_feedback_enabled", v),
             accent_color="#BD93F9"
@@ -10168,9 +10175,15 @@ class ViewerApp(ctk.CTk):
                 
     def _connect_udp(self):
         if self.capture.mode == "UDP":
-            ip = self.udp_ip_entry.get()
-            port = self.udp_port_entry.get()
-            
+            ip = self.udp_ip_entry.get().strip()
+            port = self.udp_port_entry.get().strip()
+            # An empty box falls back to the configured port instead of sending
+            # "" into int() and failing with a cryptic message.
+            if not port:
+                port = str(getattr(config, "udp_port", "5000"))
+            if not ip:
+                ip = str(getattr(config, "udp_ip", "0.0.0.0"))
+
             # 淇濆瓨鍒板収瀛樺拰 config
             self.saved_udp_ip = ip
             self.saved_udp_port = port

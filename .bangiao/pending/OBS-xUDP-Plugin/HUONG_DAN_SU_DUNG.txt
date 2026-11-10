@@ -1,0 +1,167 @@
+========================================================================
+   VELONET COLOR CORRECTION & UDP STREAMING PLUGIN v2.1 (FINAL)
+   [CHUAN 144 FPS - DEADLINE 5.0 ms - CỔNG 5000 / 4455]
+========================================================================
+
+1. BANG CONG - DOC TRUOC KHI CAU HINH:
+------------------------------------------------------------------------
+  | Kenh            | Giao thuc | Cong | May bind | May gui          |
+  |-----------------|-----------|------|----------|------------------|
+  | Video stream    | UDP       | 5000 | May 2    | May 1 (OBS)      |
+  | Toggle beep     | UDP       | 4455 | May 1    | May 2 (bot)      |
+  | OBS WebSocket   | TCP       | 4455 | May 1    | tool/trinh duyet |
+
+  * Video stream LUON la UDP 5000. Plugin gui toi cong nay, bot phai bind
+    dung cong nay. Neu bot bind cong khac, ket noi se bao "thanh cong"
+    (bind la du) nhung FPS = 0 vi khong co goi nao toi.
+  * Beep 4455 la UDP, KHONG phai OBS WebSocket TCP 4455. Hai giao thuc
+    khac nhau nen trung so cong van chay song song - nhung khi mo firewall
+    phai ghi ro UDP.
+  * dhz_port / ferrum_dhz_port = "5000" la cong DICH tren hop DHZ/Ferrum,
+    khong phai cong bind cua bot. Chi trung khi hop do chay tren chinh PC2;
+    khi do doi dhz_port sang 5001.
+
+2. CAI TIEN & TOI UU CHUAN 144 FPS:
+-----------------------------------
+ - FRAME TIME BUDGET (6.94 ms):
+   Chu ky 144 FPS = 1000 / 144 = 6.9444 ms. Deadline ghep manh la 5.0 ms
+   (72% chu ky), du 1.94 ms cho giai ma (~0.5 ms TurboJPEG) va callback.
+   Khong khuyen nghi dat 144 FPS cao hon voi receiver deadline 5.0 ms: o
+   240 FPS chu ky chi con 4.17 ms, ngan hon deadline, nen mot manh rot co
+   the song qua chu ky ke tiep va lam tang nguy co ghep nham frame.
+
+ - DEADLINE TIMEOUT PHAN MANH UDP (5.0 ms):
+   Bo ghep manh (Frame Reassembler) huy frame do dut cap/rot goi sau 5.0 ms
+   ke tu manh dau tien, don sach truoc khi frame tiep theo toi. Zero lag
+   tich luy, khong co hien tuong frame cu chiem bo nho.
+
+ - DONG BO CHUAN HSV MAU TIM CHO COLOR TARGET:
+   + H: [120, 160]
+   + S >= 188
+   + V >= 115
+   (Day la nguong bot dung de nhan dien; plugin chi bien doi mau.)
+
+ - TI LE CHUAN 1:1:
+   320x320 giup Color Target khong bi mat dau khi dich ngoai, nhay hoac
+   khi giat sung.
+
+ - RECEIVER TACH LUONG & GIAI MA TURBOJPEG SIMD:
+   + Luong mang doc socket buffer 8 MB, uu tien cao nhat.
+   + Hang doi size-1 (LatestFrameSlot) giup frame render luon la frame moi
+     nhat; frame chua kip giai ma bi ghi de, khong bao gio ton dong.
+   + Giai ma TurboJPEG ~0.5 ms (OpenCV fallback neu thieu DLL).
+   + Bat Windows Timer 1 ms (timeBeginPeriod).
+
+3. HUONG DAN CAI DAT TREN MAY CHINH (MAY 1 - OBS STUDIO):
+---------------------------------------------------------
+  - Cach 1 (khuyen nghi): Chuot phai "install.bat" -> Run as administrator.
+  - Cach 2: PowerShell (as admin):
+        .\install.ps1
+        .\install.ps1 -ObsPath "D:\obs-studio"     # OBS o o khac
+        .\install.ps1 -SkipLocalReceiverRule       # khong mo UDP 5000 In
+  - Cach 3: Chep tay thu muc "obs-plugins" va "bin" vao thu muc OBS Studio.
+
+  Script tu dong:
+    1. Do OBS Studio qua Registry / Uninstall entry / Steam / o dia C-D-E,
+       hoac hoi duong dan (toi da 3 lan).
+    2. Copy obs-color-correction.dll + turbojpeg.dll, kiem tra lai sau copy.
+    3. Tao rule firewall dung chieu (chay 2 lan khong tao rule trung).
+    4. Canh bao neu thieu VC++ 2015-2022 x64.
+  Exit code: 0 = thanh cong, 2 = da cai nhung co canh bao, 1 = loi.
+
+4. FIREWALL - TAO TREN MAY NAO:
+-------------------------------
+  MAY 1 (OBS) - bat buoc:
+    New-NetFirewallRule -DisplayName "CVM xUDP - Beep 4455 In" `
+      -Direction Inbound -Protocol UDP -LocalPort 4455 -Action Allow
+    New-NetFirewallRule -DisplayName "CVM xUDP - Stream 5000 Out" `
+      -Direction Outbound -Protocol UDP -RemotePort 5000 -Action Allow
+
+  MAY 2 (bot) - bat buoc:
+    New-NetFirewallRule -DisplayName "CVM xUDP - Stream 5000 In" `
+      -Direction Inbound -Protocol UDP -LocalPort 5000 -Action Allow
+
+  Luu y: rule outbound phai dung -RemotePort 5000 (OBS gui tu cong nguon
+  ngau nhien toi PC2:5000). Dung -LocalPort 5000 cho outbound la sai.
+
+5. CAI DAT KHUYEN NGHI TRONG OBS CHO 144 FPS:
+---------------------------------------------
+  * File -> Settings -> Video:
+    - FPS Type: "Integer FPS Values"
+    - FPS Value: 144
+  * Bo loc Color Correction tren Game Capture:
+    - Output Resolution: 320x320 (1:1)
+    - Max Network FPS: 144
+    - JPEG Quality: 80 - 85  (~7-8 KB/frame, ~9 Mbps cuc nhe)
+    - Target IP: IP LAN cua may 2 (vi du 192.168.10.17)
+    - Target Port: 5000
+    - Color Enhancement: BAT
+    - Enhance Purple Tones: BAT (chi chon Purple)
+    - Enhancement Strength: 1.50 - 2.00
+    - Reduce Background Colors: BAT
+    - Contrast Crush: 0.80 - 1.00
+    - Outline Thickening: BAT
+
+6. CAU HINH IP HAI MAY:
+-----------------------
+  MAY 1 (OBS / PC choi game):
+    - Target IP  = IP LAN cua MAY 2
+    - Target Port = 5000
+    - Plugin lang nghe UDP 4455 de phat beep.
+
+  MAY 2 (CVM-colorBot):
+    - config.json:  "udp_ip": "0.0.0.0"    (bind moi card mang)
+                    "udp_port": "5000"
+    - Beep:         "audio_feedback_ip": "<IP LAN cua MAY 1>"
+                    "audio_feedback_port": 4455
+                    "audio_feedback_enabled": true
+                    "toggle_feedback_method": "udp"
+  Kiem tra: ca hai may cung subnet, ping duoc nhau.
+
+7. HUONG DAN CHAY RECEIVER DOC LAP TREN MAY PHU (MAY 2):
+-------------------------------------------------------
+  - Yeu cau: Python 3 (kem opencv-python, numpy).
+  - Chay 1-click: nhap dup chuot vao "run_receiver.bat".
+  - Hoac chay bang lenh:
+      python receiver_ultra_fast.py --port 5000 --timeout 0.005
+  - Phim tat khi xem:
+      'q': Thoat
+      'h': Bat/tat HUD overlay thong so (FPS, Latency, Bitrate, Drops)
+      'r': Reset bo dem thong ke
+
+  CANH BAO: KHONG chay receiver_ultra_fast.py DONG THOI voi bot tren cung
+  may - ca hai se tranh cong 5000. Bot se bao bind fail (dung thiet ke,
+  khong con SO_REUSEADDR chia goi im lang). Cong cu nay chi de test.
+
+  Receiver v2.1 chi chap nhan 2 dang goi:
+    (a) single-packet: ca JPEG trong 1 datagram, bat dau bang FF D8
+    (b) fragment 8 byte header [total_size u32][frag_idx u16][total_frags u16]
+  Luong byte tho khong header KHONG duoc ho tro nua.
+
+8. CHAN DOAN NHANH:
+-------------------
+  1. FPS = 0, Delay = 0:
+     - OBS Target Port co dung 5000?
+     - Bot udp_port co dung 5000 (Capture -> UDP)?
+     - Tren PC2:  netstat -ano | findstr :5000   -> co process bot khong?
+     - Firewall PC2 da mo UDP 5000 In chua?
+     - Hai may cung subnet? Ping duoc?
+     - Log bot co dong "[UDP] listening on 0.0.0.0:5000"?
+       Neu co "[UDP] bind ... failed" -> dang co process khac chiem cong.
+  2. Co frame nhung meo / xanh / dut:
+     - Xem stats: decode_errors, bad_frames, oversize_packets, timeout_drops.
+     - TurboJPEG DLL dung 64-bit? (C:\libjpeg-turbo64\bin\turbojpeg.dll)
+     - JPEG quality qua cao -> frame > 65 KB -> kiem tra fragment.
+  3. Beep khong keu:
+     - audio_feedback_enabled = true?
+     - audio_feedback_ip = IP LAN cua PC1?
+     - Firewall PC1 da mo UDP 4455 In chua?
+     - toggle_feedback_method = "udp" (hoac "zmq" -> se fallback va log).
+  4. Bind fail:
+     - Dong receiver_ultra_fast.py / bot instance khac.
+     - Doi port o CA OBS va bot neu buoc phai dung port khac.
+  5. Cai plugin fail:
+     - Da chay admin? OBS 64-bit? Du VC++ 2015-2022 x64?
+     - Duong dan OBS co bin\64bit\obs64.exe?
+
+=======================================================================
