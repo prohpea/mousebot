@@ -1274,6 +1274,18 @@ if __name__ == "__main__":
     import customtkinter as ctk
     from src.ui import ViewerApp
     from src.version import get_version_summary
+    from src.utils import single_instance
+
+    _cli_show = "--show" in sys.argv[1:]
+
+    # --- 1. single instance guard, BEFORE Tk/capture/mouse are allocated -----
+    # A second run must not open a second window or fight for the capture device
+    # and the hotkey; it signals the running instance and exits 0 (plan §8.6).
+    is_first, _mutex_handle = single_instance.acquire()
+    if not is_first:
+        single_instance.signal_existing()
+        print("[Main] Another instance is running; requested show.")
+        raise SystemExit(0)
 
     # Load the persisted config ONCE, BEFORE AimTracker. AimTracker snapshots
     # config during __init__; loading it afterwards (as before) left the tracker
@@ -1320,6 +1332,24 @@ if __name__ == "__main__":
     # Config was already loaded above (before AimTracker); only push it into
     # the tracker/UI here instead of reading the file a second time.
     app._sync_config_to_tracker()
+
+    # --- Instance watcher: a second `run.bat` shows THIS window --------------
+    try:
+        watcher = single_instance.InstanceWatcher(
+            on_show=lambda: app._launcher_queue.put("show")
+        )
+        watcher.attach_event()
+        watcher.start()
+        app._instance_watcher = watcher
+    except Exception as exc:
+        print(f"[Main] instance watcher unavailable: {exc}")
+
+    # `--show` (run.bat) forces the window forward; ui_start_hidden keeps it out
+    # of the way on boot while the hotkey/tray remain reachable.
+    if _cli_show:
+        app.after(300, app._show_window)
+    elif bool(getattr(config, "ui_start_hidden", False)):
+        app.after(200, app._hide_window)
     
     print("[Main] Application initialized")
     
@@ -1331,6 +1361,10 @@ if __name__ == "__main__":
     # Update check disabled per user configuration
     # app.after(2000, app._check_for_updates)
     
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        # Never leave the mutex/event handles open, even on an abnormal exit.
+        single_instance.release()
 
 

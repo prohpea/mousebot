@@ -19,6 +19,10 @@ class TestRuntimeLockCache(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
+            from unittest.mock import MagicMock
+            import _tkinter
+            if isinstance(_tkinter, MagicMock) or not hasattr(_tkinter, "__file__"):
+                raise unittest.SkipTest("real tkinter unavailable")
             import customtkinter as ctk
 
             ctk.set_appearance_mode("Dark")
@@ -27,6 +31,8 @@ class TestRuntimeLockCache(unittest.TestCase):
 
     def _app(self):
         from src.ui import ViewerApp
+        from src.utils.config import config
+        config.ui_pro_mode = True
 
         app = ViewerApp(tracker=MagicMock(), capture_service=MagicMock())
         app.withdraw()
@@ -96,11 +102,19 @@ class TestContentCleanupDropsWidgetRefs(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
+            from unittest.mock import MagicMock
+            import _tkinter
+            if isinstance(_tkinter, MagicMock) or not hasattr(_tkinter, "__file__"):
+                raise unittest.SkipTest("real tkinter unavailable")
             import customtkinter as ctk
 
             ctk.set_appearance_mode("Dark")
         except Exception as exc:  # pragma: no cover
             raise unittest.SkipTest(f"customtkinter unavailable: {exc}")
+
+    def setUp(self):
+        from src.utils.config import config
+        config.ui_pro_mode = True
 
     def test_clear_content_removes_debug_widget_refs(self):
         from src.ui import ViewerApp
@@ -129,11 +143,19 @@ class TestDebugLogGating(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
+            from unittest.mock import MagicMock
+            import _tkinter
+            if isinstance(_tkinter, MagicMock) or not hasattr(_tkinter, "__file__"):
+                raise unittest.SkipTest("real tkinter unavailable")
             import customtkinter as ctk
 
             ctk.set_appearance_mode("Dark")
         except Exception as exc:  # pragma: no cover
             raise unittest.SkipTest(f"customtkinter unavailable: {exc}")
+
+    def setUp(self):
+        from src.utils.config import config
+        config.ui_pro_mode = True
 
     def test_no_format_when_tab_not_telemetry(self):
         from src.ui import ViewerApp

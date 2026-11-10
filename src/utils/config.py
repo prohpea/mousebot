@@ -1,6 +1,67 @@
 from src.utils.debug_logger import log_print
 import json
 import os
+import re
+
+# --- UI mode schema helpers (pure, no Tk import) ---------------------------
+# Schema 4 introduces the real Simple/Pro mode state machine plus the launcher
+# (global hotkey, tray, start hidden). Every value is validated here so a hand
+# edited config.json can never produce a window outside the screen or a hotkey
+# that RegisterHotKey would reject.
+CURRENT_CONFIG_SCHEMA = 4
+
+_GEOMETRY_RE = re.compile(r"^\s*(\d{3,4})\s*x\s*(\d{3,4})\s*$")
+_POSITION_RE = re.compile(r"^\s*([+-]\d{1,5})\s*([+-]\d{1,5})\s*$")
+
+_HOTKEY_NAMES = {
+    "INSERT", "DELETE", "HOME", "END", "PAGEUP", "PAGEDOWN", "PAUSE",
+    "PRINTSCREEN", "SCROLLLOCK", "NUMLOCK", "CAPSLOCK", "TAB", "SPACE",
+    "ENTER", "ESCAPE", "BACKSPACE",
+    "LSHIFT", "RSHIFT", "LCONTROL", "RCONTROL", "LMENU", "RMENU",
+    "SHIFT", "CONTROL", "MENU",
+}
+for _index in range(1, 25):
+    _HOTKEY_NAMES.add(f"F{_index}")
+for _letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    _HOTKEY_NAMES.add(_letter)
+for _digit in "0123456789":
+    _HOTKEY_NAMES.add(_digit)
+
+
+def _normalize_hotkey(raw, default="Insert"):
+    """Return a canonical hotkey token, or ``""`` when the hotkey is disabled.
+
+    ``""`` is explicitly meaningful ("no hotkey"). An unknown token falls back to
+    ``default`` so the launcher always has a way back to the window.
+    """
+    text = str(raw if raw is not None else default).strip()
+    if not text:
+        return ""
+    token = text.upper().replace(" ", "").replace("-", "")
+    if token in _HOTKEY_NAMES:
+        return token
+    return default
+
+
+def _normalize_geometry(raw, min_w, min_h, max_w, max_h, default):
+    match = _GEOMETRY_RE.match(str(raw or ""))
+    if not match:
+        return default
+    width = max(int(min_w), min(int(max_w), int(match.group(1))))
+    height = max(int(min_h), min(int(max_h), int(match.group(2))))
+    return f"{width}x{height}"
+
+
+def _normalize_position(raw):
+    """Return ``"+x+y"`` or ``""`` when the value is missing/unusable."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    match = _POSITION_RE.match(text)
+    if not match:
+        return ""
+    return f"{match.group(1)}{match.group(2)}"
+
 
 class Config:
     def __init__(self):
@@ -46,7 +107,7 @@ class Config:
         # batched inside their own tag). False restores the old cross-tag merge.
         self.move_queue_per_tag_dispatch = True
         # Config schema (NOT the app version): bumped when keys/migrations change.
-        self.config_schema = 3
+        self.config_schema = CURRENT_CONFIG_SCHEMA
         
         # --- Custom HSV Settings ---
         self.custom_hsv_min_h = 0    # H 鏈€灏忓€?(0-179)
@@ -434,7 +495,18 @@ class Config:
         self.language = "en"
         # Pro/Simple is a real, persisted preference now (it used to be read and
         # written by the UI but absent from the schema, so it reset every launch).
+        # Fresh install starts in Simple: it is the lightweight layout (plan §5).
         self.ui_pro_mode = False
+        # --- Schema 4: UI mode / launcher (plan §9) ---
+        self.ui_toggle_hotkey = "Insert"
+        self.ui_simple_geometry = "560x540"
+        self.ui_pro_geometry = "980x660"
+        self.ui_simple_position = ""
+        self.ui_start_hidden = False
+        self.ui_tray_enabled = (os.name == "nt")
+        self.ui_minimize_to_tray = False
+        # Rollback flag: False = the old "Pro with collapsed sections" Simple.
+        self.ui_compact_layout = True
         # Preview is a debug aid, not a 144 Hz render target: cap its FPS.
         self.ui_preview_max_fps = 30
         
@@ -556,7 +628,7 @@ class Config:
             "move_queue_per_tag_dispatch": bool(
                 getattr(self, "move_queue_per_tag_dispatch", True)
             ),
-            "config_schema": int(getattr(self, "config_schema", 3)),
+            "config_schema": int(getattr(self, "config_schema", CURRENT_CONFIG_SCHEMA)),
             
             # Custom HSV Settings
             "custom_hsv_min_h": self.custom_hsv_min_h,
@@ -912,6 +984,14 @@ class Config:
             "ui_theme": self.ui_theme,
             "language": self.language,
             "ui_pro_mode": bool(getattr(self, "ui_pro_mode", False)),
+            "ui_toggle_hotkey": str(getattr(self, "ui_toggle_hotkey", "Insert")),
+            "ui_simple_geometry": str(getattr(self, "ui_simple_geometry", "560x540")),
+            "ui_pro_geometry": str(getattr(self, "ui_pro_geometry", "980x660")),
+            "ui_simple_position": str(getattr(self, "ui_simple_position", "")),
+            "ui_start_hidden": bool(getattr(self, "ui_start_hidden", False)),
+            "ui_tray_enabled": bool(getattr(self, "ui_tray_enabled", os.name == "nt")),
+            "ui_minimize_to_tray": bool(getattr(self, "ui_minimize_to_tray", False)),
+            "ui_compact_layout": bool(getattr(self, "ui_compact_layout", True)),
             "ui_preview_max_fps": int(getattr(self, "ui_preview_max_fps", 30)),
             
             # Capture & Network Feedback Settings
@@ -1371,6 +1451,39 @@ class Config:
             self.ui_collapsible_states = {}
         self.legacy_ui_mode = bool(getattr(self, "legacy_ui_mode", False))
         self.ui_pro_mode = bool(getattr(self, "ui_pro_mode", False))
+        # --- Schema 4 migration (plan §9.2) -----------------------------
+        # A config file that predates the Simple dashboard keeps the user in Pro
+        # (non-empty payload), a fresh install starts in Simple.
+        if isinstance(data, dict) and data and "ui_pro_mode" not in data:
+            self.ui_pro_mode = True
+            log_print("[Config] schema 3 -> 4: ui_pro_mode defaulted to Pro for an existing config")
+        raw_hotkey = getattr(self, "ui_toggle_hotkey", "Insert")
+        self.ui_toggle_hotkey = _normalize_hotkey(raw_hotkey, "Insert")
+        if str(raw_hotkey or "").strip() and not self.ui_toggle_hotkey:
+            self.ui_toggle_hotkey = "Insert"
+        elif str(raw_hotkey or "").strip() and self.ui_toggle_hotkey != str(raw_hotkey).strip():
+            if str(raw_hotkey).strip().upper() != self.ui_toggle_hotkey:
+                log_print(
+                    f"[Config] WARN ui_toggle_hotkey={raw_hotkey!r} is not a known key; "
+                    f"using {self.ui_toggle_hotkey}"
+                )
+        self.ui_simple_geometry = _normalize_geometry(
+            getattr(self, "ui_simple_geometry", "560x540"), 480, 420, 720, 700, "560x540"
+        )
+        self.ui_pro_geometry = _normalize_geometry(
+            getattr(self, "ui_pro_geometry", "980x660"), 900, 600, 5120, 2880, "980x660"
+        )
+        self.ui_simple_position = _normalize_position(
+            getattr(self, "ui_simple_position", "")
+        )
+        self.ui_start_hidden = bool(getattr(self, "ui_start_hidden", False))
+        self.ui_tray_enabled = bool(
+            getattr(self, "ui_tray_enabled", os.name == "nt")
+        )
+        self.ui_minimize_to_tray = bool(
+            getattr(self, "ui_minimize_to_tray", False)
+        )
+        self.ui_compact_layout = bool(getattr(self, "ui_compact_layout", True))
         self.flick_telemetry_enabled = bool(getattr(self, "flick_telemetry_enabled", False))
         self.move_queue_per_tag_dispatch = bool(
             getattr(self, "move_queue_per_tag_dispatch", True)
@@ -1380,9 +1493,11 @@ class Config:
         except Exception:
             self.ui_preview_max_fps = 30
         try:
-            self.config_schema = max(1, int(getattr(self, "config_schema", 3)))
+            self.config_schema = max(1, int(getattr(self, "config_schema", CURRENT_CONFIG_SCHEMA)))
         except Exception:
-            self.config_schema = 3
+            self.config_schema = CURRENT_CONFIG_SCHEMA
+        if self.config_schema < CURRENT_CONFIG_SCHEMA:
+            self.config_schema = CURRENT_CONFIG_SCHEMA
         theme = str(getattr(self, "ui_theme", "nord")).strip().lower()
         if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic"}:
             theme = "classic" if self.legacy_ui_mode else "nord"
@@ -1715,7 +1830,7 @@ class Config:
         _clamp("valorant_deg_per_count", 0.07, 0.01, 0.2)
         _clamp("valorant_sens_at_calibration", 0.0, 0.0, 10.0)
         _clamp("calibration_sens_at_measurement", 0.0, 0.0, 10.0)
-        self.config_schema = 3
+        self.config_schema = CURRENT_CONFIG_SCHEMA
 
     def save_to_file(self, filename="config.json"):
         """Save configuration atomically."""

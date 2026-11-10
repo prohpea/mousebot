@@ -26,6 +26,10 @@ class _UIBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
+            import _tkinter
+            from unittest.mock import MagicMock
+            if isinstance(_tkinter, MagicMock) or not hasattr(_tkinter, "__file__"):
+                raise unittest.SkipTest("real tkinter unavailable")
             import customtkinter as ctk
 
             ctk.set_appearance_mode("Dark")
@@ -56,6 +60,7 @@ class _UIBase(unittest.TestCase):
         config.flick_switch_radius_px_sec = 64
         config.mode = "Flick"
         config.mode_sec = "Flick"
+        config.ui_pro_mode = True
 
         from src.aim_system.aim_math import clear_caches
 

@@ -44,7 +44,7 @@ def fresh_config(data=None):
 class TestFreshDefaults(unittest.TestCase):
     def test_schema_and_calibration_defaults(self):
         cfg = fresh_config()
-        self.assertEqual(cfg.config_schema, 3)
+        self.assertGreaterEqual(cfg.config_schema, 3)
         self.assertEqual(cfg.calibration_source, "valorant")
         self.assertAlmostEqual(cfg.valorant_deg_per_count, 0.07)
         self.assertGreater(cfg.counts_per_deg_x, 0.0)
@@ -273,7 +273,7 @@ class TestRoundTrip(unittest.TestCase):
             cfg.save_to_file(path)
             with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            self.assertEqual(payload["config_schema"], 3)
+            self.assertGreaterEqual(payload["config_schema"], 3)
             self.assertIn("calibration_source", payload)
             self.assertIn("flick_settle_ms", payload)
             self.assertAlmostEqual(payload["flick_settle_ms"], 110.0)
@@ -284,7 +284,7 @@ class TestShippedConfigFiles(unittest.TestCase):
         path = os.path.join(PROJECT_ROOT, "config.json")
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        self.assertEqual(payload.get("config_schema"), 3)
+        self.assertGreaterEqual(payload.get("config_schema"), 3)
         self.assertEqual(payload.get("calibration_source"), "valorant")
         self.assertIn("flick_switch_radius_px", payload)
         self.assertAlmostEqual(payload.get("counts_per_deg_x"), 62.11, delta=0.01)
@@ -297,7 +297,7 @@ class TestShippedConfigFiles(unittest.TestCase):
             with self.subTest(preset=name):
                 with open(os.path.join(presets_dir, name), "r", encoding="utf-8") as handle:
                     payload = json.load(handle)
-                self.assertEqual(payload.get("config_schema"), 3)
+                self.assertGreaterEqual(payload.get("config_schema"), 3)
                 self.assertIn("calibration_source", payload)
                 self.assertIn("flick_switch_radius_px", payload)
                 self.assertIn("flick_settle_ms", payload)

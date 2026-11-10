@@ -3,18 +3,26 @@ import sys
 import unittest
 import numpy as np
 import time
-import turbojpeg
+try:
+    import turbojpeg
+except Exception:
+    turbojpeg = None
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.capture.OBS_UDP import OBS_UDP_Receiver
 
 class TestUDPReceiverOptimization(unittest.TestCase):
     def setUp(self):
+        if turbojpeg is None:
+            raise unittest.SkipTest("turbojpeg unavailable")
+        from src.capture.OBS_UDP import OBS_UDP_Receiver
         self.receiver = OBS_UDP_Receiver(ip="127.0.0.1", port=13110, target_fps=144)
-        self.tj = turbojpeg.TurboJPEG()
-        test_img = np.zeros((128, 128, 3), dtype=np.uint8)
-        test_img[30:60, 30:60] = [255, 100, 50]
-        self.jpeg_bytes = self.tj.encode(test_img)
+        try:
+            self.tj = turbojpeg.TurboJPEG()
+            test_img = np.zeros((128, 128, 3), dtype=np.uint8)
+            test_img[30:60, 30:60] = [255, 100, 50]
+            self.jpeg_bytes = self.tj.encode(test_img)
+        except Exception as exc:
+            raise unittest.SkipTest(f"TurboJPEG initialization failed: {exc}")
 
     def tearDown(self):
         self.receiver.disconnect()
