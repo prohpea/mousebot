@@ -8,11 +8,9 @@ import ctypes
 import sys
 import os
 
-# AppUserModelID is a STABLE identity, deliberately NOT version-tagged.
-# Including the version made Windows treat every release as a new app and create
-# a duplicate taskbar icon / pinned entry that the user then had to clean up.
+# 瑷疆 AppUserModelID 浠ヤ究鍦?Windows 浠诲嫏娆勬纰洪’绀哄湒妯?
 try:
-    myappid = 'mycompany.colorbot'
+    myappid = 'mycompany.colorbot.v2.0' # 浠绘剰鍞竴鐨勫瓧绗︿覆
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 except Exception:
     pass
@@ -100,8 +98,7 @@ class AimTracker:
         self.mode_sec = getattr(config, "mode_sec", "Normal")
         self.selected_mouse_button = getattr(config, "selected_mouse_button", 3)
         self.selected_tb_btn= getattr(config, "selected_tb_btn", 3)
-        # Real schema key now (config.py defines it). Never a phantom 1000.
-        self.max_speed = float(getattr(config, "max_speed", 6000.0))
+        self.max_speed = float(getattr(config, "max_speed", 1000.0))
 
         # --- Main Aimbot Offset & Aim Type ---
         self.aim_offsetX = float(getattr(config, "aim_offsetX", 0))
@@ -132,17 +129,9 @@ class AimTracker:
         }
         self.move_queue = queue.Queue(maxsize=50)
         self._move_batch_size = 4
+        self._move_batch_small_step = 3.0
         self._move_thread = threading.Thread(target=self._process_move_queue, daemon=True)
         self._move_thread.start()
-        # Flick V2 diagnostics published once per frame (see mode_flick).
-        self.flick_status = {}
-        # While a calibration session is open, the aim pipeline must not push
-        # track/flick commands: the queue drops them anyway, and the impulse has
-        # to be measured without any competing motion (plan 7.4 / C2).
-        self.calibration_session = False
-        # Preview throttling: imshow + waitKey on every 144-200 Hz frame meant up
-        # to 600 GUI calls per second. A debug window needs 30.
-        self._preview_last_time = 0.0
 
         self.model, self.class_names = load_model()
         print("Classes:", self.class_names)
@@ -195,43 +184,42 @@ class AimTracker:
         閫欐槸涓€鍊嬬劇闄愬惊鐠帮紝鐩村埌绶氱▼琚祩姝€?        """
         while not self._stop_event.is_set() or not self.move_queue.empty():
             try:
-                dx, dy, delay, tag = self._unpack_move_item(self.move_queue.get(timeout=0.1))
-                per_tag = bool(getattr(config, "move_queue_per_tag_dispatch", True))
+                dx, dy, delay = self.move_queue.get(timeout=0.1)
                 latest_only = bool(getattr(config, "aim_latest_frame_priority", True))
-
-                if not latest_only and not per_tag:
-                    # Historical behaviour: one command at a time, as queued.
-                    self._dispatch_move(dx, dy)
-                    if delay > 0:
-                        time.sleep(delay)
-                    continue
-
-                pending = [(dx, dy, delay, tag)]
-                while True:
-                    try:
-                        pending.append(self._unpack_move_item(self.move_queue.get_nowait()))
-                    except queue.Empty:
-                        break
-
-                max_batch = max(
-                    1,
-                    int(getattr(config, "move_queue_merge_batch", self._move_batch_size)),
-                )
-
-                if not per_tag:
-                    # Rollback path: keep the old cross-tag merge behind the flag.
-                    merged_dx, merged_dy, merged_delay = self._merge_all_tags(
-                        pending, max_batch
+                if latest_only:
+                    # Keep only the newest N commands, then merge them.
+                    # This preserves immediate latest-frame behavior while avoiding
+                    # dropped Bezier/WindMouse sub-steps that cause jitter.
+                    pending = [(dx, dy, delay)]
+                    while True:
+                        try:
+                            pending.append(self.move_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    max_batch = max(
+                        1,
+                        int(getattr(config, "move_queue_merge_batch", self._move_batch_size)),
                     )
-                    self._dispatch_move(merged_dx, merged_dy)
-                    if merged_delay > 0:
-                        time.sleep(merged_delay)
-                    continue
+                    if len(pending) > max_batch:
+                        pending = pending[-max_batch:]
+                    merged_dx = float(sum(float(item[0]) for item in pending))
+                    merged_dy = float(sum(float(item[1]) for item in pending))
+                    merged_delay = min(
+                        (max(0.0, float(item[2])) for item in pending),
+                        default=0.0,
+                    )
+                else:
+                    merged_dx = float(dx)
+                    merged_dy = float(dy)
+                    merged_delay = float(delay) if delay else 0.0
 
-                groups = self._group_move_items(pending)
-                sent_delay = self._dispatch_groups(groups, max_batch)
-                if sent_delay > 0:
-                    time.sleep(sent_delay)
+                try:
+                    if merged_dx != 0.0 or merged_dy != 0.0:
+                        self.controller.move(merged_dx, merged_dy)
+                except Exception as e:
+                    print("[Mouse.move error]", e)
+                if merged_delay > 0:
+                    time.sleep(merged_delay)
             except queue.Empty:
                 time.sleep(0.001)
                 continue
@@ -239,129 +227,19 @@ class AimTracker:
                 print(f"[Move Queue Error] {e}")
                 time.sleep(0.01)
 
-    def _dispatch_move(self, dx, dy):
-        """Send one command, swallowing backend errors (queue must keep running)."""
-        try:
-            if float(dx) != 0.0 or float(dy) != 0.0:
-                self.controller.move(dx, dy)
-                return True
-        except Exception as e:
-            print("[Mouse.move error]", e)
-        return False
-
-    @staticmethod
-    def _merge_all_tags(pending, max_batch):
-        """Legacy cross-tag merge (only used when the rollback flag is off)."""
-        order = []
-        for item in pending:
-            if item[3] not in order:
-                order.append(item[3])
-        merged_dx = 0.0
-        merged_dy = 0.0
-        merged_delay = None
-        for item_tag in order:
-            group = [it for it in pending if it[3] == item_tag]
-            if item_tag in ("track", "rcs") and len(group) > max_batch:
-                group = group[-max_batch:]
-            for item in group:
-                merged_dx += float(item[0])
-                merged_dy += float(item[1])
-                item_delay = max(0.0, float(item[2]))
-                merged_delay = (
-                    item_delay if merged_delay is None else min(merged_delay, item_delay)
-                )
-        return merged_dx, merged_dy, (merged_delay if merged_delay is not None else 0.0)
-
-    @staticmethod
-    def _group_move_items(pending):
-        """``tag -> [(dx, dy, delay), ...]`` preserving first-seen tag order."""
-        groups = {}
-        for item in pending:
-            item_dx, item_dy, item_delay, item_tag = item
-            groups.setdefault(str(item_tag), []).append(
-                (float(item_dx), float(item_dy), max(0.0, float(item_delay)))
-            )
-        return groups
-
-    def _dispatch_groups(self, groups, max_batch):
-        """Send one command per tag; returns the single delay to sleep afterwards.
-
-        ``calib`` wins outright: every other group is dropped WITH A LOG rather
-        than folded in. Items already popped from the queue cannot be pushed back
-        at the head, and mixing a stray tracking step into a calibration impulse
-        is exactly what made the measurement wrong.
-        """
-        if not groups:
-            return 0.0
-
-        delay = 0.0
-
-        if "calib" in groups:
-            items = groups["calib"]
-            total_x = sum(item[0] for item in items)
-            total_y = sum(item[1] for item in items)
-            delay = min((item[2] for item in items), default=0.0)
-            dropped = sum(len(other) for tag, other in groups.items() if tag != "calib")
-            if dropped:
-                print(f"[MoveQueue] dropped {dropped} non-calib items during calibration")
-            self._dispatch_move(total_x, total_y)
-            return delay
-
-        # Impulses first: a flick must land before the tracking correction that
-        # was produced from the same frame.
-        order = [tag for tag in groups if tag == "flick"]
-        order += [tag for tag in groups if tag not in ("flick", "calib")]
-
-        for tag in order:
-            items = groups[tag]
-            if tag in ("track", "rcs") and len(items) > max_batch:
-                items = items[-max_batch:]
-            total_x = sum(item[0] for item in items)
-            total_y = sum(item[1] for item in items)
-            tag_delay = min((item[2] for item in items), default=0.0)
-            delay = tag_delay if delay <= 0.0 else min(delay, tag_delay)
-            self._dispatch_move(total_x, total_y)
-        return delay
-
-    @staticmethod
-    def _unpack_move_item(item):
-        """Accept both tagged ``(dx, dy, delay, tag)`` and legacy 3-tuples."""
-        try:
-            length = len(item)
-        except TypeError:
-            raise ValueError(f"invalid move queue item: {item!r}")
-        if length >= 4:
-            return item[0], item[1], item[2], item[3]
-        if length == 3:
-            return item[0], item[1], item[2], "track"
-        raise ValueError(f"invalid move queue item: {item!r}")
-
     def _clip_movement(self, dx, dy):
         """
-        Clamp a movement request to the configured budget.
-
-        The WHOLE vector is scaled so its magnitude fits ``max_speed``; direction
-        is preserved. Clipping each axis independently (the old ``np.clip``) bends
-        every oversized diagonal towards 45 degrees and truncates flick impulses
-        without changing their direction of error.
-
+        闄愬埗绉诲嫊閫熷害
+        
+        灏囩Щ鍕曡窛闆㈤檺鍒跺湪鏈€澶ч€熷害绡勫湇鍏э紝闃叉绉诲嫊閬庡揩銆?        
         Args:
-            dx: X movement (mouse counts)
-            dy: Y movement (mouse counts)
-
+            dx: X 鏂瑰悜鐨勭Щ鍕曡窛闆?            dy: Y 鏂瑰悜鐨勭Щ鍕曡窛闆?            
         Returns:
-            tuple: (clipped_dx, clipped_dy)
+            tuple: (clipped_dx, clipped_dy) 闄愬埗寰岀殑绉诲嫊璺濋洟
         """
-        limit = abs(float(getattr(self, "max_speed", 0.0) or 0.0))
-        dx_f = float(dx)
-        dy_f = float(dy)
-        if limit <= 0.0:
-            return dx_f, dy_f
-        magnitude = math.hypot(dx_f, dy_f)
-        if magnitude <= limit or magnitude <= 1e-12:
-            return dx_f, dy_f
-        scale = limit / magnitude
-        return dx_f * scale, dy_f * scale
+        clipped_dx = np.clip(dx, -abs(self.max_speed), abs(self.max_speed))
+        clipped_dy = np.clip(dy, -abs(self.max_speed), abs(self.max_speed))
+        return float(clipped_dx), float(clipped_dy)
 
     def _track_loop(self):
         """
@@ -554,105 +432,23 @@ class AimTracker:
         except Exception:
             pass
 
-    def _active_modes_use_smoother(self):
-        """True when at least one ACTIVE aimbot mode wants temporal smoothing.
-
-        Modes advertise ``uses_smoother`` via ``mode_dispatcher.get_mode_caps``.
-        Flick/Silent are one-shot: smoothing their door-knock target means aiming
-        at the past with no chance to correct.
-        """
-        try:
-            from src.aim_system.mode_dispatcher import mode_uses_smoother
-
-            modes = []
-            if getattr(config, "enableaim", False):
-                modes.append(getattr(config, "mode", "Normal"))
-            if getattr(config, "enableaim_sec", False):
-                modes.append(getattr(config, "mode_sec", "Normal"))
-            if not modes:
-                return True
-            return any(mode_uses_smoother(mode) for mode in modes)
-        except Exception:
-            return True
-
-    def _preview_due(self):
-        """True at most ``ui_preview_max_fps`` times per second (plan H3)."""
-        try:
-            max_fps = max(1, int(getattr(config, "ui_preview_max_fps", 30)))
-        except Exception:
-            max_fps = 30
-        now = time.perf_counter()
-        interval = 1.0 / float(max_fps)
-        if (now - self._preview_last_time) < interval:
-            return False
-        self._preview_last_time = now
-        return True
-
-    @staticmethod
-    def _nearest_bbox(target_bboxes, tx, ty):
-        """Index of the bbox whose centre is closest to ``(tx, ty)`` (plan H4)."""
-        best_index = -1
-        best_distance = None
-        for index, item in enumerate(target_bboxes):
-            try:
-                bx = float(item[0][0])
-                by = float(item[0][1])
-            except (TypeError, ValueError, IndexError):
-                continue
-            distance = (bx - tx) ** 2 + (by - ty) ** 2
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_index = index
-        return best_index
-
     def _filter_targets_with_anti_smoke(self, targets, target_bboxes, mask, frame_shape, detector):
-        """Filter targets using the nearest bbox contour check from anti-smoke.
-
-        ``is_bbox_plausible`` runs ``findContours`` + ``convexHull`` on an ROI, so
-        the previous implementation was O(targets x bboxes) plus a contour per
-        target per frame. The bbox lookup is hoisted out of the loop, the nearest
-        bbox is computed in one pass, and the verdict is cached per
-        ``(bbox, detector, mask)`` version (plan H4).
-        """
+        """Filter targets using nearest bbox contour checks from anti-smoke detector."""
         if not targets or not target_bboxes or detector is None:
             return targets
-        try:
-            if not detector.is_enabled() or mask is None:
-                return targets
-        except Exception:
+        if not detector.is_enabled() or mask is None:
             return targets
-
-        # Per-frame cache: one contour check per distinct bbox, not per target.
-        verdicts = getattr(self, "_anti_smoke_verdicts", None)
-        frame_key = id(mask)
-        if verdicts is None or verdicts.get("mask") != frame_key or verdicts.get("detector") != id(detector):
-            verdicts = {"mask": frame_key, "detector": id(detector), "verdict": {}}
-            self._anti_smoke_verdicts = verdicts
-        cache = verdicts["verdict"]
 
         filtered_targets = []
         for target in targets:
             if len(target) < 2:
                 continue
             tx, ty = float(target[0]), float(target[1])
-            index = self._nearest_bbox(target_bboxes, tx, ty)
-            if index < 0:
-                continue
-            bbox = target_bboxes[index][1]
-            key = (
-                int(bbox[0]),
-                int(bbox[1]),
-                int(bbox[2]),
-                int(bbox[3]),
-            )
-            plausible = cache.get(key)
-            if plausible is None:
-                try:
-                    plausible = bool(detector.is_bbox_plausible(bbox, mask, frame_shape))
-                except Exception:
-                    plausible = True
-                cache[key] = plausible
-            if plausible:
+            nearest_bbox = min(
+                target_bboxes,
+                key=lambda item: (float(item[0][0]) - tx) ** 2 + (float(item[0][1]) - ty) ** 2,
+            )[1]
+            if detector.is_bbox_plausible(nearest_bbox, mask, frame_shape):
                 filtered_targets.append(target)
         return filtered_targets
 
@@ -719,9 +515,6 @@ class AimTracker:
         # Check if OpenCV detection preview is actively requested
         show_detection = bool(getattr(config, "show_opencv_windows", True) and 
                               getattr(config, "show_opencv_detection", True))
-        # Throttle the GUI work: at 200 FPS the old code issued three imshow +
-        # waitKey per frame (~600 GUI calls/s) plus a full frame copy each time.
-        preview_due = self._preview_due() if show_detection else False
 
         # Zero-copy optimization: only clone frame if we need to draw debug overlays
         if show_detection:
@@ -732,8 +525,7 @@ class AimTracker:
         try:
             detection_results, mask = perform_detection(self.model, bgr_img)
             # 椤ず MASK 瑕栫獥锛堝鏋滃暉鐢級
-            if (preview_due and
-                getattr(config, "show_opencv_windows", True) and 
+            if (getattr(config, "show_opencv_windows", True) and 
                 getattr(config, "show_opencv_mask", True) and 
                 mask is not None):
                 cv2.imshow("MASK", mask)
@@ -743,7 +535,7 @@ class AimTracker:
             detection_results = []
             mask = None
             # 鍗充娇妾㈡脯澶辨晽锛屼篃椤ず鍘熷鍦栧儚锛堝鏋滃暉鐢級
-            if preview_due:
+            if show_detection:
                 try:
                     cv2.imshow("Detection", bgr_img)
                     cv2.waitKey(1)
@@ -787,9 +579,7 @@ class AimTracker:
                     body_y_min = y1  # body 鐨?Y 杌告渶楂樺€硷紙鍦栧儚搴ф绯讳腑 y 瓒婂皬瓒婇潬涓婏級
                     body_y_max = y2  # body 鐨?Y 杌告渶浣庡€?                    
                     # Estimation t锚tes dans la bbox
-                    head_positions = self._estimate_head_positions(
-                        x1, y1, x2, y2, bgr_img, mask, draw=show_detection
-                    )
+                    head_positions = self._estimate_head_positions(x1, y1, x2, y2, bgr_img, mask)
                     
                     if aim_type == "body":
                         # Body 妯″紡锛氫娇鐢?body 涓績榛?
@@ -819,46 +609,24 @@ class AimTracker:
                 except Exception as e:
                     print("Erreur dans _estimate_head_positions:", e)
 
-        targets_raw = list(targets) if targets else []
-        use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", True))
-        if use_temporal_smoothing and not self._active_modes_use_smoother():
-            # Every active mode is one-shot/open-loop (e.g. Flick): aim at the RAW
-            # position of the current frame. An EMA plus a 3-frame switch hold
-            # makes a single impulse fire at where the target USED to be, and there
-            # is no second measurement to correct it.
-            use_temporal_smoothing = False
-            self._target_smoother.reset()
-        if targets_raw and use_temporal_smoothing:
-            targets_smoothed = self._target_smoother.stabilize(targets_raw, frame.xres / 2.0, frame.yres / 2.0)
+        targets_all = targets
+        use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", False))
+        if targets_all and use_temporal_smoothing:
+            targets_all = self._target_smoother.stabilize(targets_all, frame.xres / 2.0, frame.yres / 2.0)
             self.last_target = self._target_smoother.last_target
             self.stable_candidate = self._target_smoother.stable_candidate
             self.stable_count = self._target_smoother.stable_count
-        else:
-            targets_smoothed = list(targets_raw)
 
-        # Finding 103: dispatch raw vs smoothed target lists per mode so open-loop modes
-        # like Flick Aim are never contaminated by EMA delay when another mode uses smoothing.
-        try:
-            from src.aim_system.mode_dispatcher import mode_uses_smoother
-            main_mode = getattr(config, "mode", "Normal")
-            sec_mode = getattr(config, "mode_sec", "Normal")
-            targets_main = list(targets_smoothed if (use_temporal_smoothing and mode_uses_smoother(main_mode)) else targets_raw)
-            targets_sec = list(targets_smoothed if (use_temporal_smoothing and mode_uses_smoother(sec_mode)) else targets_raw)
-        except Exception:
-            targets_main = list(targets_smoothed)
-            targets_sec = list(targets_smoothed)
-
-        targets_all = targets_smoothed if use_temporal_smoothing else targets_raw
-        if target_bboxes:
+        targets_main = list(targets_all)
+        targets_sec = list(targets_all)
+        if targets_all and target_bboxes:
             frame_shape = bgr_img.shape
-            if targets_main:
-                targets_main = self._filter_targets_with_anti_smoke(
-                    targets_main, target_bboxes, mask, frame_shape, self.anti_smoke_detector
-                )
-            if targets_sec:
-                targets_sec = self._filter_targets_with_anti_smoke(
-                    targets_sec, target_bboxes, mask, frame_shape, self.anti_smoke_detector_sec
-                )
+            targets_main = self._filter_targets_with_anti_smoke(
+                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector
+            )
+            targets_sec = self._filter_targets_with_anti_smoke(
+                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector_sec
+            )
 
         # FOVs once per frame only if preview is enabled
         if show_detection:
@@ -880,7 +648,7 @@ class AimTracker:
             print("[Aim error]", e)
 
         # 椤ず Detection 瑕栫獥锛堟牴鎿氳ō缃級
-        if preview_due:
+        if show_detection:
             try:
                 # 鍎寲绻＝锛氭坊鍔犳洿澶氳瑕轰俊鎭?
                 display_img = self._draw_enhanced_detection(bgr_img.copy(), targets_all, frame)
@@ -1102,13 +870,9 @@ class AimTracker:
         # 鍏у湀锛堢磪鑹诧級
         cv2.circle(img, (int(headx), int(heady)), 3, (0, 0, 255), -1)
 
-    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None, draw=False):
+    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None):
         """
         Estimate head position from body bbox geometry only.
-
-        ``draw`` defaults to False: the ROI rectangle used to be drawn on EVERY
-        frame even with the preview disabled, costing CPU and painting on the
-        frame handed to the trigger source (plan H9/C7).
         """
         if not img.flags['C_CONTIGUOUS']:
             img = np.ascontiguousarray(img)
@@ -1130,40 +894,24 @@ class AimTracker:
 
         center_x = (effective_x1 + effective_x2) / 2.0
         headx_base = center_x + effective_width * (offset_x / 100.0)
-        # Geometric head ratio (0.13 = ~13% of height, dead center on eyes/nose/chin)
-        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.13))
+        # Keep Y estimate deterministic (no mask-driven jitter).
+        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.22))
         heady_base = float(y1) + float(height) * base_head_ratio + effective_height * (offset_y / 100.0)
 
-        # One-pass refinement from the already computed global mask.
-        # Refines both X and Y to lock directly onto the true head hitbox center!
+        # Optional one-pass refinement from the already computed global mask.
+        # Use only the upper body band and median X to reduce left/right arm jitter.
         if mask is not None:
             mx1 = max(0, min(int(x1), mask.shape[1] - 1))
             my1 = max(0, min(int(y1), mask.shape[0] - 1))
             mx2 = max(mx1 + 1, min(int(x2), mask.shape[1]))
             my2 = max(my1 + 1, min(int(y2), mask.shape[0]))
-            upper_h = max(6, int((my2 - my1) * 0.35))
+            upper_h = max(6, int((my2 - my1) * 0.42))
             upper_y2 = min(my2, my1 + upper_h)
             upper_mask = mask[my1:upper_y2, mx1:mx2]
             if upper_mask.size > 0:
-                min_pixels = int(getattr(config, "head_refine_min_pixels", 12))
-                # ``np.where`` + two ``median``/``min`` calls allocated several
-                # arrays per detection. Column sums give the X centroid and the
-                # first hit row gives the crown, both in one pass over the mask.
-                column_counts = np.count_nonzero(upper_mask, axis=0)
-                total = int(column_counts.sum())
-                if total >= min_pixels:
-                    indices = np.flatnonzero(column_counts)
-                    weights = column_counts[indices]
-                    weighted = int((indices * weights).sum())
-                    headx_base = float(mx1 + int(round(weighted / float(total))))
-                    row_counts = np.count_nonzero(upper_mask, axis=1)
-                    first_row = int(np.flatnonzero(row_counts)[0])
-                    head_top = float(first_row)
-                    # Head center sits ~11-13% of total body height below top of crown
-                    head_center_offset = max(3.0, float(height) * 0.11)
-                    heady_base = float(my1) + head_top + head_center_offset
-                    if offset_y != 0:
-                        heady_base += effective_height * (offset_y / 100.0)
+                ys, xs = np.where(upper_mask > 0)
+                if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
+                    headx_base = float(mx1 + int(np.median(xs)))
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
@@ -1175,8 +923,7 @@ class AimTracker:
         if x2_roi <= x1_roi or y2_roi <= y1_roi:
             return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
-        if draw:
-            cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
+        cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
 
         return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
@@ -1273,27 +1020,6 @@ if __name__ == "__main__":
     """
     import customtkinter as ctk
     from src.ui import ViewerApp
-    from src.version import get_version_summary
-    from src.utils import single_instance
-
-    _cli_show = "--show" in sys.argv[1:]
-
-    # --- 1. single instance guard, BEFORE Tk/capture/mouse are allocated -----
-    # A second run must not open a second window or fight for the capture device
-    # and the hotkey; it signals the running instance and exits 0 (plan §8.6).
-    is_first, _mutex_handle = single_instance.acquire()
-    if not is_first:
-        single_instance.signal_existing()
-        print("[Main] Another instance is running; requested show.")
-        raise SystemExit(0)
-
-    # Load the persisted config ONCE, BEFORE AimTracker. AimTracker snapshots
-    # config during __init__; loading it afterwards (as before) left the tracker
-    # on defaults until _sync_config_to_tracker() ran (plan H12 / C9).
-    try:
-        config.load_from_file()
-    except Exception:
-        pass
     
     # 鍒濆鍖栨崟鐛叉湇鍕?
     capture_service = CaptureService()
@@ -1312,6 +1038,10 @@ if __name__ == "__main__":
     
     # 設置外觀
     ctk.set_appearance_mode("Dark")
+    try:
+        config.load_from_file()
+    except Exception:
+        pass
     base_dir = os.path.dirname(os.path.abspath(__file__))
     theme_name = getattr(config, "ui_theme", "nord")
     theme_file = os.path.join(base_dir, "themes", f"{theme_name}.json")
@@ -1329,42 +1059,21 @@ if __name__ == "__main__":
     tracker.app = app
     
     # 杓夊叆涓︽噳鐢ㄩ厤缃紙纰轰繚鎵€鏈夎ō缃兘姝ｇ⒑锛?
-    # Config was already loaded above (before AimTracker); only push it into
-    # the tracker/UI here instead of reading the file a second time.
+    config.load_from_file()
     app._sync_config_to_tracker()
-
-    # --- Instance watcher: a second `run.bat` shows THIS window --------------
-    try:
-        watcher = single_instance.InstanceWatcher(
-            on_show=lambda: app._launcher_queue.put("show")
-        )
-        watcher.attach_event()
-        watcher.start()
-        app._instance_watcher = watcher
-    except Exception as exc:
-        print(f"[Main] instance watcher unavailable: {exc}")
-
-    # `--show` (run.bat) forces the window forward; ui_start_hidden keeps it out
-    # of the way on boot while the hotkey/tray remain reachable.
-    if _cli_show:
-        app.after(300, app._show_window)
-    elif bool(getattr(config, "ui_start_hidden", False)):
-        app.after(200, app._hide_window)
     
     print("[Main] Application initialized")
     
-    # Print version info from the single source of truth (src/version.py).
-    print(f"[Main] Current version: {get_version_summary()}")
+    # Print version info
+    from src.utils.updater import get_update_checker
+    updater = get_update_checker()
+    print(f"[Main] Current version: v{updater.get_current_version()}")
     
     app.protocol("WM_DELETE_WINDOW", app._on_close)
     
     # Update check disabled per user configuration
     # app.after(2000, app._check_for_updates)
     
-    try:
-        app.mainloop()
-    finally:
-        # Never leave the mutex/event handles open, even on an abnormal exit.
-        single_instance.release()
+    app.mainloop()
 
 

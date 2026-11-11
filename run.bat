@@ -35,7 +35,7 @@ if exist "setup.bat" (
 :launch
 echo [*] Dang khoi dong CVM colorBot...
 echo.
-"venv\Scripts\python.exe" main.py --show %*
+"venv\Scripts\python.exe" main.py
 
 set "EXIT_CODE=%ERRORLEVEL%"
 if %EXIT_CODE% neq 0 (

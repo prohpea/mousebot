@@ -1,15 +1,7 @@
 """
-Aim pipeline.
-
-This module is ORCHESTRATION only:
-  * resolve activation,
-  * pick the target and apply offsets ONCE (single offset layer),
-  * resolve the real frame geometry,
-  * dispatch to a mode controller.
-
-All pixel -> count conversion lives in :mod:`src.aim_system.aim_math`. The old
-``calculate_movement`` (which multiplied pixels by degrees/count) is gone; the
-old ``calculate_exact_counts`` remains only as a deprecated wrapper.
+鐬勬簴绠楁硶瑾垮害鍣?
+铏曠悊鎵€鏈夌瀯婧栨ā寮忎笅鐨?Aimbot 鍜?Triggerbot 閭忚集
+鏀寔 Normal, Silent, NCAF, WindMouse, Bezier 浜旂ó妯″紡
 """
 import math
 import queue
@@ -22,28 +14,12 @@ from src.utils.activation import check_aimbot_activation, get_active_aim_fov, re
 from .Triggerbot import process_triggerbot
 from .RCS import process_rcs, check_y_release
 from .MagnetTrigger import process_magnet_trigger
-from .mode_dispatcher import dispatch as dispatch_aim_mode, get_mode_caps, normalize_mode
-from .aim_math import (
-    closed_loop_counts,
-    legacy_exact_counts,
-    resolve_calibration_cached,
-    resolve_geometry,
-)
+from .mode_dispatcher import dispatch as dispatch_aim_mode
 
 
-# Move queue tags. Commands are never merged across tags: a flick impulse must
-# not be swallowed by a tracking step, and RCS must not fight the aimbot.
-MOVE_TAG_TRACK = "track"
-MOVE_TAG_FLICK = "flick"
-MOVE_TAG_RCS = "rcs"
-
-
-def _queue_move(tracker, dx, dy, delay=0.0, drop_oldest=True, tag=MOVE_TAG_TRACK):
-    """Non-blocking queue push with light backpressure handling.
-
-    ``tag`` identifies the producer so the consumer can keep impulses separate.
-    """
-    item = (dx, dy, max(0.0, float(delay)), str(tag))
+def _queue_move(tracker, dx, dy, delay=0.0, drop_oldest=True):
+    """Non-blocking queue push with light backpressure handling."""
+    item = (dx, dy, max(0.0, float(delay)))
     try:
         tracker.move_queue.put_nowait(item)
         return True
@@ -86,7 +62,7 @@ def _enqueue_path(tracker, path, max_steps=24, clear_existing=False):
             used_steps += 1
         qdx = int(round(total_dx))
         qdy = int(round(total_dy))
-        if qdx == 0 and qdy == 0 and (abs(total_dx) + abs(total_dy)) >= 0.20:
+        if qdx == 0 and qdy == 0 and (abs(total_dx) + abs(total_dy)) >= 0.35:
             if abs(total_dx) >= abs(total_dy):
                 qdx = 1 if total_dx > 0 else -1
             else:
@@ -126,80 +102,29 @@ def _enqueue_path(tracker, path, max_steps=24, clear_existing=False):
             break
 
 
-def calculate_exact_counts(dx, dy, sens, dpi, screen_w=1920, fov_deg=103.0):
+def calculate_movement(dx, dy, sens, dpi):
     """
-    DEPRECATED — use ``aim_math.px_to_counts``.
-
-    Kept only so legacy call sites and external scripts keep working. The
-    1920/103 defaults are unchanged for signature compatibility, but this is no
-    longer the path used by any mode.
+    瑷堢畻绉诲嫊閲忥紙鍩烘柤闈堟晱搴﹀拰 DPI锛?
+    
+    Args:
+        dx: X 鏂瑰悜鍍忕礌宸?
+        dy: Y 鏂瑰悜鍍忕礌宸?
+        sens: 閬婃埐鍏ч潏鏁忓害
+        dpi: 婊戦紶 DPI
+        
+    Returns:
+        tuple: (ndx, ndy) 杞夋彌寰岀殑绉诲嫊閲?
     """
-    return legacy_exact_counts(dx, dy, sens, dpi, screen_w=screen_w, fov_deg=fov_deg)
-
-
-def calculate_movement(dx, dy, sens, dpi, **kwargs):
-    """
-    DEPRECATED — the dimensional error it contained is gone.
-
-    The original implementation multiplied a PIXEL delta by DEGREES/COUNT and
-    returned the result as if it were counts: a pure unit error whose scale had
-    to be cancelled by ``normal_x_speed``/``normalsmooth``. Mode code now calls
-    :func:`_tracking_counts`, which keeps the legacy arithmetic only when
-    ``aim_engine == "legacy"`` and uses ``aim_math.px_to_counts`` otherwise.
-    """
-    return closed_loop_counts(dx, dy, sens=sens, dpi=dpi, engine=_aim_engine())
-
-
-def _aim_engine():
-    return str(getattr(config, "aim_engine", "legacy") or "legacy").strip().lower()
-
-
-def _tracking_counts(dx, dy, tracker, is_sec=False):
-    """Pixel error -> per-frame delta for the closed-loop modes."""
-    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
-    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-    engine = _aim_engine()
-    if engine != "v2":
-        return closed_loop_counts(dx, dy, sens=sens, dpi=dpi, engine=engine)
-    geometry = resolve_geometry(frame=_current_frame(tracker), cfg=config, tracker=tracker)
-    return closed_loop_counts(
-        dx,
-        dy,
-        sens=sens,
-        dpi=dpi,
-        engine=engine,
-        geometry=geometry,
-        calibration=resolve_calibration_cached(cfg=config, tracker=tracker),
-    )
-
-
-def _current_frame(tracker):
-    """Latest frame the tracker analysed (set in main.track_once)."""
-    frame = getattr(tracker, "_aim_frame", None)
-    if frame is not None:
-        return frame
-    return getattr(tracker, "_last_frame", None)
-
-
-def _flick_style_counts(dx, dy, tracker, is_sec=False):
-    """Absolute counts for a pixel error, using the same engine as Flick.
-
-    Used by modes whose scale is expressed in *counts* (WindMouse sec): they must
-    not fall back to the hard-coded 1920/103 model while the rest of the pipeline
-    uses the real frame geometry.
-    """
-    if _aim_engine() == "v2":
-        geometry = resolve_geometry(frame=_current_frame(tracker), cfg=config, tracker=tracker)
-        return closed_loop_counts(
-            dx,
-            dy,
-            engine="v2",
-            geometry=geometry,
-            calibration=resolve_calibration_cached(cfg=config, tracker=tracker),
-        )
-    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
-    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-    return legacy_exact_counts(dx, dy, sens, dpi)
+    cm_per_rev_base = 54.54
+    cm_per_rev = cm_per_rev_base / max(sens, 0.01)
+    
+    count_per_cm = dpi / 2.54
+    deg_per_count = 360.0 / (cm_per_rev * count_per_cm)
+    
+    ndx = dx * deg_per_count
+    ndy = dy * deg_per_count
+    
+    return ndx, ndy
 
 
 def _quantize_with_residual(tracker, ndx, ndy, is_sec=False):
@@ -227,13 +152,13 @@ def compute_silent_delta(dx, dy, multiplier, max_speed):
 
 
 def _flush_move_queue(tracker):
-    """Deprecated no-op — kept as a shim for external scripts.
-
-    The queue is drained and dispatched by ``AimTracker._process_move_queue``;
-    flushing it from the aim path could silently discard a flick impulse that had
-    not been sent yet.
-    """
-    return None
+    """Flush pending move queue items when needed."""
+    if tracker.move_queue.full():
+        try:
+            while not tracker.move_queue.empty():
+                tracker.move_queue.get_nowait()
+        except queue.Empty:
+            pass
 
 
 # =====================================================
@@ -413,7 +338,10 @@ def _apply_normal_aim(dx, dy, distance_to_center, tracker, is_sec=False):
         fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
         label = "Main Aimbot (Normal)"
     
-    ndx, ndy = _tracking_counts(dx, dy, tracker, is_sec=is_sec)
+    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
+    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
+    
+    ndx, ndy = calculate_movement(dx, dy, sens, dpi)
     
     if distance_to_center < smoothfov:
         ndx *= x_speed / max(smooth, 0.01)
@@ -457,73 +385,29 @@ def _apply_normal_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 
 def _apply_flick_aim(dx, dy, tracker, is_sec=False):
     """
-    LEGACY flick path (single open-loop impulse + refractory cooldown).
-
-    Kept only behind ``config.flick_engine == "legacy"`` for A/B comparison. It is
-    structurally unable to converge: one blind impulse, scaled by an arbitrary
-    strength, truncated by a clamp, and then correcting frames are dropped for the
-    whole cooldown window. Use :mod:`src.aim_system.flick_controller` (default).
+    Flick mode 鐬勬簴锛氬弬鑰?C++ mode_silent.cpp 鐨?ApplyModeFlick锛?
+    directly scale raw delta and dispatch one immediate move.
     """
-    distance_error = math.hypot(dx, dy)
-    deadzone = float(getattr(config, "sec_aim_deadzone", 2.2 if is_sec else 1.5))
-    if distance_error <= deadzone:
-        return
-
-    now = time.perf_counter()
     if is_sec:
-        last_flick_time = getattr(tracker, "_last_sec_flick_time", 0.0)
-        cooldown_sec = float(getattr(config, "sec_flick_cooldown_ms", 120.0)) / 1000.0
-        if (now - last_flick_time) < cooldown_sec:
-            return
+        strength_x = float(getattr(config, "flick_strength_x_sec", 5.0))
+        strength_y = float(getattr(config, "flick_strength_y_sec", strength_x))
+        label = "Sec Aimbot (Flick)"
+    else:
+        strength_x = float(getattr(config, "flick_strength_x", 5.0))
+        strength_y = float(getattr(config, "flick_strength_y", strength_x))
+        label = "Main Aimbot (Flick)"
 
-        sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
-        dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-        counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
-
-        flick_factor_x = float(getattr(config, "flick_strength_x_sec", 1.0))
-        flick_factor_y = float(getattr(config, "flick_strength_y_sec", 1.0))
-        target_counts_x = counts_x * flick_factor_x
-        target_counts_y = counts_y * flick_factor_y
-
-        ddx, ddy = tracker._clip_movement(target_counts_x, target_counts_y)
-        qdx = int(round(ddx))
-        qdy = int(round(ddy))
-
-        try:
-            from src.utils.mouse import update_movement_lock
-            lock_x = getattr(config, "mouse_lock_sec_x", False)
-            lock_y = getattr(config, "mouse_lock_sec_y", False)
-            if lock_x or lock_y:
-                update_movement_lock(lock_x, lock_y, is_main=False)
-        except Exception:
-            pass
-
-        setattr(tracker, "_last_sec_flick_time", now)
-        if qdx != 0 or qdy != 0:
-            _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=False, tag=MOVE_TAG_FLICK)
-            log_move(qdx, qdy, "Sec Aimbot (Ballistic One-Tap)")
-        return
-
-    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
-    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-    counts_x, counts_y = calculate_exact_counts(dx, dy, sens, dpi)
-
-    strength_x = float(getattr(config, "flick_strength_x", 0.70))
-    strength_y = float(getattr(config, "flick_strength_y", strength_x))
-    max_step_counts = float(getattr(config, "flick_max_step_counts", 999.0))
-    label = "Main Aimbot (Flick)"
-
-    strength_x = max(0.001, min(2.0, strength_x))
+    strength_x = max(0.01, min(5.0, strength_x))
     if strength_y <= 0.0:
         strength_y = strength_x
-    strength_y = max(0.001, min(2.0, strength_y))
+    strength_y = max(0.01, min(5.0, strength_y))
 
-    out_x = max(-max_step_counts, min(max_step_counts, counts_x * strength_x))
-    out_y = max(-max_step_counts, min(max_step_counts, counts_y * strength_y))
+    out_x = float(dx) * (strength_x / 5.0)
+    out_y = float(dy) * (strength_y / 5.0)
 
     ddx, ddy = tracker._clip_movement(out_x, out_y)
     qdx, qdy = _quantize_with_residual(tracker, ddx, ddy, is_sec=is_sec)
-    if qdx == 0 and qdy == 0 and distance_error >= 3.5:
+    if qdx == 0 and qdy == 0 and (abs(dx) + abs(dy)) >= 1.0:
         if abs(dx) >= abs(dy):
             qdx = 1 if dx > 0 else -1
         else:
@@ -543,7 +427,7 @@ def _apply_flick_aim(dx, dy, tracker, is_sec=False):
         pass
 
     if qdx != 0 or qdy != 0:
-        _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=False, tag=MOVE_TAG_FLICK)
+        _queue_move(tracker, qdx, qdy, 0.0, drop_oldest=True)
         log_move(qdx, qdy, label)
 
 
@@ -579,7 +463,7 @@ def _apply_silent_aim(dx, dy, tracker, is_sec=False):
         dx,
         dy,
         distance_multiplier,
-        getattr(tracker, "max_speed", 6000.0),
+        getattr(tracker, "max_speed", 1000.0),
     )
     if dx_raw == 0 and dy_raw == 0:
         return
@@ -704,11 +588,11 @@ def _apply_ncaf_aim(dx, dy, distance_to_center, tracker, is_sec=False):
     distance_with_pred = math.hypot(dx_with_pred, dy_with_pred)
 
     # 2. 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩
-    ndx, ndy = _tracking_counts(dx_with_pred, dy_with_pred, tracker, is_sec=is_sec)
+    ndx, ndy = calculate_movement(dx_with_pred, dy_with_pred, sens, dpi)
     ndx *= x_speed
     ndy *= y_speed
 
-    # 3. 鐢鐢ㄥ儚绱犺窛闆㈡煡瑭?NCAF 3-zone 閫熷害鍥犲瓙
+    # 3. 鐢ㄥ儚绱犺窛闆㈡煡瑭?NCAF 3-zone 閫熷害鍥犲瓙
     pixel_dist = distance_with_pred
     if pixel_dist <= 1e-6:
         return
@@ -771,27 +655,13 @@ class _WindMouseConfig:
     """WindMouse 鎵€闇€鐨勯厤缃寘瑁濆櫒"""
     def __init__(self, is_sec=False):
         if is_sec:
-            self.smooth_gravity = float(getattr(config, "wm_gravity_sec", 11.0))
-            self.smooth_wind = float(getattr(config, "wm_wind_sec", 1.0))
-            self.smooth_max_step = float(getattr(config, "wm_max_step_sec", 14.0))
-            self.smooth_min_step = float(getattr(config, "wm_min_step_sec", 1.0))
+            self.smooth_gravity = float(getattr(config, "wm_gravity_sec", 9.0))
+            self.smooth_wind = float(getattr(config, "wm_wind_sec", 3.0))
+            self.smooth_max_step = float(getattr(config, "wm_max_step_sec", 15.0))
+            self.smooth_min_step = float(getattr(config, "wm_min_step_sec", 2.0))
             self.smooth_min_delay = float(getattr(config, "wm_min_delay_sec", 0.001))
             self.smooth_max_delay = float(getattr(config, "wm_max_delay_sec", 0.003))
-            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold_sec", 28.0))
-            
-            # Profile "One-Tap Precision" (Sheriff / Guardian / Marshal) — instant laser snap
-            self.smooth_reaction_min = 0.012
-            self.smooth_reaction_max = 0.026
-            self.smooth_close_range = 30.0
-            self.smooth_close_speed = 0.80
-            self.smooth_far_range = 160.0
-            self.smooth_far_speed = 0.95
-            self.smooth_fatigue_effect = 0.10
-            self.smooth_max_step_ratio = 0.28
-            self.smooth_target_area_ratio = 0.015
-            self.smooth_acceleration = 0.80
-            self.smooth_deceleration = 0.70
-            self.smooth_micro_corrections = 1
+            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold_sec", 50.0))
         else:
             self.smooth_gravity = float(getattr(config, "wm_gravity", 9.0))
             self.smooth_wind = float(getattr(config, "wm_wind", 3.0))
@@ -801,19 +671,19 @@ class _WindMouseConfig:
             self.smooth_max_delay = float(getattr(config, "wm_max_delay", 0.003))
             self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold", 50.0))
         
-            # Profile "Burst & Spray" — ultra-responsive humanized tracking for head lock
-            self.smooth_reaction_min = 0.035
-            self.smooth_reaction_max = 0.070
-            self.smooth_close_range = 35.0
-            self.smooth_close_speed = 0.55
-            self.smooth_far_range = 200.0
-            self.smooth_far_speed = 0.85
-            self.smooth_fatigue_effect = 0.3
-            self.smooth_max_step_ratio = 0.22
-            self.smooth_target_area_ratio = 0.02
-            self.smooth_acceleration = 0.65
-            self.smooth_deceleration = 0.55
-            self.smooth_micro_corrections = 1
+        # Profile "Burst & Spray" — ultra-smooth humanized tracking for burst/spray control
+        self.smooth_reaction_min = 0.08
+        self.smooth_reaction_max = 0.20
+        self.smooth_close_range = 30.0
+        self.smooth_close_speed = 0.15
+        self.smooth_far_range = 200.0
+        self.smooth_far_speed = 0.35
+        self.smooth_fatigue_effect = 0.5
+        self.smooth_max_step_ratio = 0.08
+        self.smooth_target_area_ratio = 0.05
+        self.smooth_acceleration = 0.50
+        self.smooth_deceleration = 0.40
+        self.smooth_micro_corrections = 1
 
 
 def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
@@ -839,17 +709,9 @@ def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
     
     # 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩锛堣垏 Normal 妯″紡涓€鑷达級
-    if is_sec:
-        # Both channels must use the SAME conversion engine, otherwise Sec
-        # WindMouse silently keeps the old 1920/103 geometry while Main moves to
-        # the real frame geometry.
-        counts_x, counts_y = _flick_style_counts(dx, dy, tracker, is_sec=True)
-        ndx = counts_x * (x_speed / 100.0) * 0.035
-        ndy = counts_y * (y_speed / 100.0) * 0.030
-    else:
-        ndx, ndy = _tracking_counts(dx, dy, tracker, is_sec=is_sec)
-        ndx *= x_speed
-        ndy *= y_speed
+    ndx, ndy = calculate_movement(dx, dy, sens, dpi)
+    ndx *= x_speed
+    ndy *= y_speed
     
     path = smooth_aimer.calculate_smooth_path(ndx, ndy, wm_config)
     
@@ -904,7 +766,7 @@ def _apply_bezier_aim(dx, dy, distance_to_center, tracker, is_sec=False):
     sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
     dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
 
-    ndx, ndy = _tracking_counts(dx, dy, tracker, is_sec=is_sec)
+    ndx, ndy = calculate_movement(dx, dy, sens, dpi)
     ndx *= speed
     ndy *= speed
 
@@ -947,34 +809,9 @@ def _apply_bezier_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 # 涓昏搴﹀櫒
 # =====================================================
 
-def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False, frame=None, target_id=None, caps=None):
-    """
-    Route one aim decision to its mode handler.
-
-    ``frame`` and ``target_id`` are passed through only to modes that declare a
-    convergence budget (Flick), so geometry-aware conversion and target-switch
-    detection work without changing the other handlers' signatures.
-
-    ``caps`` lets the caller pass the capability dict it already resolved for
-    this frame instead of paying for another ``get_mode_caps`` copy (plan H8).
-    """
-    mode_name = normalize_mode(mode)
-    if caps is None:
-        caps = get_mode_caps(mode_name)
-    kwargs = {}
-    if caps.get("uses_budget"):
-        kwargs["frame"] = frame
-        kwargs["target_id"] = target_id
-    return dispatch_aim_mode(
-        dx,
-        dy,
-        distance_to_center,
-        mode_name,
-        tracker,
-        is_sec=is_sec,
-        **kwargs,
-    )
-
+def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False):
+    """鏍规摎妯″紡瑾垮害鐬勬簴閭忚集"""
+    dispatch_aim_mode(dx, dy, distance_to_center, mode, tracker, is_sec=is_sec)
 
 def _unpack_target(target):
     """Unpack target tuple while keeping backward compatibility."""
@@ -984,76 +821,6 @@ def _unpack_target(target):
     head_y_min = target[3] if len(target) >= 4 else None
     body_y_max = target[4] if len(target) >= 5 else None
     return cx, cy, distance, head_y_min, body_y_max
-
-
-def _resolve_aim_error(target, center_x, center_y, aim_type, offset_x, offset_y):
-    """Single offset layer: target tuple -> (dx, dy) pixel error.
-
-    Offsets are applied HERE and only here. ``main._estimate_head_positions``
-    already folds its own ``offsetX/offsetY`` into the target tuple, so adding the
-    aim offsets downstream would double-apply them.
-    """
-    cx, cy, _, head_y_min, body_y_max = _unpack_target(target)
-    if cx is None or cy is None:
-        return None
-
-    dx = (float(cx) + float(offset_x)) - center_x
-    dy = (float(cy) + float(offset_y)) - center_y
-
-    # "nearest" aims at the neck band: when the offset lands inside the head band,
-    # zero the vertical error so the crosshair stays on the band.
-    if str(aim_type) == "nearest" and head_y_min is not None and body_y_max is not None:
-        if head_y_min < body_y_max:
-            target_y = float(cy) + float(offset_y)
-            if head_y_min <= target_y <= body_y_max:
-                dy = 0.0
-    return dx, dy
-
-
-def _target_identity(target):
-    """Identity for the flick controller (detects target switches).
-
-    Returns the target's screen position. The controller treats it as a switch
-    only on a gross jump, because this position drifts while the crosshair
-    converges and an exact comparison would reset the budget every frame.
-    """
-    cx, cy, _, _, _ = _unpack_target(target)
-    if cx is None or cy is None:
-        return None
-    return (float(cx), float(cy))
-
-
-def reset_aim_state(tracker, is_sec=None):
-    """Drop transient per-mode state (PID integrators, flick budgets, residual).
-
-    ``is_sec=None`` resets both channels. Called on mode changes and on
-    deactivation so a stale budget never survives into a new engagement.
-    """
-    channels = (True, False) if is_sec is None else (bool(is_sec),)
-    for channel in channels:
-        try:
-            from . import mode_flick
-
-            mode_flick.reset(tracker, is_sec=channel)
-        except Exception as e:
-            log_print(f"[aim] reset flick state failed: {e}")
-        try:
-            from . import mode_pid
-
-            mode_pid.reset(tracker, is_sec=channel)
-        except Exception:
-            pass
-        key = "_normal_residual_sec" if channel else "_normal_residual_main"
-        if hasattr(tracker, key):
-            try:
-                setattr(tracker, key, (0.0, 0.0))
-            except Exception:
-                pass
-    if hasattr(tracker, "_last_sec_flick_time"):
-        try:
-            tracker._last_sec_flick_time = 0.0
-        except Exception:
-            pass
 
 
 def process_normal_mode(
@@ -1083,13 +850,7 @@ def process_normal_mode(
     if targets_trigger is None:
         targets_trigger = targets_main
 
-    # Publish the frame the detector actually saw. aim_math derives geometry from
-    # it, so a cropped 512x512 region is not treated as a full 1920 frame.
-    if frame is not None:
-        tracker._aim_frame = frame
-        tracker._last_frame = frame
-
-    # Main Aimbot config
+    # Main Aimbot 閰嶇疆
     aim_enabled = getattr(config, "enableaim", False)
     selected_btn = getattr(config, "selected_mouse_button", None)
     activation_type = getattr(config, "aimbot_activation_type", "hold_enable")
@@ -1098,14 +859,6 @@ def process_normal_mode(
     aim_enabled_sec = getattr(config, "enableaim_sec", False)
     selected_btn_sec = getattr(config, "selected_mouse_button_sec", None)
     activation_type_sec = getattr(config, "aimbot_activation_type_sec", "hold_enable")
-
-    # A calibration session owns the mouse: any aim command emitted now would
-    # either contaminate the impulse measurement or be dropped by the queue, so
-    # both channels are suppressed for the duration of the session (plan 7.4).
-    calibration_session = bool(getattr(tracker, "calibration_session", False))
-    if calibration_session:
-        aim_enabled = False
-        aim_enabled_sec = False
     
     center_x = frame.xres / 2.0
     center_y = frame.yres / 2.0
@@ -1126,82 +879,28 @@ def process_normal_mode(
     else:
         reset_activation_state(is_sec=True)
     
-    if not sec_active and hasattr(tracker, "_last_sec_flick_time"):
-        tracker._last_sec_flick_time = 0.0
-    
     # 取得各自的 Operation Mode
     mode_main = getattr(config, "mode", "Normal")
     mode_sec = getattr(config, "mode_sec", "Normal")
-    # Resolve capabilities ONCE per frame per channel (plan H8).
-    caps_main = get_mode_caps(mode_main)
-    caps_sec = get_mode_caps(mode_sec)
     
     # 處理 RCS（每幀調用，檢查是否應該啟動）
-    # Its pull goes through the shared queue with the "rcs" tag so it cannot race
-    # the aimbot on the Y axis.
     rcs_active = process_rcs(
         tracker.controller,
         tracker.rcs_pull_speed,
         tracker.rcs_activation_delay,
-        tracker.rcs_rapid_click_threshold,
-        move_queue=getattr(tracker, "move_queue", None),
+        tracker.rcs_rapid_click_threshold
     )
     
-    # 處理 Aimbot（優先級：Sec Aimbot [One-Tap Hold] > Main Aimbot [Spray Toggle]）
-    # 当用户主动按下 Sec Aim 按钮（如右键）时，Sec Aim 具有最高优先级立刻执行
-    best_target_sec = min(targets_sec, key=lambda t: t[2]) if targets_sec else None
+    # 處理 Aimbot（優先級：Main > Sec）
     best_target_main = min(targets_main, key=lambda t: t[2]) if targets_main else None
+    best_target_sec = min(targets_sec, key=lambda t: t[2]) if targets_sec else None
 
-    # === 1. Sec Aimbot (One-Tap / ADS) ===
-    if sec_active and best_target_sec:
-        cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
-        if cx is not None and cy is not None:
-            distance_to_center_sec = math.hypot(cx - center_x, cy - center_y)
-            sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
-            if distance_to_center_sec <= sec_fov:
-                try:
-                    aim_type_sec = getattr(config, "aim_type_sec", "head")
-                    aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
-                    aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
-
-                    error = _resolve_aim_error(
-                        best_target_sec,
-                        center_x,
-                        center_y,
-                        aim_type_sec,
-                        aim_offsetX_sec,
-                        aim_offsetY_sec,
-                    )
-                    if error is not None:
-                        dx, dy = error
-                        # RCS / Y-release must not silently zero the vertical
-                        # error of a one-shot flick: that guarantees a miss that
-                        # nothing can correct afterwards.
-                        if rcs_active and caps_sec.get("closed_loop"):
-                            dy = 0
-                        if (not caps_sec.get("one_shot")) and check_y_release():
-                            dy = 0
-
-                        _dispatch_aimbot(
-                            dx,
-                            dy,
-                            distance_to_center_sec,
-                            mode_sec,
-                            tracker,
-                            is_sec=True,
-                            frame=frame,
-                            target_id=_target_identity(best_target_sec),
-                            caps=caps_sec,
-                        )
-                        sec_aimbot_active = True
-                except Exception as e:
-                    log_print(f"[Sec Aimbot error] {e}")
-
-    # === 2. Main Aimbot (Spray / Tracking) when Sec did not engage ===
-    if not sec_aimbot_active and best_target_main:
+    if best_target_main:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_main)
         if cx is not None and cy is not None:
             distance_to_center = math.hypot(cx - center_x, cy - center_y)
+
+            # === 優先處理 Main Aimbot ===
             main_fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
             if distance_to_center <= main_fov:
                 if main_active:
@@ -1209,38 +908,67 @@ def process_normal_mode(
                         aim_type = getattr(config, "aim_type", "head")
                         aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
                         aim_offsetY = float(getattr(config, "aim_offsetY", tracker.aim_offsetY))
-
-                        error = _resolve_aim_error(
-                            best_target_main,
-                            center_x,
-                            center_y,
-                            aim_type,
-                            aim_offsetX,
-                            aim_offsetY,
-                        )
-                        if error is not None:
-                            dx, dy = error
-                            caps = caps_main
-                            # Never zero the vertical error of a one-shot mode.
-                            if rcs_active and caps.get("closed_loop"):
-                                dy = 0
-                            if (not caps.get("one_shot")) and check_y_release():
-                                dy = 0
-
-                            _dispatch_aimbot(
-                                dx,
-                                dy,
-                                distance_to_center,
-                                mode_main,
-                                tracker,
-                                is_sec=False,
-                                frame=frame,
-                                target_id=_target_identity(best_target_main),
-                                caps=caps,
-                            )
-                            main_aimbot_active = True
+                        
+                        dx = (cx + aim_offsetX) - center_x
+                        dy = (cy + aim_offsetY) - center_y
+                        
+                        # Nearest 模式
+                        if aim_type == "nearest" and head_y_min is not None and body_y_max is not None:
+                            if head_y_min < body_y_max:
+                                target_y = cy + aim_offsetY
+                                if head_y_min <= target_y <= body_y_max:
+                                    dy = 0
+                        
+                        # RCS 整合
+                        if rcs_active:
+                            dy = 0
+                        
+                        # Y 軸解鎖功能（左鍵按下時解鎖 Y 軸控制）
+                        if check_y_release():
+                            dy = 0
+                        
+                        # 根據 Main 模式調度
+                        _dispatch_aimbot(dx, dy, distance_to_center, mode_main, tracker, is_sec=False)
+                        main_aimbot_active = True
                     except Exception as e:
                         log_print(f"[Main Aimbot error] {e}")
+    
+    # === 如果 Main Aimbot 未啟動，嘗試 Sec Aimbot ===
+    if not main_aimbot_active and best_target_sec:
+        cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
+        if cx is not None and cy is not None:
+            distance_to_center_sec = math.hypot(cx - center_x, cy - center_y)
+            sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
+            if distance_to_center_sec <= sec_fov:
+                if sec_active:
+                    try:
+                        aim_type_sec = getattr(config, "aim_type_sec", "head")
+                        aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
+                        aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
+                        
+                        dx = (cx + aim_offsetX_sec) - center_x
+                        dy = (cy + aim_offsetY_sec) - center_y
+                        
+                        # Nearest 妯″紡
+                        if aim_type_sec == "nearest" and head_y_min is not None and body_y_max is not None:
+                            if head_y_min < body_y_max:
+                                target_y = cy + aim_offsetY_sec
+                                if head_y_min <= target_y <= body_y_max:
+                                    dy = 0
+                        
+                        # RCS 鏁村悎
+                        if rcs_active:
+                            dy = 0
+                        
+                        # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
+                        if check_y_release():
+                            dy = 0
+                        
+                        # 鏍规摎 Sec 妯″紡瑾垮害
+                        _dispatch_aimbot(dx, dy, distance_to_center_sec, mode_sec, tracker, is_sec=True)
+                        sec_aimbot_active = True
+                    except Exception as e:
+                        log_print(f"[Sec Aimbot error] {e}")
 
     magnet_enabled = bool(getattr(config, "enable_magnet_trigger", False))
     if magnet_enabled:

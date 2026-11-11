@@ -5,19 +5,10 @@ import math
 
 
 class TargetSmoother:
-    def __init__(self, ema_alpha=0.35, switch_confirm_frames=3, switch_radius_px=18.0, enabled=True):
+    def __init__(self, ema_alpha=0.35, switch_confirm_frames=3, switch_radius_px=18.0):
         self.ema_alpha = float(ema_alpha)
         self.switch_confirm_frames = max(1, int(switch_confirm_frames))
         self.switch_radius_px = float(switch_radius_px)
-        # When False, ``stabilize`` is a passthrough: one-shot modes (Flick) must
-        # aim at the target's current position, not a lagged EMA of it.
-        self.enabled = bool(enabled)
-        self.last_target = None
-        self.stable_candidate = None
-        self.stable_count = 0
-
-    def reset(self):
-        """Forget all history (mode switch, or smoother disabled for this frame)."""
         self.last_target = None
         self.stable_candidate = None
         self.stable_count = 0
@@ -38,11 +29,6 @@ class TargetSmoother:
         return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])) <= float(radius)
 
     def stabilize(self, targets, center_x, center_y):
-        if not self.enabled:
-            # Passthrough: no EMA, no switch hold. Used by one-shot modes.
-            self.reset()
-            return list(targets)
-
         if not targets:
             self.stable_candidate = None
             self.stable_count = 0

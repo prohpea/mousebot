@@ -1,7 +1,5 @@
 {
-    "version": "2.1.0",
-    "release_date": "2026-11-09",
-    "codename": "Flick V2",
-    "schema": 3,
-    "changelog": "v2.1.0 — Flick V2 Complete UI & Valorant Calibration\n\n- Flick V2 tab: Gain, Settle Delay, Max Counts, Budget, Iterations, Deadzone, Switch Radius for Main and Sec.\n- Valorant calibration: 0.07 deg/count preset, cm/360 cross-check, measured fit with provenance (source, samples, R2).\n- Performance: preview throttling, anti-smoke cache, UI scheduler gating, debug log incremental, geometry/calibration cache, per-tag move queue dispatch.\n- Fixes: calibration impulse isolation, flick rollback timing, duplicate config load, stale debug widget, settle/budget validation.\n- Cleanup: removed dead Magnet Trigger UI and unused UI builders; unified version across title, badge, README and changelog."
+    "version": "1.2.1",
+    "release_date": "2026-11-03",
+    "changelog": "v1.2.1: Integrated OBS audio feedback (native Windows Beep via UDP 4455), real-time visual toggle HUD banner, recoil immunity, anti-tremor filtering, and humanized burst/spray tuning."
 }

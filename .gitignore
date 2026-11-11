@@ -14,8 +14,6 @@ venv/
 env/
 ENV/
 .venv
-wheels/
-.bangiao/
 
 # Test / cache
 .pytest_cache/
@@ -29,9 +27,10 @@ wheels/
 .DS_Store
 
 # Project specific
-# config.json and sample presets in configs/ are tracked
-configs/*.tmp
-configs/*.bak
+# config.json - now tracked in repository
+configs/*
+!configs/default.json
+!configs/default_cvm.json
 docs
 docs/
 *.log
@@ -104,3 +103,7 @@ src/utils/mouse/API/makxdv2/
 src/utils/mouse/API/Net/
 !src/utils/mouse/API/Net/**/*.pyd
 !src/utils/mouse/API/Net/**/*.dll
+
+# Local UI backup snapshots (git history is the backup now)
+_backup_ui_*/
+

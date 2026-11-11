@@ -10,7 +10,7 @@
 
   <br><br>
 
-  [![Version](https://img.shields.io/badge/version-2.1.0--PRO-10B981?style=for-the-badge&labelColor=101820)](version.json)
+  [![Version](https://img.shields.io/badge/version-2.10.2-55E6E6?style=for-the-badge&labelColor=101820)](version.json)
   [![Python](https://img.shields.io/badge/Python-3.11--3.13-FFD85E?style=for-the-badge&logo=python&logoColor=white&labelColor=101820)](https://www.python.org/downloads/)
   [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-58A6FF?style=for-the-badge&logo=windows&logoColor=white&labelColor=101820)](#系統需求)
   [![License](https://img.shields.io/badge/License-Custom-E46AC8?style=for-the-badge&labelColor=101820)](LICENSE)
@@ -18,27 +18,9 @@
   [![Discord](https://img.shields.io/badge/加入_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/pJ8JkSBnMB)
   [![Issues](https://img.shields.io/badge/回報問題-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/asenyeroao-ct/CVM-colorBot/issues)
 
-  **Tiếng Việt** · **繁體中文** · [简体中文](readme_cn.md)
+  **繁體中文** · [简体中文](readme_cn.md)
 
 </div>
-
----
-
-## 🇻🇳 Hướng Dẫn Cài Đặt & Khởi Chạy Nhanh (1-Click)
-
-### 1. Yêu cầu tiên quyết:
-* **Hệ điều hành:** Windows 10 / 11 (64-bit).
-* **Python:** Cài đặt [Python 3.11.9 64-bit](https://www.python.org/downloads/) (Lưu ý: Bắt buộc tick chọn **"Add python.exe to PATH"** khi cài).
-
-### 2. Cài đặt tự động & Sử dụng:
-1. Tải toàn bộ thư mục tool về máy tính.
-2. Nhấp đúp chuột chạy file **`setup.bat`** để hệ thống tự động khởi tạo môi trường `venv` và cài đặt đầy đủ các thư viện phụ thuộc.
-3. Nhấp đúp chuột chạy file **`run.bat`** để khởi chạy giao diện điều khiển.
-
-### 3. Các cấu hình tối ưu sẵn có (Tại tab `Profiles & Config`):
-* **`ranked_tryhard_main.json`**: Cấu hình Dual-Aim tối ưu tốc độ (Chuột trái bắn nhanh dứt khoát, Chuột phải ngắm khóa đầu đầm chắc).
-* **`dual_aim_lmb_rmb.json`**: Cấu hình Dual-Aim tiêu chuẩn (Chuột trái Bảng 1 Legit tự nhiên, Chuột phải ngắm ADS).
-* **`legit_humanized.json`**: Cấu hình siêu kín đáo, chống soi phát hiện khi stream / leo rank cao.
 
 ---
 
@@ -60,8 +42,6 @@ CVM ColorBot 透過 OpenCV 與 HSV 色彩範圍進行即時目標辨識，將影
 ### 主要功能
 
 - **雙組追蹤設定** — 主、副 Aimbot 可分別配置模式、按鍵與參數。
-- **Flick V2 專用頁** — 主、副通道各有 Gain、Settle Delay、Max Counts、Budget、Iterations、Deadzone 與進階 Switch Radius；即時顯示有效步數與診斷。
-- **Calibration — Valorant** — 內建 `0.07 °/count @ sens 1.0` 預設（sens 0.23 → 62.112 counts/deg）、cm/360 交叉驗證、實測 5 點/軸 + R² ≥ 0.99 的 provenance（來源／樣本／R²）。
 - **Triggerbot** — 支援延遲、按住時間、連發、冷卻與辨識確認設定。
 - **RCS** — 可調整後座力補償速度、啟動延遲與快速點擊門檻。
 - **Anti-Smoke** — 過濾煙霧等低可信度區域，降低錯誤鎖定。

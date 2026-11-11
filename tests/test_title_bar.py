@@ -2,30 +2,19 @@ import unittest
 import sys
 import os
 from unittest.mock import MagicMock
-try:
-    import customtkinter as ctk
-except Exception:
-    ctk = None
+import customtkinter as ctk
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.utils.config import config
+from src.ui import ViewerApp
 
 class TestTitleBar(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        try:
-            import _tkinter
-            if ctk is None or isinstance(_tkinter, MagicMock) or not hasattr(_tkinter, "__file__"):
-                raise unittest.SkipTest("real tkinter unavailable")
-            ctk.set_appearance_mode("Dark")
-            config.ui_pro_mode = True
-        except Exception as exc:
-            raise unittest.SkipTest(f"customtkinter unavailable: {exc}")
+        ctk.set_appearance_mode("Dark")
 
     def test_title_bar_pills(self):
-        from src.ui import ViewerApp
         tracker_mock = MagicMock()
         capture_mock = MagicMock()
         app = ViewerApp(tracker=tracker_mock, capture_service=capture_mock)

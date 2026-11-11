@@ -17,11 +17,6 @@ try:
 except Exception:
     cv2 = None
 
-try:
-    import numpy as np
-except Exception:  # pragma: no cover - numpy ships with the app
-    np = None
-
 from src.utils.activation import is_binding_pressed
 from src.utils.config import config
 from src.utils.debug_logger import log_print
@@ -179,8 +174,6 @@ def _evaluate_rgb_trigger(frame, source_img):
 
         # Also evaluate HSV color band for maximum lighting and compression immunity
         try:
-            if np is None:
-                raise RuntimeError("numpy unavailable")
             hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             color_preset = str(getattr(config, "color", "purple")).strip().lower()
             if color_preset == "yellow":
@@ -215,35 +208,8 @@ def _magnet_mode_context(tracker):
         "normal_y_speed": float(getattr(config, "magnet_normal_y_speed", 3.0)),
         "normalsmooth": float(getattr(config, "magnet_normalsmooth", 30.0)),
         "normalsmoothfov": float(getattr(config, "magnet_normalsmoothfov", 30.0)),
-        # Flick uses a physical gain now; magnet_flick_strength_* are legacy keys
-        # that only exist so old config files keep loading.
-        "flick_gain": float(
-            getattr(
-                config,
-                "magnet_flick_gain",
-                getattr(config, "flick_gain", 1.0),
-            )
-        ),
-        "flick_max_counts": float(
-            getattr(config, "magnet_flick_max_counts", getattr(config, "flick_max_counts", 6000.0))
-        ),
-        "flick_max_iterations": int(
-            getattr(
-                config,
-                "magnet_flick_max_iterations",
-                getattr(config, "flick_max_iterations", 4),
-            )
-        ),
-        "flick_budget_ms": float(
-            getattr(config, "magnet_flick_budget_ms", getattr(config, "flick_budget_ms", 120.0))
-        ),
-        "flick_deadzone_px": float(
-            getattr(
-                config,
-                "magnet_flick_deadzone_px",
-                getattr(config, "flick_deadzone_px", 1.5),
-            )
-        ),
+        "flick_strength_x": float(getattr(config, "magnet_flick_strength_x", 5.0)),
+        "flick_strength_y": float(getattr(config, "magnet_flick_strength_y", 5.0)),
         "ncaf_snap_radius": float(getattr(config, "magnet_ncaf_snap_radius", 150.0)),
         "ncaf_near_radius": float(getattr(config, "magnet_ncaf_near_radius", 50.0)),
         "ncaf_alpha": float(getattr(config, "magnet_ncaf_alpha", 1.5)),
@@ -295,27 +261,13 @@ def _magnet_mode_context(tracker):
             setattr(tracker, key, value)
 
 
-def _apply_magnet_aim(tracker, dx, dy, distance_to_center, frame=None, target_pos=None):
+def _apply_magnet_aim(tracker, dx, dy, distance_to_center):
     mode = _normalize_mode(getattr(config, "magnet_mode", "Normal"))
     handler = _MODE_HANDLERS.get(mode, mode_normal.apply)
     with _magnet_mode_context(tracker):
         if mode != "PID":
             mode_pid.reset(tracker, is_sec=False)
-        if mode == "Flick":
-            # Flick needs the real frame geometry (crop-aware) and the target's
-            # position. The controller only treats a GROSS jump as a switch, so
-            # the drift from the converging crosshair does not reset the budget.
-            handler(
-                dx,
-                dy,
-                distance_to_center,
-                tracker,
-                is_sec=False,
-                frame=frame,
-                target_id=target_pos if target_pos is not None else (float(dx), float(dy)),
-            )
-        else:
-            handler(dx, dy, distance_to_center, tracker, is_sec=False)
+        handler(dx, dy, distance_to_center, tracker, is_sec=False)
 
 
 def _get_trigger_window(trigger_type):
@@ -434,7 +386,7 @@ def process_magnet_trigger(frame, source_img, tracker, targets, center_x, center
     dy = cy - center_y
 
     if not aimbot_active:
-        _apply_magnet_aim(tracker, dx, dy, distance, frame=frame, target_pos=(float(cx), float(cy)))
+        _apply_magnet_aim(tracker, dx, dy, distance)
 
     trigger_type = str(getattr(config, "magnet_trigger_type", "current")).strip().lower()
     if trigger_type not in {"current", "rgb"}:

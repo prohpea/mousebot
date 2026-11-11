@@ -13,6 +13,7 @@ COLOR_HEADER_BORDER = "#1D2433"
 COLOR_ACCENT_EMERALD = "#10B981"
 COLOR_ACCENT_CYAN = "#06B6D4"
 COLOR_ACCENT_AMBER = "#F59E0B"
+COLOR_ACCENT_VIOLET = "#BD93F9"
 COLOR_ACCENT_ROSE = "#F43F5E"
 COLOR_SLATE_TEXT = "#E2E8F0"
 COLOR_SLATE_MUTED = "#94A3B8"
@@ -24,6 +25,9 @@ class ModernCard(ctk.CTkFrame):
     """
     Standardized 2-Column Dashboard Card with rounded corners, subtle border,
     header with icon/title, optional badge, and content container.
+
+    collapsible=True turns the header into a disclosure toggle so a card can replace
+    the old standalone collapsible section without stacking two headers.
     """
     def __init__(
         self,
@@ -32,6 +36,9 @@ class ModernCard(ctk.CTkFrame):
         icon: str = None,
         badge_text: str = None,
         accent_color: str = COLOR_ACCENT_EMERALD,
+        collapsible: bool = False,
+        initially_open: bool = True,
+        on_toggle=None,
         **kwargs
     ):
         super().__init__(
@@ -44,7 +51,11 @@ class ModernCard(ctk.CTkFrame):
         )
         self.title = title
         self.accent_color = accent_color
-        
+        self._collapsible = collapsible
+        self._is_open = bool(initially_open)
+        self._on_toggle = on_toggle
+        self._toggle_targets = []
+
         # Header container
         self.header_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.header_frame.pack(fill="x", padx=12, pady=(10, 6))
@@ -52,6 +63,16 @@ class ModernCard(ctk.CTkFrame):
         # Left: Icon & Title
         title_left = ctk.CTkFrame(self.header_frame, fg_color="transparent")
         title_left.pack(side="left", fill="y")
+
+        if collapsible:
+            self.arrow_label = ctk.CTkLabel(
+                title_left,
+                text="\u25bc" if self._is_open else "\u25b6",
+                font=("Consolas", 9),
+                text_color=accent_color,
+                width=10,
+            )
+            self.arrow_label.pack(side="left", padx=(0, 4))
 
         display_text = f"{icon}  {t(title)}" if icon else t(title)
         self.title_label = ctk.CTkLabel(
@@ -90,6 +111,48 @@ class ModernCard(ctk.CTkFrame):
         # Inner content container
         self.content = ctk.CTkFrame(self, fg_color="transparent")
         self.content.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        if collapsible:
+            self._pack_content = lambda: self.content.pack(
+                fill="both", expand=True, padx=12, pady=(0, 10)
+            )
+            self._toggle_targets = [self.header_frame, self.title_label, title_left]
+            if hasattr(self, "arrow_label"):
+                self._toggle_targets.append(self.arrow_label)
+            if hasattr(self, "badge_frame"):
+                self._toggle_targets.append(self.badge_frame)
+                self._toggle_targets.append(self.badge_label)
+            for widget in self._toggle_targets:
+                widget.bind("<Button-1>", self._handle_toggle)
+            self.header_frame.configure(cursor="hand2")
+            if not self._is_open:
+                self.sep.pack_forget()
+                self.content.pack_forget()
+
+    def _handle_toggle(self, _event=None):
+        self.set_open(not self._is_open, notify=True)
+
+    def set_open(self, is_open, notify=False):
+        """Expand or collapse the card body. Notifies on_toggle only when notify=True."""
+        if not self._collapsible:
+            return
+        is_open = bool(is_open)
+        if is_open == self._is_open:
+            return
+        self._is_open = is_open
+        if is_open:
+            self.sep.pack(fill="x", padx=12, pady=(0, 8))
+            self._pack_content()
+        else:
+            self.sep.pack_forget()
+            self.content.pack_forget()
+        if hasattr(self, "arrow_label"):
+            self.arrow_label.configure(text="\u25bc" if is_open else "\u25b6")
+        if notify and self._on_toggle is not None:
+            self._on_toggle(is_open)
+
+    def is_open(self):
+        return self._is_open
 
 
 class ModernSlider(ctk.CTkFrame):

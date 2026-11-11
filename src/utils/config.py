@@ -1,75 +1,6 @@
 from src.utils.debug_logger import log_print
 import json
 import os
-import re
-
-# --- UI mode schema helpers (pure, no Tk import) ---------------------------
-# Schema 4 introduces the real Simple/Pro mode state machine plus the launcher
-# (global hotkey, tray, start hidden). Every value is validated here so a hand
-# edited config.json can never produce a window outside the screen or a hotkey
-# that RegisterHotKey would reject.
-CURRENT_CONFIG_SCHEMA = 5
-
-# --- Stream / feedback ports (schema 5, plan C1) ---------------------------
-# OBS xUDP plugin always sends the video stream to UDP 5000. The bot must bind
-# the same port or it "connects" successfully and then shows FPS = 0 forever.
-DEFAULT_UDP_PORT = "5000"
-DEFAULT_AUDIO_FEEDBACK_PORT = 4455
-# Ports that were baked into older builds/configs and are migrated once.
-_LEGACY_UDP_PORTS = ("", "1234", "3110")
-
-_GEOMETRY_RE = re.compile(r"^\s*(\d{3,4})\s*x\s*(\d{3,4})\s*$")
-_POSITION_RE = re.compile(r"^\s*([+-]\d{1,5})\s*([+-]\d{1,5})\s*$")
-
-_HOTKEY_NAMES = {
-    "INSERT", "DELETE", "HOME", "END", "PAGEUP", "PAGEDOWN", "PAUSE",
-    "PRINTSCREEN", "SCROLLLOCK", "NUMLOCK", "CAPSLOCK", "TAB", "SPACE",
-    "ENTER", "ESCAPE", "BACKSPACE",
-    "LSHIFT", "RSHIFT", "LCONTROL", "RCONTROL", "LMENU", "RMENU",
-    "SHIFT", "CONTROL", "MENU",
-}
-for _index in range(1, 25):
-    _HOTKEY_NAMES.add(f"F{_index}")
-for _letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-    _HOTKEY_NAMES.add(_letter)
-for _digit in "0123456789":
-    _HOTKEY_NAMES.add(_digit)
-
-
-def _normalize_hotkey(raw, default="Insert"):
-    """Return a canonical hotkey token, or ``""`` when the hotkey is disabled.
-
-    ``""`` is explicitly meaningful ("no hotkey"). An unknown token falls back to
-    ``default`` so the launcher always has a way back to the window.
-    """
-    text = str(raw if raw is not None else default).strip()
-    if not text:
-        return ""
-    token = text.upper().replace(" ", "").replace("-", "")
-    if token in _HOTKEY_NAMES:
-        return token
-    return default
-
-
-def _normalize_geometry(raw, min_w, min_h, max_w, max_h, default):
-    match = _GEOMETRY_RE.match(str(raw or ""))
-    if not match:
-        return default
-    width = max(int(min_w), min(int(max_w), int(match.group(1))))
-    height = max(int(min_h), min(int(max_h), int(match.group(2))))
-    return f"{width}x{height}"
-
-
-def _normalize_position(raw):
-    """Return ``"+x+y"`` or ``""`` when the value is missing/unusable."""
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    match = _POSITION_RE.match(text)
-    if not match:
-        return ""
-    return f"{match.group(1)}{match.group(2)}"
-
 
 class Config:
     def __init__(self):
@@ -77,13 +8,13 @@ class Config:
 
         self.enableaim = True
         self.enabletb = False
-        self.offsetX = 0
-        self.offsetY = 0
+        self.offsetX = -2
+        self.offsetY = 3
         
         # --- Aimbot Offsets ---
-        self.aim_offsetX = 0  # Aimbot X offset
-        self.aim_offsetY = 0  # Aimbot Y offset (0 = center of head / nose, positive = neck/chin)
-        self.aim_type = "head"  # Aimbot targeting: head, body, nearest
+        self.aim_offsetX = 0  # Aimbot 灏堢敤 X 鍋忕Щ
+        self.aim_offsetY = 0  # Aimbot 灏堢敤 Y 鍋忕Щ
+        self.aim_type = "head"  # Aimbot 鐬勬簴椤炲瀷: head, body, nearest
 
         self.color = "purple"
         
@@ -106,16 +37,11 @@ class Config:
         self.detection_max_aspect = 2.8
         self.detection_require_vertical_line = False
         self.min_detection_bbox_area = 150
-        self.head_estimate_ratio = 0.13
-        self.head_refine_min_pixels = 12
+        self.head_estimate_ratio = 0.22
+        self.head_refine_min_pixels = 20
         self.aim_latest_frame_priority = True
-        self.enable_target_temporal_smoothing = True
+        self.enable_target_temporal_smoothing = False
         self.move_queue_merge_batch = 4
-        # Dispatch the move queue PER TAG (calib exclusive, flick whole, track/rcs
-        # batched inside their own tag). False restores the old cross-tag merge.
-        self.move_queue_per_tag_dispatch = True
-        # Config schema (NOT the app version): bumped when keys/migrations change.
-        self.config_schema = CURRENT_CONFIG_SCHEMA
         
         # --- Custom HSV Settings ---
         self.custom_hsv_min_h = 0    # H 鏈€灏忓€?(0-179)
@@ -127,11 +53,11 @@ class Config:
 
         
         # --- Mouse / MAKCU ---
-        self.selected_mouse_button = 3
+        self.selected_mouse_button = 1
         self.selected_tb_btn = 1
         self.selected_2_tb = 2
-        self.in_game_sens = 0.23
-        self.mouse_dpi = 1100
+        self.in_game_sens = 0.235
+        self.mouse_dpi = 800
         self.mouse_api = "Serial"  # Serial, Arduino, SendInput, Net, KmboxA, MakV2, MakcuController, MakxdMakAPI, MakAPI, DHZ, Ferrum, Medius
         self.keyboard_api_enabled = False
         self.keyboard_api = "Follow Mouse API"  # Follow Mouse API, SendInput, Serial, Net...
@@ -191,36 +117,6 @@ class Config:
         self.ads_fovsize = 100
         self.ads_key = "Right Mouse Button"
         self.ads_key_type = "hold"  # hold, toggle
-
-        # --- Frame geometry (single source of truth: aim_math) ---
-        # hfov_deg describes the horizontal FOV of the raster analysed by the
-        # detector (after any centre crop). vfov_deg is derived from the aspect
-        # ratio when left at 0.
-        self.hfov_deg = 103.0
-        self.vfov_deg = 0.0            # 0 = derive from aspect ratio
-        self.cm_per_rev = 54.54        # legacy analytic constant, superseded by calibration
-        # Conversion engine for the CLOSED-LOOP modes (Normal/PID/NCAF/WindMouse/
-        # Bezier). "legacy" preserves existing speed/smoothing tuning; "v2" uses
-        # physical counts from aim_math and needs retuning. Rollback flag.
-        self.aim_engine = "legacy"
-        self.counts_per_deg_x = 0.0    # measured/preset calibration (0 = not measured)
-        self.counts_per_deg_y = 0.0    # measured/preset calibration (0 = not measured)
-        self.calibration_r2 = 0.0      # quality of the stored measurement
-        self.calibration_samples = 0   # how many points produced it
-        # --- Calibration provenance (schema 3) ---------------------------
-        # ``calibration_source`` is EXPLICIT: it decides which formula is used,
-        # so it is never inferred again at resolve time.
-        #   valorant : counts_per_deg = 1 / (0.07 * sens), recomputed live
-        #   measured : measured pair, invariant under sens (provenance + R2)
-        #   analytic : legacy 54.54 cm/rev model (marked LEGACY in the UI)
-        # ``""`` means UNDECIDED: the migration decides, so a schema-2 file that
-        # simply lacks the key is not mistaken for a fresh default.
-        self.calibration_source = ""
-        self.valorant_deg_per_count = 0.07   # yaw per count at in-game sens 1.0
-        self.valorant_sens_at_calibration = 0.0
-        self.calibration_sens_at_measurement = 0.0
-        self.calibration_updated_at = ""
-
         self.tbfovsize = 5 
         self.trigger_ads_fov_enabled = False
         self.trigger_ads_fovsize = 5
@@ -293,13 +189,8 @@ class Config:
         self.magnet_normal_y_speed = 3.0
         self.magnet_normalsmooth = 30.0
         self.magnet_normalsmoothfov = 30.0
-        self.magnet_flick_gain = 1.0
-        self.magnet_flick_max_counts = 6000.0
-        self.magnet_flick_max_iterations = 4
-        self.magnet_flick_budget_ms = 120.0
-        self.magnet_flick_deadzone_px = 1.5
-        self.magnet_flick_strength_x = 1.0   # legacy alias only
-        self.magnet_flick_strength_y = 1.0   # legacy alias only
+        self.magnet_flick_strength_x = 5.0
+        self.magnet_flick_strength_y = 5.0
         self.magnet_silent_distance = 1.0
         self.magnet_silent_delay = 100.0
         self.magnet_silent_move_delay = 500.0
@@ -334,15 +225,15 @@ class Config:
         self.switch_confirm_frames = 3
         self.ema_alpha = 0.35
         
-        # RCS (Recoil Control System)
-        self.enablercs = True  # Enable RCS (Burst & Spray)
-        self.rcs_keybind = 0  # RCS binding, default = Left Mouse Button
-        self.rcs_pull_speed = 9  # Pull speed (1-20, default 9 for 253 eDPI)
-        self.rcs_activation_delay = 140  # Activation delay (140ms burst immunity)
-        self.rcs_rapid_click_threshold = 180  # Rapid click threshold (180ms)
-        # RCS Y Release
-        self.rcs_release_y_enabled = True  # Auto-release Y
-        self.rcs_release_y_duration = 0.35  # Release duration (0.35s)
+        # RCS (Recoil Control System) 瑷疆
+        self.enablercs = False  # 鏄惁鍟熺敤 RCS
+        self.rcs_keybind = 0  # RCS 綁定, default = Left Mouse Button
+        self.rcs_pull_speed = 10  # 涓嬫媺閫熷害锛?-20锛?
+        self.rcs_activation_delay = 100  # 鍟熷嫊寤堕伈锛?0-500ms锛?
+        self.rcs_rapid_click_threshold = 200  # 蹇€熼粸鎿婇柧鍊硷紙100-1000ms锛?
+        # RCS Y 杌歌В閹栬ō缃?
+        self.rcs_release_y_enabled = False  # 鏄惁鍟熺敤宸﹂嵉鎸変笅鏅傝В閹?Y 杌哥Щ鍕?
+        self.rcs_release_y_duration = 1.0  # Y 杌歌В閹栨寔绾屾檪闁擄紙0.1~5绉掞級
         # --- Normal Aim ---
         self.normal_x_speed = 3
         self.normal_y_speed = 3
@@ -351,52 +242,26 @@ class Config:
         self.normalsmoothfov = 30
 
         # --- Flick Aim ---
-        # gain is a PHYSICAL gain (1.0 = geometrically correct). The legacy
-        # flick_strength_* keys are kept only for backward-compatible loading and
-        # are never applied as a feel multiplier.
-        self.flick_engine = "v2"          # "v2" (closed loop) | "legacy"
-        self.flick_gain = 1.0
-        self.flick_max_counts = 6000.0    # per-impulse budget, in counts
-        self.flick_max_iterations = 4
-        self.flick_budget_ms = 240.0      # convergence budget, not a blind lockout
-        self.flick_settle_ms = 70.0        # wait for camera pipeline before measuring again
-        self.flick_deadzone_px = 1.5
-        # A target moving further than this is a DIFFERENT target (the key is a
-        # screen position that legitimately drifts while the crosshair converges).
-        self.flick_switch_radius_px = 64
-        # Publish per-frame Flick diagnostics to the UI (off by default: no dict
-        # allocation on the hot path unless somebody is looking at it).
-        self.flick_telemetry_enabled = False
-        self.flick_strength_x = 1.0       # legacy, migrated into flick_gain
-        self.flick_strength_y = 1.0       # legacy, migrated into flick_gain
-
+        self.flick_strength_x = 5.0
+        self.flick_strength_y = 5.0
+        
         # --- Secondary Aimbot ---
-        self.enableaim_sec = True
-        self.normal_x_speed_sec = 105.0
-        self.normal_y_speed_sec = 52.0
-        self.normalsmooth_sec = 4
-        self.normalsmoothfov_sec = 28
-        self.flick_gain_sec = 1.0
-        self.flick_max_counts_sec = 6000.0
-        self.flick_max_iterations_sec = 4
-        self.flick_budget_ms_sec = 240.0
-        self.flick_settle_ms_sec = 70.0
-        self.flick_deadzone_px_sec = 2.0
-        self.flick_switch_radius_px_sec = 64
-        self.flick_strength_x_sec = 1.0   # legacy, migrated into flick_gain_sec
-        self.flick_strength_y_sec = 1.0   # legacy, migrated into flick_gain_sec
-        self.sec_flick_cooldown_ms = 120.0  # legacy, now an alias of flick_budget_ms_sec
-        self.sec_aim_deadzone = 2.2
-        self.max_speed = 6000.0           # real schema key, no longer a phantom 1000
-        self.fovsize_sec = 30.0
+        self.enableaim_sec = False
+        self.normal_x_speed_sec = 2
+        self.normal_y_speed_sec = 2
+        self.normalsmooth_sec = 20
+        self.normalsmoothfov_sec = 20
+        self.flick_strength_x_sec = 5.0
+        self.flick_strength_y_sec = 5.0
+        self.fovsize_sec = 150
         self.ads_fov_enabled_sec = False
-        self.ads_fovsize_sec = 30.0
+        self.ads_fovsize_sec = 150
         self.ads_key_sec = "Right Mouse Button"
         self.ads_key_type_sec = "hold"  # hold, toggle
-        self.selected_mouse_button_sec = 1
-        self.aim_offsetX_sec = 0  # Sec Aimbot X 偏移
-        self.aim_offsetY_sec = 0  # Sec Aimbot Y 偏移
-        self.aim_type_sec = "head"  # Sec Aimbot 瞄準類型
+        self.selected_mouse_button_sec = 2
+        self.aim_offsetX_sec = 0  # Sec Aimbot X 鍋忕Щ
+        self.aim_offsetY_sec = 0  # Sec Aimbot Y 鍋忕Щ
+        self.aim_type_sec = "head"  # Sec Aimbot 鐬勬簴椤炲瀷
         
         # --- NCAF Parameters (Main) ---
         # Snap Radius = outer engagement zone (larger), Near Radius = inner precision zone (smaller)
@@ -429,13 +294,13 @@ class Config:
         self.wm_distance_threshold = 50.0  # 璺濋洟闁惧€硷紝浣庢柤姝ゅ€兼檪绉诲嫊鏇寸簿纰?
         
         # --- WindMouse Parameters (Sec) ---
-        self.wm_gravity_sec = 11.0
-        self.wm_wind_sec = 1.0
-        self.wm_max_step_sec = 14.0
-        self.wm_min_step_sec = 1.0
+        self.wm_gravity_sec = 9.0
+        self.wm_wind_sec = 3.0
+        self.wm_max_step_sec = 15.0
+        self.wm_min_step_sec = 2.0
         self.wm_min_delay_sec = 0.001
         self.wm_max_delay_sec = 0.003
-        self.wm_distance_threshold_sec = 28.0
+        self.wm_distance_threshold_sec = 50.0  # 璺濋洟闁惧€硷紝浣庢柤姝ゅ€兼檪绉诲嫊鏇寸簿纰?
         
         # --- Bezier Parameters (Main) ---
         self.bezier_segments = 8
@@ -501,31 +366,14 @@ class Config:
         self.legacy_ui_mode = False
         self.ui_theme = "nord"
         self.language = "en"
-        # Pro/Simple is a real, persisted preference now (it used to be read and
-        # written by the UI but absent from the schema, so it reset every launch).
-        # Fresh install starts in Simple: it is the lightweight layout (plan §5).
-        self.ui_pro_mode = False
-        # --- Schema 4: UI mode / launcher (plan §9) ---
-        self.ui_toggle_hotkey = "Insert"
-        self.ui_simple_geometry = "560x540"
-        self.ui_pro_geometry = "980x660"
-        self.ui_simple_position = ""
-        self.ui_start_hidden = False
-        self.ui_tray_enabled = (os.name == "nt")
-        self.ui_minimize_to_tray = False
-        # Rollback flag: False = the old "Pro with collapsed sections" Simple.
-        self.ui_compact_layout = True
-        # Preview is a debug aid, not a 144 Hz render target: cap its FPS.
-        self.ui_preview_max_fps = 30
         
         # --- Capture Settings ---
         self.toggle_feedback_method = "udp"  # "udp" or "zmq"
         self.zmq_ip = "192.168.10.25"
         self.zmq_port = 5555
         self.udp_ip = "0.0.0.0"
-        self.udp_port = DEFAULT_UDP_PORT
+        self.udp_port = "3110"
         self.audio_feedback_ip = "192.168.10.3"
-        self.audio_feedback_port = DEFAULT_AUDIO_FEEDBACK_PORT
         self.audio_feedback_enabled = True
         self.teleport_host = ""
         self.teleport_port = "0"
@@ -587,15 +435,6 @@ class Config:
         
         # 杓夊叆淇濆瓨鐨勯厤缃紙濡傛灉瀛樺湪锛?
         self.load_from_file()
-        # A fresh install has no config.json, so from_dict()/migration never ran and
-        # ``calibration_source`` is still "" (undecided). Fresh default is the
-        # Valorant preset, so materialise its scale instead of leaving 0 c/deg.
-        if not self.calibration_source:
-            self.calibration_source = "valorant"
-        if self.calibration_source == "valorant" and not self.measured_pair_valid():
-            _cpd = self.valorant_counts_per_deg()
-            self.counts_per_deg_x = float(_cpd)
-            self.counts_per_deg_y = float(_cpd)
     
     def to_dict(self):
         """灏囬厤缃綁鎻涚偤瀛楀吀 - 鍖呭惈鎵€鏈夎ō缃?"""
@@ -634,10 +473,6 @@ class Config:
             "aim_latest_frame_priority": self.aim_latest_frame_priority,
             "enable_target_temporal_smoothing": self.enable_target_temporal_smoothing,
             "move_queue_merge_batch": self.move_queue_merge_batch,
-            "move_queue_per_tag_dispatch": bool(
-                getattr(self, "move_queue_per_tag_dispatch", True)
-            ),
-            "config_schema": int(getattr(self, "config_schema", CURRENT_CONFIG_SCHEMA)),
             
             # Custom HSV Settings
             "custom_hsv_min_h": self.custom_hsv_min_h,
@@ -778,11 +613,6 @@ class Config:
             "magnet_normal_y_speed": self.magnet_normal_y_speed,
             "magnet_normalsmooth": self.magnet_normalsmooth,
             "magnet_normalsmoothfov": self.magnet_normalsmoothfov,
-            "magnet_flick_gain": self.magnet_flick_gain,
-            "magnet_flick_max_counts": self.magnet_flick_max_counts,
-            "magnet_flick_max_iterations": self.magnet_flick_max_iterations,
-            "magnet_flick_budget_ms": self.magnet_flick_budget_ms,
-            "magnet_flick_deadzone_px": self.magnet_flick_deadzone_px,
             "magnet_flick_strength_x": self.magnet_flick_strength_x,
             "magnet_flick_strength_y": self.magnet_flick_strength_y,
             "magnet_silent_distance": self.magnet_silent_distance,
@@ -833,40 +663,6 @@ class Config:
             "normal_y_speed": self.normal_y_speed,
             "normalsmooth": self.normalsmooth,
             "normalsmoothfov": self.normalsmoothfov,
-
-            # Frame geometry & calibration (one source of truth: aim_math)
-            "hfov_deg": self.hfov_deg,
-            "vfov_deg": self.vfov_deg,
-            "cm_per_rev": self.cm_per_rev,
-            "aim_engine": self.aim_engine,
-            "counts_per_deg_x": self.counts_per_deg_x,
-            "counts_per_deg_y": self.counts_per_deg_y,
-            "calibration_r2": self.calibration_r2,
-            "calibration_samples": self.calibration_samples,
-            "calibration_source": str(getattr(self, "calibration_source", "analytic")),
-            "valorant_deg_per_count": float(getattr(self, "valorant_deg_per_count", 0.07)),
-            "valorant_sens_at_calibration": float(
-                getattr(self, "valorant_sens_at_calibration", 0.0)
-            ),
-            "calibration_sens_at_measurement": float(
-                getattr(self, "calibration_sens_at_measurement", 0.0)
-            ),
-            "calibration_updated_at": str(getattr(self, "calibration_updated_at", "")),
-            "max_speed": self.max_speed,
-
-            # Flick Aim (v2 closed loop)
-            "flick_engine": self.flick_engine,
-            "flick_gain": self.flick_gain,
-            "flick_max_counts": self.flick_max_counts,
-            "flick_max_iterations": self.flick_max_iterations,
-            "flick_budget_ms": self.flick_budget_ms,
-            "flick_settle_ms": self.flick_settle_ms,
-            "flick_deadzone_px": self.flick_deadzone_px,
-            "flick_switch_radius_px": int(getattr(self, "flick_switch_radius_px", 64)),
-            "flick_telemetry_enabled": bool(
-                getattr(self, "flick_telemetry_enabled", False)
-            ),
-            # legacy aliases kept for backward-compatible files
             "flick_strength_x": self.flick_strength_x,
             "flick_strength_y": self.flick_strength_y,
             
@@ -876,19 +672,8 @@ class Config:
             "normal_y_speed_sec": self.normal_y_speed_sec,
             "normalsmooth_sec": self.normalsmooth_sec,
             "normalsmoothfov_sec": self.normalsmoothfov_sec,
-            "flick_gain_sec": self.flick_gain_sec,
-            "flick_max_counts_sec": self.flick_max_counts_sec,
-            "flick_max_iterations_sec": self.flick_max_iterations_sec,
-            "flick_budget_ms_sec": self.flick_budget_ms_sec,
-            "flick_settle_ms_sec": self.flick_settle_ms_sec,
-            "flick_deadzone_px_sec": self.flick_deadzone_px_sec,
-            "flick_switch_radius_px_sec": int(
-                getattr(self, "flick_switch_radius_px_sec", 64)
-            ),
             "flick_strength_x_sec": self.flick_strength_x_sec,
             "flick_strength_y_sec": self.flick_strength_y_sec,
-            "sec_flick_cooldown_ms": getattr(self, "sec_flick_cooldown_ms", 120.0),
-            "sec_aim_deadzone": getattr(self, "sec_aim_deadzone", 2.2),
             "fovsize_sec": self.fovsize_sec,
             "ads_fov_enabled_sec": self.ads_fov_enabled_sec,
             "ads_fovsize_sec": self.ads_fovsize_sec,
@@ -992,16 +777,6 @@ class Config:
             "legacy_ui_mode": self.legacy_ui_mode,
             "ui_theme": self.ui_theme,
             "language": self.language,
-            "ui_pro_mode": bool(getattr(self, "ui_pro_mode", False)),
-            "ui_toggle_hotkey": str(getattr(self, "ui_toggle_hotkey", "Insert")),
-            "ui_simple_geometry": str(getattr(self, "ui_simple_geometry", "560x540")),
-            "ui_pro_geometry": str(getattr(self, "ui_pro_geometry", "980x660")),
-            "ui_simple_position": str(getattr(self, "ui_simple_position", "")),
-            "ui_start_hidden": bool(getattr(self, "ui_start_hidden", False)),
-            "ui_tray_enabled": bool(getattr(self, "ui_tray_enabled", os.name == "nt")),
-            "ui_minimize_to_tray": bool(getattr(self, "ui_minimize_to_tray", False)),
-            "ui_compact_layout": bool(getattr(self, "ui_compact_layout", True)),
-            "ui_preview_max_fps": int(getattr(self, "ui_preview_max_fps", 30)),
             
             # Capture & Network Feedback Settings
             "toggle_feedback_method": self.toggle_feedback_method,
@@ -1010,9 +785,6 @@ class Config:
             "udp_ip": self.udp_ip,
             "udp_port": self.udp_port,
             "audio_feedback_ip": getattr(self, "audio_feedback_ip", "192.168.10.3"),
-            "audio_feedback_port": int(
-                getattr(self, "audio_feedback_port", DEFAULT_AUDIO_FEEDBACK_PORT)
-            ),
             "audio_feedback_enabled": bool(getattr(self, "audio_feedback_enabled", True)),
             "teleport_host": self.teleport_host,
             "teleport_port": self.teleport_port,
@@ -1075,68 +847,9 @@ class Config:
     
     def from_dict(self, data):
         """從字典載入配置"""
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
-
-        # --- Schema 4 -> 5: đồng bộ cổng stream v2.1 (plan §3.2) ----------
-        # Runs BEFORE every other validation (including
-        # _migrate_and_validate_flick, which rewrites self.config_schema at the
-        # end), so the schema is read from the raw payload, not from the object.
-        raw_schema = 1
-        if isinstance(data, dict):
-            try:
-                raw_schema = int(data.get("config_schema", 1))
-            except Exception:
-                raw_schema = 1
-
-        def _norm_port_str(value, default):
-            try:
-                parsed = int(str(value).strip())
-            except Exception:
-                return str(default)
-            return str(parsed) if 1 <= parsed <= 65535 else str(default)
-
-        def _norm_port_int(value, default):
-            try:
-                parsed = int(str(value).strip())
-            except Exception:
-                return int(default)
-            return parsed if 1 <= parsed <= 65535 else int(default)
-
-        raw_udp_port = str(getattr(self, "udp_port", "")).strip()
-        if raw_schema < 5 and raw_udp_port in _LEGACY_UDP_PORTS:
-            self.udp_port = DEFAULT_UDP_PORT
-            log_print(
-                f"[Config] schema {raw_schema} -> 5: udp_port migrated from "
-                f"{raw_udp_port or '<empty>'} to {DEFAULT_UDP_PORT} "
-                "(OBS xUDP v2.1)"
-            )
-        else:
-            normalized_udp_port = _norm_port_str(raw_udp_port, DEFAULT_UDP_PORT)
-            if normalized_udp_port != raw_udp_port:
-                log_print(
-                    f"[Config] WARN udp_port={raw_udp_port!r} is not a valid port; "
-                    f"using {normalized_udp_port}"
-                )
-            self.udp_port = normalized_udp_port
-
-        self.audio_feedback_port = _norm_port_int(
-            getattr(self, "audio_feedback_port", DEFAULT_AUDIO_FEEDBACK_PORT),
-            DEFAULT_AUDIO_FEEDBACK_PORT,
-        )
-        self.udp_ip = str(getattr(self, "udp_ip", "0.0.0.0")).strip() or "0.0.0.0"
-        self.audio_feedback_ip = (
-            str(getattr(self, "audio_feedback_ip", "192.168.10.3")).strip()
-            or "192.168.10.3"
-        )
-        self.toggle_feedback_method = (
-            "zmq"
-            if str(getattr(self, "toggle_feedback_method", "udp")).strip().lower() == "zmq"
-            else "udp"
-        )
-
+        for key, value in data.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
         try:
             self.target_fps = max(1, min(1000, int(getattr(self, "target_fps", 200))))
         except Exception:
@@ -1351,12 +1064,8 @@ class Config:
             ("magnet_normal_y_speed", 3.0, 0.01, 2000.0),
             ("magnet_normalsmooth", 30.0, 0.01, 1000.0),
             ("magnet_normalsmoothfov", 30.0, 1.0, 1000.0),
-            ("magnet_flick_gain", 1.0, 0.1, 3.0),
-            ("magnet_flick_max_counts", 6000.0, 1.0, 20000.0),
-            ("magnet_flick_budget_ms", 120.0, 20.0, 1000.0),
-            ("magnet_flick_deadzone_px", 1.5, 0.0, 20.0),
-            ("magnet_flick_strength_x", 1.0, 0.01, 5.0),
-            ("magnet_flick_strength_y", 1.0, 0.01, 5.0),
+            ("magnet_flick_strength_x", 5.0, 0.01, 5.0),
+            ("magnet_flick_strength_y", 5.0, 0.01, 5.0),
             ("magnet_silent_distance", 1.0, 0.1, 10.0),
             ("magnet_silent_delay", 100.0, 0.0, 2000.0),
             ("magnet_silent_move_delay", 500.0, 0.0, 2000.0),
@@ -1393,7 +1102,6 @@ class Config:
             except Exception:
                 parsed = float(default)
             setattr(self, key, max(float(lower_bound), min(float(upper_bound), parsed)))
-        self._migrate_and_validate_flick(data)
         try:
             self.magnet_trigger_confirm_frames = max(
                 1, min(10, int(getattr(self, "magnet_trigger_confirm_frames", 1)))
@@ -1410,12 +1118,6 @@ class Config:
             self.magnet_bezier_segments = max(1, min(30, int(getattr(self, "magnet_bezier_segments", 8))))
         except Exception:
             self.magnet_bezier_segments = 8
-        try:
-            self.magnet_flick_max_iterations = max(
-                1, min(10, int(getattr(self, "magnet_flick_max_iterations", 4)))
-            )
-        except Exception:
-            self.magnet_flick_max_iterations = 4
         if self.magnet_pid_kp_min > self.magnet_pid_kp_max:
             self.magnet_pid_kp_min, self.magnet_pid_kp_max = (
                 self.magnet_pid_kp_max,
@@ -1521,54 +1223,6 @@ class Config:
         else:
             self.ui_collapsible_states = {}
         self.legacy_ui_mode = bool(getattr(self, "legacy_ui_mode", False))
-        self.ui_pro_mode = bool(getattr(self, "ui_pro_mode", False))
-        # --- Schema 4 migration (plan §9.2) -----------------------------
-        # A config file that predates the Simple dashboard keeps the user in Pro
-        # (non-empty payload), a fresh install starts in Simple.
-        if isinstance(data, dict) and data and "ui_pro_mode" not in data:
-            self.ui_pro_mode = True
-            log_print("[Config] schema 3 -> 4: ui_pro_mode defaulted to Pro for an existing config")
-        raw_hotkey = getattr(self, "ui_toggle_hotkey", "Insert")
-        self.ui_toggle_hotkey = _normalize_hotkey(raw_hotkey, "Insert")
-        if str(raw_hotkey or "").strip() and not self.ui_toggle_hotkey:
-            self.ui_toggle_hotkey = "Insert"
-        elif str(raw_hotkey or "").strip() and self.ui_toggle_hotkey != str(raw_hotkey).strip():
-            if str(raw_hotkey).strip().upper() != self.ui_toggle_hotkey:
-                log_print(
-                    f"[Config] WARN ui_toggle_hotkey={raw_hotkey!r} is not a known key; "
-                    f"using {self.ui_toggle_hotkey}"
-                )
-        self.ui_simple_geometry = _normalize_geometry(
-            getattr(self, "ui_simple_geometry", "560x540"), 480, 420, 720, 700, "560x540"
-        )
-        self.ui_pro_geometry = _normalize_geometry(
-            getattr(self, "ui_pro_geometry", "980x660"), 900, 600, 5120, 2880, "980x660"
-        )
-        self.ui_simple_position = _normalize_position(
-            getattr(self, "ui_simple_position", "")
-        )
-        self.ui_start_hidden = bool(getattr(self, "ui_start_hidden", False))
-        self.ui_tray_enabled = bool(
-            getattr(self, "ui_tray_enabled", os.name == "nt")
-        )
-        self.ui_minimize_to_tray = bool(
-            getattr(self, "ui_minimize_to_tray", False)
-        )
-        self.ui_compact_layout = bool(getattr(self, "ui_compact_layout", True))
-        self.flick_telemetry_enabled = bool(getattr(self, "flick_telemetry_enabled", False))
-        self.move_queue_per_tag_dispatch = bool(
-            getattr(self, "move_queue_per_tag_dispatch", True)
-        )
-        try:
-            self.ui_preview_max_fps = max(1, min(144, int(getattr(self, "ui_preview_max_fps", 30))))
-        except Exception:
-            self.ui_preview_max_fps = 30
-        try:
-            self.config_schema = max(1, int(getattr(self, "config_schema", CURRENT_CONFIG_SCHEMA)))
-        except Exception:
-            self.config_schema = CURRENT_CONFIG_SCHEMA
-        if self.config_schema < CURRENT_CONFIG_SCHEMA:
-            self.config_schema = CURRENT_CONFIG_SCHEMA
         theme = str(getattr(self, "ui_theme", "nord")).strip().lower()
         if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic"}:
             theme = "classic" if self.legacy_ui_mode else "nord"
@@ -1602,307 +1256,7 @@ class Config:
             )
         except Exception:
             self.trigger_strafe_manual_neutral_ms = 0
-
-    # ------------------------------------------------------------------
-    # Flick / geometry migration + validation
-    # ------------------------------------------------------------------
-    def _migrate_and_validate_flick(self, data=None):
-        """Migrate legacy flick keys and clamp every new knob into a sane range.
-
-        Legacy ``flick_strength_x/y`` behaved as a *feel multiplier* on top of an
-        already-wrong scale (1.8 / 0.55). It is retired: gain is physical and
-        defaults to 1.0. The migration never silently multiplies anything.
-        """
-        source = data if isinstance(data, dict) else {}
-
-        def _has(key):
-            return key in source
-
-        # --- primary channel ------------------------------------------------
-        if not _has("flick_gain"):
-            legacy_x = source.get("flick_strength_x")
-            legacy_y = source.get("flick_strength_y")
-            self.flick_gain = 1.0
-            if legacy_x is not None or legacy_y is not None:
-                log_print(
-                    f"[Config] WARN flick_strength_x={legacy_x} flick_strength_y={legacy_y} "
-                    "has been retired; flick_gain reset to 1.0 (physical gain). "
-                    "Run the Calibration panel to get an accurate counts_per_deg."
-                )
-        if not _has("flick_max_counts"):
-            # Legacy max_speed was a phantom key that always fell back to 1000 and
-            # truncated every flick. Never inherit that value.
-            self.flick_max_counts = 6000.0
-        if not _has("flick_budget_ms"):
-            self.flick_budget_ms = 120.0
-        if not _has("flick_max_iterations"):
-            self.flick_max_iterations = 4
-        if not _has("flick_deadzone_px"):
-            legacy_deadzone = source.get("aim_deadzone")
-            self.flick_deadzone_px = (
-                max(0.0, min(20.0, float(legacy_deadzone)))
-                if legacy_deadzone is not None
-                else 1.5
-            )
-
-        # --- secondary channel ----------------------------------------------
-        if not _has("flick_gain_sec"):
-            legacy_x = source.get("flick_strength_x_sec")
-            legacy_y = source.get("flick_strength_y_sec")
-            self.flick_gain_sec = 1.0
-            if legacy_x is not None or legacy_y is not None:
-                log_print(
-                    f"[Config] WARN flick_strength_x_sec={legacy_x} flick_strength_y_sec={legacy_y} "
-                    "has been retired; flick_gain_sec reset to 1.0 (physical gain)."
-                )
-        if not _has("flick_max_counts_sec"):
-            self.flick_max_counts_sec = 6000.0
-        if not _has("flick_budget_ms_sec"):
-            legacy_cooldown = source.get("sec_flick_cooldown_ms")
-            if legacy_cooldown is not None:
-                try:
-                    self.flick_budget_ms_sec = max(20.0, min(1000.0, float(legacy_cooldown)))
-                except Exception:
-                    self.flick_budget_ms_sec = 120.0
-                log_print(
-                    f"[Config] sec_flick_cooldown_ms={legacy_cooldown} is now a convergence "
-                    f"budget (flick_budget_ms_sec={self.flick_budget_ms_sec}); "
-                    "frames are no longer discarded."
-                )
-            else:
-                self.flick_budget_ms_sec = 120.0
-        if not _has("flick_max_iterations_sec"):
-            self.flick_max_iterations_sec = 4
-        if not _has("flick_deadzone_px_sec"):
-            legacy_deadzone = source.get("sec_aim_deadzone")
-            self.flick_deadzone_px_sec = (
-                max(0.0, min(20.0, float(legacy_deadzone)))
-                if legacy_deadzone is not None
-                else 2.0
-            )
-
-        # --- engine selector -----------------------------------------------
-        engine = str(getattr(self, "flick_engine", "v2") or "v2").strip().lower()
-        self.flick_engine = "legacy" if engine == "legacy" else "v2"
-        aim_engine = str(getattr(self, "aim_engine", "legacy") or "legacy").strip().lower()
-        self.aim_engine = "v2" if aim_engine == "v2" else "legacy"
-
-        # --- clamping -------------------------------------------------------
-        def _clamp(fname, default, lower, upper):
-            try:
-                value = float(getattr(self, fname, default))
-            except Exception:
-                value = float(default)
-            if value != value or value in (float("inf"), float("-inf")):
-                value = float(default)
-            setattr(self, fname, max(float(lower), min(float(upper), value)))
-
-        def _clamp_int(fname, default, lower, upper):
-            try:
-                value = int(getattr(self, fname, default))
-            except Exception:
-                value = int(default)
-            setattr(self, fname, max(int(lower), min(int(upper), value)))
-
-        _clamp("flick_gain", 1.0, 0.1, 3.0)
-        _clamp("flick_gain_sec", 1.0, 0.1, 3.0)
-        _clamp("flick_max_counts", 6000.0, 1.0, 20000.0)
-        _clamp("flick_max_counts_sec", 6000.0, 1.0, 20000.0)
-        _clamp_int("flick_max_iterations", 4, 1, 10)
-        _clamp_int("flick_max_iterations_sec", 4, 1, 10)
-        _clamp("flick_budget_ms", 120.0, 20.0, 1000.0)
-        _clamp("flick_budget_ms_sec", 120.0, 20.0, 1000.0)
-        _clamp("flick_settle_ms", 70.0, 0.0, 500.0)
-        _clamp("flick_settle_ms_sec", 70.0, 0.0, 500.0)
-        _clamp("flick_deadzone_px", 1.5, 0.0, 20.0)
-        _clamp("flick_deadzone_px_sec", 2.0, 0.0, 20.0)
-        _clamp_int("flick_switch_radius_px", 64, 16, 256)
-        _clamp_int("flick_switch_radius_px_sec", 64, 16, 256)
-        _clamp("max_speed", 6000.0, 1.0, 20000.0)
-        _clamp("hfov_deg", 103.0, 40.0, 140.0)
-        _clamp("vfov_deg", 0.0, 0.0, 140.0)
-        _clamp("cm_per_rev", 54.54, 1.0, 500.0)
-        _clamp("flick_strength_x", 1.0, 0.01, 5.0)
-        _clamp("flick_strength_y", 1.0, 0.01, 5.0)
-        _clamp("flick_strength_x_sec", 1.0, 0.01, 5.0)
-        _clamp("flick_strength_y_sec", 1.0, 0.01, 5.0)
-        _clamp("sec_flick_cooldown_ms", 120.0, 20.0, 1000.0)
-
-        # Mirror the legacy aliases AFTER clamping, so the legacy A/B path uses the
-        # same (clamped) gain as the v2 path instead of an unclamped stale value.
-        self.flick_strength_x = float(self.flick_gain)
-        self.flick_strength_y = float(self.flick_gain)
-        self.flick_strength_x_sec = float(self.flick_gain_sec)
-        self.flick_strength_y_sec = float(self.flick_gain_sec)
-        self.sec_flick_cooldown_ms = float(self.flick_budget_ms_sec)
-
-        # measured calibration: 0 means "not measured", anything else must be sane
-        for fname in ("counts_per_deg_x", "counts_per_deg_y"):
-            try:
-                value = float(getattr(self, fname, 0.0) or 0.0)
-            except Exception:
-                value = 0.0
-            if value != value or value in (float("inf"), float("-inf")) or value < 0.0:
-                value = 0.0
-            setattr(self, fname, min(value, 100000.0))
-        # Keep the pair consistent: a half-measured calibration is not usable.
-        if (float(self.counts_per_deg_x) > 0.0) != (float(self.counts_per_deg_y) > 0.0):
-            self.counts_per_deg_x = 0.0
-            self.counts_per_deg_y = 0.0
-            log_print(
-                "[Config] WARN only one axis was calibrated; ignoring the measurement "
-                "and falling back to the analytic model."
-            )
-        _clamp("calibration_r2", 0.0, 0.0, 1.0)
-        _clamp_int("calibration_samples", 0, 0, 10000)
-        self._migrate_calibration_source(source)
-
-    # ------------------------------------------------------------------
-    # Calibration provenance (schema 3)
-    # ------------------------------------------------------------------
-    _CALIBRATION_SOURCES = ("valorant", "measured", "analytic")
-
-    def valorant_counts_per_deg(self, sens=None):
-        """``1 / (deg_per_count * sens)`` for the Valorant preset."""
-        try:
-            deg_per_count = float(getattr(self, "valorant_deg_per_count", 0.07) or 0.07)
-        except Exception:
-            deg_per_count = 0.07
-        deg_per_count = max(0.001, deg_per_count)
-        if sens is None:
-            try:
-                sens = float(getattr(self, "in_game_sens", 0.23) or 0.23)
-            except Exception:
-                sens = 0.23
-        sens = max(0.01, float(sens))
-        return 1.0 / (deg_per_count * sens)
-
-    def measured_pair_valid(self):
-        """True when BOTH axes carry a usable measured scale."""
-        try:
-            x = float(getattr(self, "counts_per_deg_x", 0.0) or 0.0)
-            y = float(getattr(self, "counts_per_deg_y", 0.0) or 0.0)
-        except Exception:
-            return False
-        return x > 0.0 and y > 0.0
-
-    def _migrate_calibration_source(self, source):
-        """Decide ``calibration_source`` for a schema-2 config (plan 10.2/5.7).
-
-        The old config stored ``counts_per_deg = 62.11`` while claiming
-        ``samples = 0, r2 = 0`` and displaying ``MEASURED``. 62.11 is not a
-        measurement: it is the Valorant preset at sens 0.23. It is recognised
-        within 1 % and kept as a *preset*. Anything else without the samples/R2
-        to back it is demoted to ``analytic`` instead of being trusted.
-        """
-        def _clamp(fname, default, lower, upper):
-            try:
-                value = float(getattr(self, fname, default))
-            except Exception:
-                value = float(default)
-            if value != value or value in (float("inf"), float("-inf")):
-                value = float(default)
-            setattr(self, fname, max(float(lower), min(float(upper), value)))
-
-        _clamp("valorant_deg_per_count", 0.07, 0.01, 0.2)
-        _clamp("valorant_sens_at_calibration", 0.0, 0.0, 10.0)
-        _clamp("calibration_sens_at_measurement", 0.0, 0.0, 10.0)
-
-        if isinstance(source, dict) and "counts_per_deg_x" not in source and "calibration_source" not in source:
-            self.calibration_source = "analytic"
-            self.counts_per_deg_x = 0.0
-            self.counts_per_deg_y = 0.0
-            return
-
-        explicit = None
-        if isinstance(source, dict) and source.get("calibration_source") is not None:
-            explicit = str(source.get("calibration_source")).strip().lower()
-        elif not isinstance(source, dict) and getattr(self, "calibration_source", ""):
-            # Only trust the attribute when there is no payload at all (a Config
-            # built purely from defaults). A schema-2 dict that lacks the key must
-            # NOT be read as "explicitly valorant".
-            explicit = str(getattr(self, "calibration_source")).strip().lower()
-
-        if explicit in self._CALIBRATION_SOURCES:
-            # Already versioned: only re-validate consistency.
-            if explicit == "measured" and not self.measured_pair_valid():
-                log_print(
-                    "[Config] WARN calibration_source=measured but no measured pair "
-                    "is stored; falling back to analytic."
-                )
-                explicit = "analytic"
-            if explicit == "valorant" and not self.measured_pair_valid():
-                # A preset is always derivable from sens; make sure the stored
-                # pair agrees with it so the UI readout is truthful.
-                cpd = self.valorant_counts_per_deg()
-                self.counts_per_deg_x = float(cpd)
-                self.counts_per_deg_y = float(cpd)
-            self.calibration_source = explicit
-        elif self.measured_pair_valid():
-            valorant = self.valorant_counts_per_deg()
-            ratio = (float(self.counts_per_deg_x) / valorant) if valorant > 0 else 0.0
-            samples = int(getattr(self, "calibration_samples", 0) or 0)
-            r2 = float(getattr(self, "calibration_r2", 0.0) or 0.0)
-            if abs(ratio - 1.0) <= 0.01:
-                # Matches the Valorant preset within 1 %: it is a PRESET.
-                self.calibration_source = "valorant"
-                self.valorant_sens_at_calibration = float(
-                    getattr(self, "in_game_sens", 0.23) or 0.23
-                )
-                log_print(
-                    f"[Config] calibration {float(self.counts_per_deg_x):.4f} c/deg "
-                    f"matches the Valorant preset at sens "
-                    f"{self.valorant_sens_at_calibration:.3f}; source=valorant"
-                )
-            elif samples >= 5 and r2 >= 0.99:
-                self.calibration_source = "measured"
-            else:
-                # Unbacked magic number (e.g. the legacy 285.28): not a measurement.
-                self.calibration_source = "analytic"
-                self.counts_per_deg_x = 0.0
-                self.counts_per_deg_y = 0.0
-                log_print(
-                    "[Config] WARN stored counts_per_deg has no provenance "
-                    f"(samples={samples}, r2={r2:.3f}); demoted to analytic. "
-                    "Run the Calibration panel to measure it."
-                )
-        else:
-            # No usable pair at all. A schema-2 file is treated as legacy analytic
-            # so an old file does not silently start as "Valorant preset"; a fresh
-            # Config() default stays "valorant".
-            saved = str(getattr(self, "calibration_source", "") or "")
-            if isinstance(source, dict) and source:
-                self.calibration_source = "analytic"
-            elif saved in self._CALIBRATION_SOURCES:
-                self.calibration_source = saved
-            else:
-                self.calibration_source = "valorant"
-            if self.calibration_source == "valorant":
-                cpd = self.valorant_counts_per_deg()
-                self.counts_per_deg_x = float(cpd)
-                self.counts_per_deg_y = float(cpd)
-
-        if self.calibration_source == "measured":
-            # A measurement is invariant under sensitivity; what it must remember
-            # is the sensitivity it was taken at, so a later change can warn.
-            if not getattr(self, "calibration_sens_at_measurement", 0.0):
-                self.calibration_sens_at_measurement = float(
-                    getattr(self, "in_game_sens", 0.23) or 0.23
-                )
-        def _clamp(fname, default, lower, upper):
-            try:
-                value = float(getattr(self, fname, default))
-            except Exception:
-                value = float(default)
-            if value != value or value in (float("inf"), float("-inf")):
-                value = float(default)
-            setattr(self, fname, max(float(lower), min(float(upper), value)))
-
-        _clamp("valorant_deg_per_count", 0.07, 0.01, 0.2)
-        _clamp("valorant_sens_at_calibration", 0.0, 0.0, 10.0)
-        _clamp("calibration_sens_at_measurement", 0.0, 0.0, 10.0)
-        self.config_schema = CURRENT_CONFIG_SCHEMA
-
+    
     def save_to_file(self, filename="config.json"):
         """Save configuration atomically."""
         try:
@@ -1922,11 +1276,7 @@ class Config:
                 with open(filename, 'r') as f:
                     data = json.load(f)
                 self.from_dict(data)
-                log_print(
-                    f"[Config] Configuration loaded from {filename} "
-                    f"(udp_port={self.udp_port}, "
-                    f"audio_feedback_port={getattr(self, 'audio_feedback_port', 4455)})"
-                )
+                log_print(f"[Config] Configuration loaded from {filename}")
         except Exception as e:
             log_print(f"[Config] Failed to load configuration: {e}")
     

@@ -33,14 +33,18 @@ class UpdateChecker:
         self._load_update_preferences()
     
     def _load_current_version(self):
-        """Load current version from the single source (``src.version``)."""
+        """Load current version from version.json"""
         try:
-            from src.version import get_version
-
-            self.current_version = get_version()
+            version_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "version.json")
+            if os.path.exists(version_path):
+                with open(version_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.current_version = data.get("version", "1.0.0")
+            else:
+                self.current_version = "1.0.0"
         except Exception as e:
             log_print(f"[Updater] Failed to load current version: {e}")
-            self.current_version = "2.1.0"
+            self.current_version = "1.0.0"
     
     def _load_update_preferences(self):
         """Load update preferences from config.json"""

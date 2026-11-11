@@ -1,4 +1,4 @@
-from src.utils.debug_logger import log_print
+﻿from src.utils.debug_logger import log_print
 import numpy as np
 from .ndi import NDIManager
 import cv2
@@ -147,8 +147,8 @@ class CaptureService:
         # MSS
         self.mss_capture = None
         
-        self._ip = "0.0.0.0"
-        self._port = 5000
+        self._ip = "127.0.0.1"
+        self._port = 1234
         self._gstreamer_no_frame_last_log = 0.0
         self._io_lock = threading.RLock()
         self._mode_switch_job_id = 0
@@ -225,39 +225,22 @@ class CaptureService:
 
     def connect_udp(self, ip, port):
         """閫ｆ帴 UDP 渚嗘簮"""
-        ip_value = str(ip or "").strip() or "0.0.0.0"
-        try:
-            port_value = int(str(port).strip())
-        except (TypeError, ValueError):
-            return False, f"Invalid UDP port: {port!r}"
-        if not (1 <= port_value <= 65535):
-            return False, f"UDP port out of range: {port_value}"
-
+        self.mode = "UDP"
+        self._ip = ip
+        self._port = int(port)
+        
         if not HAS_UDP:
             return False, "UDP module not loaded (OBS_UDP.py missing or failed to import)"
-
+            
         if not self.udp_manager:
             return False, "UDP manager not initialized"
-
-        # Switch the capture mode only AFTER the parameters validated: a garbage
-        # port must not leave the UI showing "UDP" when nothing was ever bound.
-        self._ip = ip_value
-        self._port = port_value
-        self.mode = "UDP"
-
+            
         try:
             success = self.udp_manager.connect(self._ip, self._port, target_fps=0)
             if success:
-                log_print(
-                    f"[Capture] UDP listening on {self._ip}:{self._port} "
-                    "(OBS Target Port must match, default 5000)"
-                )
                 return True, None
-            return False, (
-                f"Cannot bind UDP {self._ip}:{self._port}. "
-                "Port may be in use, or the IP is not local. "
-                "OBS Target Port must match (default 5000)."
-            )
+            else:
+                return False, "Connection failed - check IP/Port and ensure OBS is streaming"
         except Exception as e:
             log_print(f"[Capture] UDP connection exception: {e}")
             return False, str(e)
