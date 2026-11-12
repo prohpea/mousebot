@@ -24,19 +24,15 @@ from src.utils.mouse.keycodes import to_vk_code
 from src.utils.updater import get_update_checker
 from src.ui_hsv_preview import HsvPreviewWindow
 from src.utils.i18n import heading, i18n, t
+from src import ui_components
 from src.ui_components import (
     ModernCard,
     ModernSlider,
     ModernSwitch,
     StatusPill,
-    COLOR_ACCENT_EMERALD,
-    COLOR_ACCENT_CYAN,
-    COLOR_ACCENT_AMBER,
-    COLOR_ACCENT_VIOLET,
-    COLOR_ACCENT_ROSE,
 )
 
-# --- Theme constants (Nord, Emerald, Dracula, Ocean, Neon, Classic) ---
+# --- Theme constants (Nord, Emerald, Dracula, Ocean, Neon, Classic, Tactical) ---
 THEME_PRESETS = {
     "nord": {
         "COLOR_BG": "#242933",
@@ -53,6 +49,12 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#3B4252",
         "COLOR_NAV_HOVER_BG": "#353B49",
         "COLOR_MENU_GHOST": "#616E85",
+        "COLOR_CARD": "#454E5D",
+        "COLOR_CARD_BORDER": "#5A6577",
+        "COLOR_CARD_HEADER": "#3B4350",
+        "COLOR_INPUT": "#363E4A",
+        "COLOR_ACCENT_2": "#5E81AC",
+        "COLOR_BADGE_BG": "#373F4D",
         "FONT_MAIN": ("Segoe UI", 11),
         "FONT_BOLD": ("Segoe UI", 11, "bold"),
         "FONT_TITLE": ("Segoe UI", 18, "bold"),
@@ -72,6 +74,12 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#162232",
         "COLOR_NAV_HOVER_BG": "#131C28",
         "COLOR_MENU_GHOST": "#64748B",
+        "COLOR_CARD": "#2D3A4E",
+        "COLOR_CARD_BORDER": "#3D4E68",
+        "COLOR_CARD_HEADER": "#22303F",
+        "COLOR_INPUT": "#1B2430",
+        "COLOR_ACCENT_2": "#06B6D4",
+        "COLOR_BADGE_BG": "#1E2A38",
         "FONT_MAIN": ("Segoe UI", 11),
         "FONT_BOLD": ("Segoe UI", 11, "bold"),
         "FONT_TITLE": ("Segoe UI", 18, "bold"),
@@ -91,6 +99,12 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#38314F",
         "COLOR_NAV_HOVER_BG": "#2D2F3F",
         "COLOR_MENU_GHOST": "#6272A4",
+        "COLOR_CARD": "#42465C",
+        "COLOR_CARD_BORDER": "#565A78",
+        "COLOR_CARD_HEADER": "#34374A",
+        "COLOR_INPUT": "#2C2F3D",
+        "COLOR_ACCENT_2": "#8BE9FD",
+        "COLOR_BADGE_BG": "#383C4F",
         "FONT_MAIN": ("Segoe UI", 11),
         "FONT_BOLD": ("Segoe UI", 11, "bold"),
         "FONT_TITLE": ("Segoe UI", 18, "bold"),
@@ -110,6 +124,12 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#1B3B54",
         "COLOR_NAV_HOVER_BG": "#132238",
         "COLOR_MENU_GHOST": "#5A738E",
+        "COLOR_CARD": "#2A3D66",
+        "COLOR_CARD_BORDER": "#3B5488",
+        "COLOR_CARD_HEADER": "#213152",
+        "COLOR_INPUT": "#172342",
+        "COLOR_ACCENT_2": "#00B4D8",
+        "COLOR_BADGE_BG": "#1C2A4A",
         "FONT_MAIN": ("Segoe UI", 11),
         "FONT_BOLD": ("Segoe UI", 11, "bold"),
         "FONT_TITLE": ("Segoe UI", 18, "bold"),
@@ -129,6 +149,12 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#0A2315",
         "COLOR_NAV_HOVER_BG": "#0A1A30",
         "COLOR_MENU_GHOST": "#3A506E",
+        "COLOR_CARD": "#1F3654",
+        "COLOR_CARD_BORDER": "#2E4E77",
+        "COLOR_CARD_HEADER": "#14263D",
+        "COLOR_INPUT": "#0D1B2E",
+        "COLOR_ACCENT_2": "#00E5FF",
+        "COLOR_BADGE_BG": "#112138",
         "FONT_MAIN": ("Consolas", 11),
         "FONT_BOLD": ("Consolas", 11, "bold"),
         "FONT_TITLE": ("Consolas", 18, "bold"),
@@ -148,9 +174,40 @@ THEME_PRESETS = {
         "COLOR_NAV_ACTIVE_BG": "#2A2A2A",
         "COLOR_NAV_HOVER_BG": "#262626",
         "COLOR_MENU_GHOST": "#8A8A8A",
+        "COLOR_CARD": "#3A3A3A",
+        "COLOR_CARD_BORDER": "#4F4F4F",
+        "COLOR_CARD_HEADER": "#2E2E2E",
+        "COLOR_INPUT": "#212121",
+        "COLOR_ACCENT_2": "#9E9E9E",
+        "COLOR_BADGE_BG": "#333333",
         "FONT_MAIN": ("Roboto", 11),
         "FONT_BOLD": ("Roboto", 11, "bold"),
         "FONT_TITLE": ("Roboto", 18, "bold"),
+    },
+    "tactical": {
+        "COLOR_BG": "#0D0F12",
+        "COLOR_SIDEBAR": "#090B0E",
+        "COLOR_SURFACE": "#171C22",
+        "COLOR_ACCENT": "#F59E0B",
+        "COLOR_ACCENT_HOVER": "#FBBF24",
+        "COLOR_TEXT": "#E6E8EB",
+        "COLOR_TEXT_DIM": "#8A929B",
+        "COLOR_BORDER": "#39424F",
+        "COLOR_DANGER": "#FF4D4F",
+        "COLOR_SUCCESS": "#3DD68C",
+        "COLOR_WARNING": "#FCD34D",
+        "COLOR_NAV_ACTIVE_BG": "#2A1F14",
+        "COLOR_NAV_HOVER_BG": "#1A1F26",
+        "COLOR_MENU_GHOST": "#6B7480",
+        "COLOR_CARD": "#2E3745",
+        "COLOR_CARD_BORDER": "#4A5566",
+        "COLOR_CARD_HEADER": "#232A35",
+        "COLOR_INPUT": "#161B22",
+        "COLOR_ACCENT_2": "#22D3EE",
+        "COLOR_BADGE_BG": "#20262E",
+        "FONT_MAIN": ("Consolas", 11),
+        "FONT_BOLD": ("Consolas", 11, "bold"),
+        "FONT_TITLE": ("Consolas", 18, "bold"),
     },
 }
 
@@ -159,6 +216,7 @@ def _apply_theme_preset(theme_name):
     theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["nord"])
     for key, value in theme.items():
         globals()[key] = value
+    ui_components.apply_theme(theme)
 
 
 _apply_theme_preset(getattr(config, "ui_theme", "nord"))
@@ -1695,7 +1753,7 @@ class ViewerApp(ctk.CTk):
             "Target Color Selection",
             icon="🎯",
             badge_text="Color",
-            accent_color=COLOR_ACCENT_EMERALD
+            accent_color=COLOR_ACCENT
         )
         self.card_color_preset.pack(fill="x", pady=(0, 10))
 
@@ -1715,7 +1773,7 @@ class ViewerApp(ctk.CTk):
             "Custom HSV Tuning",
             icon="🎨",
             badge_text="Calibration",
-            accent_color=COLOR_ACCENT_CYAN
+            accent_color=COLOR_ACCENT_2
         )
         self.custom_hsv_container = self.card_hsv_tuning
         self.custom_hsv_section = self.card_hsv_tuning.content
@@ -1772,7 +1830,7 @@ class ViewerApp(ctk.CTk):
             "Contour & Detection Filters",
             icon="🔍",
             badge_text="Pro",
-            accent_color=COLOR_ACCENT_AMBER
+            accent_color=COLOR_WARNING
         )
         self.card_contour_filters.pack(fill="x", pady=(0, 10))
 
@@ -1807,7 +1865,7 @@ class ViewerApp(ctk.CTk):
             "Hardware Device API",
             icon="⚡",
             badge_text="Device",
-            accent_color=COLOR_ACCENT_EMERALD
+            accent_color=COLOR_ACCENT
         )
         self.card_mouse_api.pack(fill="x", pady=(0, 10))
         sec_hardware = self.card_mouse_api.content
@@ -2024,7 +2082,7 @@ class ViewerApp(ctk.CTk):
             "Capture Service",
             icon="📷",
             badge_text="Video",
-            accent_color=COLOR_ACCENT_CYAN
+            accent_color=COLOR_ACCENT_2
         )
         self.card_capture_service.pack(fill="x", pady=(0, 10))
         sec_capture = self.card_capture_service.content
@@ -2050,7 +2108,7 @@ class ViewerApp(ctk.CTk):
             "Interface Settings",
             icon="⚙",
             badge_text="Global",
-            accent_color=COLOR_ACCENT_VIOLET,
+            accent_color=COLOR_ACCENT_2,
             initially_open=True,
         )
         self.card_interface.pack(fill="x", pady=(0, 10))
@@ -2090,7 +2148,7 @@ class ViewerApp(ctk.CTk):
             "Mouse Lock",
             icon="🔒",
             badge_text="Axis",
-            accent_color=COLOR_ACCENT_AMBER,
+            accent_color=COLOR_WARNING,
             initially_open=False,
             tooltip_text=mouse_lock_tooltip_text,
         )
@@ -2129,7 +2187,7 @@ class ViewerApp(ctk.CTk):
             "Button Mask",
             icon="🖱",
             badge_text="Input",
-            accent_color=COLOR_ACCENT_ROSE,
+            accent_color=COLOR_DANGER,
             initially_open=False,
         )
         self.card_button_mask.pack(fill="x", pady=(0, 10))
@@ -5032,7 +5090,7 @@ class ViewerApp(ctk.CTk):
         grid_container.grid_columnconfigure(1, weight=1)
 
         # ── CARD 1: TARGETING & FOV (Col 0, Row 0) ──
-        self.card_targeting = ModernCard(grid_container, "Targeting & FOV", icon="🎯", badge_text="Core", accent_color=COLOR_ACCENT_EMERALD)
+        self.card_targeting = ModernCard(grid_container, "Targeting & FOV", icon="🎯", badge_text="Core", accent_color=COLOR_ACCENT)
         self.card_targeting.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
 
         # Operation Mode
@@ -5108,7 +5166,7 @@ class ViewerApp(ctk.CTk):
         self._add_ads_fov_controls_in_frame(self.card_targeting.content, is_sec=False)
 
         # ── CARD 2: ALGORITHM TUNING (Col 1, Row 0) ──
-        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text="v1.2 Algo", accent_color=COLOR_ACCENT_CYAN)
+        self.card_windmouse = ModernCard(grid_container, f"{current_mode} Tuning", icon="🌊", badge_text="v1.2 Algo", accent_color=COLOR_ACCENT_2)
         self.card_windmouse.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         if current_mode in ("Normal", "WindMouse"):
@@ -5199,7 +5257,7 @@ class ViewerApp(ctk.CTk):
             self._add_pid_preview_section(is_sec=False)
 
         # ── CARD 3: SPEEDS & RECOIL (Col 0, Row 1) ──
-        self.card_speeds = ModernCard(grid_container, "Speeds & Recoil", icon="⚡", badge_text="Axis Tuning", accent_color=COLOR_ACCENT_AMBER)
+        self.card_speeds = ModernCard(grid_container, "Speeds & Recoil", icon="⚡", badge_text="Axis Tuning", accent_color=COLOR_WARNING)
         self.card_speeds.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
 
         self._add_slider_in_frame(self.card_speeds.content, "X-Speed", "normal_x_speed", 0.1, 2000,
@@ -5216,7 +5274,7 @@ class ViewerApp(ctk.CTk):
             "Chống giật bay đầu khi sấy (Y-Decouple)",
             init_val=bool(getattr(config, "recoil_immunity", True)),
             command=lambda v: setattr(config, "recoil_immunity", v),
-            accent_color=COLOR_ACCENT_AMBER
+            accent_color=COLOR_WARNING
         ).pack(fill="x", pady=(4, 6))
 
         # In-game Sens & DPI
@@ -5247,7 +5305,7 @@ class ViewerApp(ctk.CTk):
         self.dpi_entry.bind("<Return>", _commit_dpi)
 
         # ── CARD 4: ANTI-TREMOR & TIMING (Col 1, Row 1) ──
-        self.card_humanization = ModernCard(grid_container, "Anti-Tremor & Timing", icon="🛡️", badge_text="Anti-Cheat Safe", accent_color=COLOR_ACCENT_VIOLET)
+        self.card_humanization = ModernCard(grid_container, "Anti-Tremor & Timing", icon="🛡️", badge_text="Anti-Cheat Safe", accent_color=COLOR_ACCENT_2)
         self.card_humanization.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         # Anti-Tremor Deadband
@@ -5270,7 +5328,7 @@ class ViewerApp(ctk.CTk):
             "Phát tiếng bíp tai nghe OBS khi bật/tắt (UDP 4455)",
             init_val=bool(getattr(config, "audio_feedback_enabled", True)),
             command=lambda v: setattr(config, "audio_feedback_enabled", v),
-            accent_color=COLOR_ACCENT_VIOLET
+            accent_color=COLOR_ACCENT_2
         ).pack(fill="x", pady=(4, 0))
 
     def _show_sec_aimbot_tab(self):
@@ -5321,7 +5379,7 @@ class ViewerApp(ctk.CTk):
         grid_container.grid_columnconfigure(1, weight=1)
 
         # ── CARD 1: TARGETING & FOV (Col 0, Row 0) ──
-        self.card_targeting_sec = ModernCard(grid_container, "Targeting & FOV", icon="🎯", badge_text="Secondary", accent_color=COLOR_ACCENT_EMERALD)
+        self.card_targeting_sec = ModernCard(grid_container, "Targeting & FOV", icon="🎯", badge_text="Secondary", accent_color=COLOR_ACCENT)
         self.card_targeting_sec.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
 
         # Operation Mode
@@ -5397,7 +5455,7 @@ class ViewerApp(ctk.CTk):
         self._add_ads_fov_controls_in_frame(self.card_targeting_sec.content, is_sec=True)
 
         # ── CARD 2: ALGORITHM TUNING (Col 1, Row 0) ──
-        self.card_windmouse_sec = ModernCard(grid_container, f"{current_mode_sec} Tuning", icon="🌊", badge_text="Secondary", accent_color=COLOR_ACCENT_CYAN)
+        self.card_windmouse_sec = ModernCard(grid_container, f"{current_mode_sec} Tuning", icon="🌊", badge_text="Secondary", accent_color=COLOR_ACCENT_2)
         self.card_windmouse_sec.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         if current_mode_sec in ("Normal", "WindMouse"):
@@ -5450,7 +5508,7 @@ class ViewerApp(ctk.CTk):
             self._add_pid_preview_section(is_sec=True)
 
         # ── CARD 3: SPEEDS & RECOIL (Col 0, Row 1) ──
-        self.card_speeds_sec = ModernCard(grid_container, "Speeds & Recoil", icon="⚡", badge_text="Secondary", accent_color=COLOR_ACCENT_AMBER)
+        self.card_speeds_sec = ModernCard(grid_container, "Speeds & Recoil", icon="⚡", badge_text="Secondary", accent_color=COLOR_WARNING)
         self.card_speeds_sec.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
 
         self._add_slider_in_frame(self.card_speeds_sec.content, "X-Speed", "normal_x_speed_sec", 0.1, 2000,
@@ -5461,7 +5519,7 @@ class ViewerApp(ctk.CTk):
                                   self._on_normal_y_speed_sec_changed)
 
         # ── CARD 4: ANTI-TREMOR & TIMING (Col 1, Row 1) ──
-        self.card_humanization_sec = ModernCard(grid_container, "Anti-Tremor & Timing", icon="🛡️", badge_text="Secondary", accent_color=COLOR_ACCENT_VIOLET)
+        self.card_humanization_sec = ModernCard(grid_container, "Anti-Tremor & Timing", icon="🛡️", badge_text="Secondary", accent_color=COLOR_ACCENT_2)
         self.card_humanization_sec.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
 
         self._add_slider_in_frame(self.card_humanization_sec.content, "Reaction Min (s)", "smooth_reaction_min_sec", 0.01, 0.3,
@@ -5856,7 +5914,7 @@ class ViewerApp(ctk.CTk):
             "Profile Management",
             icon="📁",
             badge_text="Presets",
-            accent_color=COLOR_ACCENT_EMERALD
+            accent_color=COLOR_ACCENT
         )
         self.card_profile_manager.pack(fill="x", pady=(0, 10))
 
@@ -5887,7 +5945,7 @@ class ViewerApp(ctk.CTk):
             "Activity Log",
             icon="🧾",
             badge_text="Log",
-            accent_color=COLOR_ACCENT_AMBER
+            accent_color=COLOR_WARNING
         )
         self.card_profile_activity.pack(fill="both", expand=True, pady=(0, 10))
 
@@ -5926,7 +5984,7 @@ class ViewerApp(ctk.CTk):
             "Mouse Input Telemetry",
             icon="⚡",
             badge_text="Hardware",
-            accent_color=COLOR_ACCENT_CYAN
+            accent_color=COLOR_ACCENT_2
         )
         self.card_mouse_monitor.pack(fill="x", pady=(0, 10))
 
@@ -6038,7 +6096,7 @@ class ViewerApp(ctk.CTk):
             "System Logs & Diagnostics",
             icon="📜",
             badge_text="Telemetry",
-            accent_color=COLOR_ACCENT_AMBER
+            accent_color=COLOR_WARNING
         )
         self.card_system_logs.pack(fill="both", expand=True, pady=(0, 10))
 
@@ -6205,7 +6263,7 @@ class ViewerApp(ctk.CTk):
         return cache_key, initial_open_state
 
     def _create_collapsible_card(self, parent, title, icon=None, badge_text=None,
-                                 accent_color=COLOR_ACCENT_EMERALD, initially_open=True,
+                                 accent_color=COLOR_ACCENT, initially_open=True,
                                  tooltip_text=None, state_key=None):
         """Collapsible ModernCard that persists its open state like a collapsible section.
 

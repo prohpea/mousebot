@@ -111,3 +111,6 @@ _backup_ui_*/
 # Reusable tools live in tools/; this is throwaway measurement output.
 _perf_audit/
 
+
+# Ship pipeline artifacts
+.bangiao/

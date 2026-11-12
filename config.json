@@ -92,7 +92,7 @@
     "aimbot_activation_type_sec": "hold_enable",
     "mode": "WindMouse",
     "mode_sec": "WindMouse",
-    "fovsize": 35,
+    "fovsize": 22,
     "ads_fov_enabled": true,
     "ads_fovsize": 35.0,
     "ads_key": "Right Mouse Button",
@@ -319,7 +319,8 @@
         "vision:contour_&_detection_filters": false,
         "hardware:settings": true,
         "hardware:mouse_lock": false,
-        "hardware:button_mask": false
+        "hardware:button_mask": false,
+        "hardware:interface_settings": true
     },
     "legacy_ui_mode": false,
     "ui_theme": "emerald",

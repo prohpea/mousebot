@@ -6,19 +6,41 @@ import customtkinter as ctk
 import tkinter as tk
 from src.utils.i18n import t
 
-# Theme Color Tokens
-COLOR_SURFACE_CARD = "#141822"
-COLOR_BORDER_CARD = "#232B3B"
-COLOR_HEADER_BORDER = "#1D2433"
-COLOR_ACCENT_EMERALD = "#10B981"
-COLOR_ACCENT_CYAN = "#06B6D4"
-COLOR_ACCENT_AMBER = "#F59E0B"
-COLOR_ACCENT_VIOLET = "#BD93F9"
-COLOR_ACCENT_ROSE = "#F43F5E"
-COLOR_SLATE_TEXT = "#E2E8F0"
-COLOR_SLATE_MUTED = "#94A3B8"
-COLOR_SLATE_DARK = "#64748B"
-COLOR_INPUT_BG = "#1A202C"
+# Fallback tokens used until a theme is applied. src/ui.py owns the real palette
+# and pushes it through apply_theme(); this copy only keeps widget construction
+# safe at import time (e.g. unit tests that never load a preset).
+_DEFAULT_TOKENS = {
+    "COLOR_CARD": "#141822",
+    "COLOR_CARD_BORDER": "#232B3B",
+    "COLOR_CARD_HEADER": "#1D2433",
+    "COLOR_INPUT": "#1A202C",
+    "COLOR_ACCENT": "#10B981",
+    "COLOR_ACCENT_2": "#06B6D4",
+    "COLOR_ACCENT_HOVER": "#34D399",
+    "COLOR_BADGE_BG": "#1B2231",
+    "COLOR_TEXT": "#E2E8F0",
+    "COLOR_TEXT_DIM": "#94A3B8",
+}
+
+_TOKENS = dict(_DEFAULT_TOKENS)
+
+
+def apply_theme(tokens: dict) -> None:
+    """Copy COLOR_* entries of a theme preset into the active widget palette.
+
+    Missing or malformed entries are ignored so a partial preset (or None) never
+    crashes widget construction; previously applied tokens stay in place.
+    """
+    if not isinstance(tokens, dict):
+        return
+    for key, value in tokens.items():
+        if isinstance(key, str) and key.startswith("COLOR_") and isinstance(value, str) and value:
+            _TOKENS[key] = value
+
+
+def get_token(name: str) -> str:
+    """Return the currently active value of a widget color token."""
+    return _TOKENS[name]
 
 
 class ModernCard(ctk.CTkFrame):
@@ -35,16 +57,17 @@ class ModernCard(ctk.CTkFrame):
         title: str,
         icon: str = None,
         badge_text: str = None,
-        accent_color: str = COLOR_ACCENT_EMERALD,
+        accent_color: str = None,
         collapsible: bool = False,
         initially_open: bool = True,
         on_toggle=None,
         **kwargs
     ):
+        accent_color = accent_color or _TOKENS["COLOR_ACCENT"]
         super().__init__(
             parent,
-            fg_color=COLOR_SURFACE_CARD,
-            border_color=COLOR_BORDER_CARD,
+            fg_color=_TOKENS["COLOR_CARD"],
+            border_color=_TOKENS["COLOR_CARD_BORDER"],
             border_width=1,
             corner_radius=10,
             **kwargs
@@ -88,24 +111,24 @@ class ModernCard(ctk.CTkFrame):
         if badge_text:
             self.badge_frame = ctk.CTkFrame(
                 self.header_frame,
-                fg_color="#1A2130",
+                fg_color=_TOKENS["COLOR_BADGE_BG"],
                 corner_radius=4,
                 border_width=1,
-                border_color="#283347",
+                border_color=_TOKENS["COLOR_CARD_BORDER"],
             )
             self.badge_frame.pack(side="right")
             self.badge_label = ctk.CTkLabel(
                 self.badge_frame,
                 text=str(badge_text),
                 font=("Consolas", 9),
-                text_color=COLOR_SLATE_MUTED,
+                text_color=_TOKENS["COLOR_TEXT_DIM"],
                 padx=6,
                 pady=1,
             )
             self.badge_label.pack()
 
         # Separator line
-        self.sep = ctk.CTkFrame(self, height=1, fg_color=COLOR_HEADER_BORDER)
+        self.sep = ctk.CTkFrame(self, height=1, fg_color=_TOKENS["COLOR_CARD_HEADER"])
         self.sep.pack(fill="x", padx=12, pady=(0, 8))
 
         # Inner content container
@@ -170,9 +193,10 @@ class ModernSlider(ctk.CTkFrame):
         command=None,
         is_float: bool = False,
         suffix: str = "",
-        accent_color: str = COLOR_ACCENT_EMERALD,
+        accent_color: str = None,
         **kwargs
     ):
+        accent_color = accent_color or _TOKENS["COLOR_ACCENT"]
         super().__init__(parent, fg_color="transparent", **kwargs)
         self.key = key
         self.min_val = min_val
@@ -191,7 +215,7 @@ class ModernSlider(ctk.CTkFrame):
             label_row,
             text=t(label),
             font=("Segoe UI", 10),
-            text_color=COLOR_SLATE_TEXT,
+            text_color=_TOKENS["COLOR_TEXT"],
             anchor="w",
         )
         self.label_widget.pack(side="left")
@@ -203,8 +227,8 @@ class ModernSlider(ctk.CTkFrame):
             textvariable=self.entry_var,
             width=58,
             height=22,
-            fg_color=COLOR_INPUT_BG,
-            border_color=COLOR_BORDER_CARD,
+            fg_color=_TOKENS["COLOR_INPUT"],
+            border_color=_TOKENS["COLOR_CARD_BORDER"],
             border_width=1,
             font=("Consolas", 10, "bold"),
             text_color=accent_color,
@@ -225,8 +249,8 @@ class ModernSlider(ctk.CTkFrame):
             height=14,
             progress_color=accent_color,
             button_color=accent_color,
-            button_hover_color="#34D399" if accent_color == COLOR_ACCENT_EMERALD else "#38BDF8",
-            fg_color="#1E2536",
+            button_hover_color=_TOKENS["COLOR_ACCENT_HOVER"],
+            fg_color=_TOKENS["COLOR_CARD_HEADER"],
         )
         self.slider.set(self._current_value)
         self.slider.pack(fill="x", pady=(1, 4))
@@ -289,10 +313,11 @@ class ModernSwitch(ctk.CTkFrame):
         subtitle: str = None,
         init_val: bool = False,
         command=None,
-        accent_color: str = COLOR_ACCENT_EMERALD,
+        accent_color: str = None,
         **kwargs
     ):
-        super().__init__(parent, fg_color="#181E2B", corner_radius=8, border_color=COLOR_BORDER_CARD, border_width=1, **kwargs)
+        accent_color = accent_color or _TOKENS["COLOR_ACCENT"]
+        super().__init__(parent, fg_color=_TOKENS["COLOR_CARD"], corner_radius=8, border_color=_TOKENS["COLOR_CARD_BORDER"], border_width=1, **kwargs)
         self.command = command
         self.var = tk.BooleanVar(value=bool(init_val))
 
@@ -306,7 +331,7 @@ class ModernSwitch(ctk.CTkFrame):
             text_frame,
             text=t(title),
             font=("Segoe UI", 10, "bold"),
-            text_color=COLOR_SLATE_TEXT,
+            text_color=_TOKENS["COLOR_TEXT"],
             anchor="w",
         )
         self.title_lbl.pack(fill="x")
@@ -316,7 +341,7 @@ class ModernSwitch(ctk.CTkFrame):
                 text_frame,
                 text=t(subtitle),
                 font=("Segoe UI", 8),
-                text_color=COLOR_SLATE_MUTED,
+                text_color=_TOKENS["COLOR_TEXT_DIM"],
                 anchor="w",
             )
             self.sub_lbl.pack(fill="x", pady=(1, 0))
@@ -332,7 +357,7 @@ class ModernSwitch(ctk.CTkFrame):
             switch_height=18,
             progress_color=accent_color,
             button_color="#FFFFFF",
-            fg_color="#2D3748",
+            fg_color=_TOKENS["COLOR_CARD_HEADER"],
         )
         self.switch.pack(side="right")
 
@@ -359,13 +384,14 @@ class StatusPill(ctk.CTkFrame):
         parent,
         label: str,
         value: str,
-        dot_color: str = COLOR_ACCENT_EMERALD,
+        dot_color: str = None,
         **kwargs
     ):
+        dot_color = dot_color or _TOKENS["COLOR_ACCENT"]
         super().__init__(
             parent,
-            fg_color="#171C28",
-            border_color="#252F44",
+            fg_color=_TOKENS["COLOR_CARD"],
+            border_color=_TOKENS["COLOR_CARD_BORDER"],
             border_width=1,
             corner_radius=12,
             height=22,
@@ -393,7 +419,7 @@ class StatusPill(ctk.CTkFrame):
             self.inner,
             text=display,
             font=("Consolas", 9, "bold"),
-            text_color=COLOR_SLATE_TEXT,
+            text_color=_TOKENS["COLOR_TEXT"],
         )
         self.text_label.pack(side="left")
 

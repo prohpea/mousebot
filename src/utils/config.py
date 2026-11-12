@@ -1228,7 +1228,7 @@ class Config:
             self.ui_collapsible_states = {}
         self.legacy_ui_mode = bool(getattr(self, "legacy_ui_mode", False))
         theme = str(getattr(self, "ui_theme", "nord")).strip().lower()
-        if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic"}:
+        if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic", "tactical"}:
             theme = "classic" if self.legacy_ui_mode else "nord"
         self.ui_theme = theme
 
