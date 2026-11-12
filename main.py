@@ -23,6 +23,7 @@ from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
 from src.aim_system.anti_smoke_detector import AntiSmokeDetector
 from src.aim_system.target_smoother import TargetSmoother
+from src.utils import preview_throttle
 
 class FrameInfo:
     """绨″柈鐨勫箑淇℃伅椤烇紝鐢ㄦ柤鍏煎鐝炬湁浠ｇ⒓"""
@@ -237,8 +238,12 @@ class AimTracker:
         Returns:
             tuple: (clipped_dx, clipped_dy) 闄愬埗寰岀殑绉诲嫊璺濋洟
         """
-        clipped_dx = np.clip(dx, -abs(self.max_speed), abs(self.max_speed))
-        clipped_dy = np.clip(dy, -abs(self.max_speed), abs(self.max_speed))
+        clipped_dx = -abs(self.max_speed) if dx < -abs(self.max_speed) else (
+            abs(self.max_speed) if dx > abs(self.max_speed) else dx
+        )
+        clipped_dy = -abs(self.max_speed) if dy < -abs(self.max_speed) else (
+            abs(self.max_speed) if dy > abs(self.max_speed) else dy
+        )
         return float(clipped_dx), float(clipped_dy)
 
     def _track_loop(self):
@@ -356,25 +361,15 @@ class AimTracker:
             print(f"[Button Mask Error] {e}")
 
     def _draw_fovs(self, img, frame):
-        """
-        绻＝ FOV锛堣閲庣瘎鍦嶏級鍦撳湀
-        
-        鍦ㄥ湒鍍忎笂绻＝ Aimbot 鍜?Triggerbot 鐨?FOV 绡勫湇鍦撳湀锛?        鐢ㄦ柤瑕栬鍖栭’绀虹瀯婧栧拰瑙哥櫦鍗€鍩熴€?        
-        Args:
-            img: BGR 鍦栧儚闄ｅ垪
-            frame: 瑕栭牷骞€鐗╀欢锛屽寘鍚В鏋愬害淇℃伅
-        """
+        """Draw aimbot/triggerbot FOV circles onto the preview image."""
         center_x = int(frame.xres / 2)
         center_y = int(frame.yres / 2)
         if getattr(config, "enableaim", False):
             mode_main = getattr(config, "mode", "Normal")
-            # 鍦?NCAF 涓嬩笉鐣師鏈?FOV 鍦擄紝鍙’绀?NCAF 鍗婂緫
             if mode_main != "NCAF":
                 main_fov = int(get_active_aim_fov(is_sec=False, fallback=self.fovsize))
                 cv2.circle(img, (center_x, center_y), main_fov, (255, 255, 255), 2)
-                # Correct: cercle smoothing = normalsmoothFOV
                 cv2.circle(img, (center_x, center_y), int(getattr(config, "normalsmoothfov", self.normalsmoothfov)), (51, 255, 255), 2)
-            # NCAF Radius 鍦?(Main)
             if mode_main == "NCAF":
                 snap_r = int(getattr(config, "ncaf_snap_radius", 150))
                 near_r = int(getattr(config, "ncaf_near_radius", 50))
@@ -393,7 +388,8 @@ class AimTracker:
 
         try:
             if show_ndi:
-                cv2.imshow(self.RAW_STREAM_NDI_WINDOW, raw_img)
+                if preview_throttle.render_if_due(self.RAW_STREAM_NDI_WINDOW):
+                    cv2.imshow(self.RAW_STREAM_NDI_WINDOW, raw_img)
                 self._raw_stream_window_visible[self.RAW_STREAM_NDI_WINDOW] = True
             elif self._raw_stream_window_visible.get(self.RAW_STREAM_NDI_WINDOW, False):
                 cv2.destroyWindow(self.RAW_STREAM_NDI_WINDOW)
@@ -403,7 +399,8 @@ class AimTracker:
 
         try:
             if show_udp:
-                cv2.imshow(self.RAW_STREAM_UDP_WINDOW, raw_img)
+                if preview_throttle.render_if_due(self.RAW_STREAM_UDP_WINDOW):
+                    cv2.imshow(self.RAW_STREAM_UDP_WINDOW, raw_img)
                 self._raw_stream_window_visible[self.RAW_STREAM_UDP_WINDOW] = True
             elif self._raw_stream_window_visible.get(self.RAW_STREAM_UDP_WINDOW, False):
                 cv2.destroyWindow(self.RAW_STREAM_UDP_WINDOW)
@@ -411,11 +408,8 @@ class AimTracker:
         except Exception:
             pass
 
-        if show_ndi or show_udp:
-            try:
-                cv2.waitKey(1)
-            except Exception:
-                pass
+        # The HighGUI pump happens once at the end of track_once; pumping here too
+        # would double the waitKey cost whenever a raw-stream window is open.
 
     def _close_raw_stream_windows(self):
         """Close raw-stream windows."""
@@ -487,6 +481,17 @@ class AimTracker:
 
         self._update_raw_stream_windows(raw_bgr_img)
 
+        # From here on, the raw-stream windows may already be drawn, so every
+        # exit path has to pump HighGUI or those windows freeze. try/finally
+        # covers the two early returns below without repeating the call.
+        try:
+            self._track_frame(raw_bgr_img)
+        finally:
+            # Pump HighGUI once per frame instead of once per window
+            preview_throttle.pump()
+
+    def _track_frame(self, raw_bgr_img):
+        """Body of track_once; all exits are covered by the caller's finally."""
         bgr_img = self.app.capture.apply_mode_fov(raw_bgr_img)
         if bgr_img is None:
             return
@@ -516,20 +521,24 @@ class AimTracker:
         show_detection = bool(getattr(config, "show_opencv_windows", True) and 
                               getattr(config, "show_opencv_detection", True))
 
-        # Zero-copy optimization: only clone frame if we need to draw debug overlays
-        if show_detection:
-            trigger_source_img = bgr_img.copy()
-        else:
-            trigger_source_img = bgr_img
+        # Zero-copy: bgr_img stays pristine for the whole frame. Every debug
+        # overlay (body/head boxes, FOV circles, enhanced overlay) is deferred
+        # and painted onto the display copy only, so Triggerbot can read
+        # bgr_img in place with no copy and no risk of detecting its own
+        # overlay colours (a red head marker would self-trigger a red target).
+        trigger_source_img = bgr_img
+
+        body_overlays = []
+        head_overlays = []
 
         try:
             detection_results, mask = perform_detection(self.model, bgr_img)
-            # 椤ず MASK 瑕栫獥锛堝鏋滃暉鐢級
+            # 顯示 MASK 視窗（如果啟用）
             if (getattr(config, "show_opencv_windows", True) and 
                 getattr(config, "show_opencv_mask", True) and 
                 mask is not None):
-                cv2.imshow("MASK", mask)
-                cv2.waitKey(1)
+                if preview_throttle.render_if_due("MASK"):
+                    cv2.imshow("MASK", mask)
         except Exception as e:
             print("[perform_detection error]", e)
             detection_results = []
@@ -537,8 +546,8 @@ class AimTracker:
             # 鍗充娇妾㈡脯澶辨晽锛屼篃椤ず鍘熷鍦栧儚锛堝鏋滃暉鐢級
             if show_detection:
                 try:
-                    cv2.imshow("Detection", bgr_img)
-                    cv2.waitKey(1)
+                    if preview_throttle.render_if_due("Detection"):
+                        cv2.imshow("Detection", bgr_img)
                 except:
                     pass
 
@@ -569,9 +578,9 @@ class AimTracker:
                         continue
                     x1, y1 = int(x), int(y)
                     x2, y2 = int(x + w), int(y + h)
-                    # Dessin corps (only if preview active)
+                    # Defer body overlay to the display copy (see trigger_source_img).
                     if show_detection:
-                        self._draw_body(bgr_img, x1, y1, x2, y2, conf)
+                        body_overlays.append((x1, y1, x2, y2, conf))
                     
                     # 瑷堢畻 body 鐨勪腑蹇冮粸鍜?Y 绡勫湇
                     body_cx = (x1 + x2) / 2.0
@@ -591,7 +600,7 @@ class AimTracker:
                         # Head 鎴?Nearest 妯″紡锛氫娇鐢?head 浣嶇疆
                         for head_cx, head_cy, bbox in head_positions:
                             if show_detection:
-                                self._draw_head_bbox(bgr_img, head_cx, head_cy)
+                                head_overlays.append((head_cx, head_cy))
                             d = math.hypot(head_cx - frame.xres / 2.0, head_cy - frame.yres / 2.0)
                             
                             # 瑷堢畻 head 鐨?Y 绡勫湇锛堢敤鏂?nearest 妯″紡锛?
@@ -628,13 +637,6 @@ class AimTracker:
                 targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector_sec
             )
 
-        # FOVs once per frame only if preview is enabled
-        if show_detection:
-            try:
-                self._draw_fovs(bgr_img, frame)
-            except Exception:
-                pass
-
         try:
             self._aim_and_move(
                 targets_main,
@@ -647,16 +649,27 @@ class AimTracker:
         except Exception as e:
             print("[Aim error]", e)
 
-        # 椤ず Detection 瑕栫獥锛堟牴鎿氳ō缃級
-        if show_detection:
+        # FOV circles, tracking boxes and the enhanced overlay are all painted
+        # here, on the display copy, after the aim/trigger pass has already read
+        # the clean frame. Drawing them onto bgr_img earlier forced a full-frame
+        # copy every frame just to keep Triggerbot's ROI unpolluted.
+
+        # 顯示 Detection 視窗（根據設定）
+        if show_detection and preview_throttle.render_if_due("Detection"):
             try:
-                # 鍎寲绻＝锛氭坊鍔犳洿澶氳瑕轰俊鎭?
-                display_img = self._draw_enhanced_detection(bgr_img.copy(), targets_all, frame)
+                display_img = bgr_img.copy()
+                # Same layering as the original: body/head markers, then FOV
+                # circles, then the enhanced overlay on top.
+                for bx1, by1, bx2, by2, conf in body_overlays:
+                    self._draw_body(display_img, bx1, by1, bx2, by2, conf)
+                for hx, hy in head_overlays:
+                    self._draw_head_bbox(display_img, hx, hy)
+                self._draw_fovs(display_img, frame)
+                display_img = self._draw_enhanced_detection(display_img, targets_all, frame)
                 cv2.imshow("Detection", display_img)
-                cv2.waitKey(1)
             except Exception as e:
                 print(f"[OpenCV display error] {e}")
-    
+
     def _draw_enhanced_detection(self, img, targets, frame):
         """
         绻＝澧炲挤鐨勬娓瑕哄寲

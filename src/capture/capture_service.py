@@ -1,4 +1,4 @@
-﻿from src.utils.debug_logger import log_print
+from src.utils.debug_logger import log_print
 import numpy as np
 from .ndi import NDIManager
 import cv2
@@ -614,7 +614,10 @@ class CaptureService:
                 # 鍘熷浠ｇ⒓锛歜gr_img = img[:, :, [2, 1, 0]].copy()
                 # RGBA: R=0, G=1, B=2. 
                 # [2, 1, 0] -> B, G, R
-                bgr_img = img[:, :, [2, 1, 0]]
+                # cv2.cvtColor is ~3x faster than fancy indexing and returns a
+                # contiguous array, so the caller's ascontiguousarray() copy is
+                # skipped as well.
+                bgr_img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
                 
                 # 濡傛灉鍟熺敤瑁佸垏锛屽墖鎳夌敤涓績瑁佸垏锛堟鏂瑰舰锛?
                 if apply_fov:

@@ -355,6 +355,10 @@ class Config:
         self.show_opencv_triggerbot_mask = True  # Mask 瑕栫獥锛圱riggerbot.py锛?
         self.show_ndi_raw_stream_window = False
         self.show_udp_raw_stream_window = False
+        # Redraw rate for debug preview windows. cv2.waitKey(1) costs ~12-15 ms per
+        # call, so pumping once per window per frame caps the loop far below
+        # target_fps. 30 Hz is visually indistinguishable for debug output.
+        self.opencv_preview_fps = 30
         self.show_mode_text = True
         self.show_aimbot_status = True
         self.show_triggerbot_status = True

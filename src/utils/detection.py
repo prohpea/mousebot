@@ -139,7 +139,50 @@ def _boxes_should_merge(r1, r2, dist_threshold):
     return close_h or close_v
 
 
+def _build_rect_grid(rects, cell):
+    """Bucket rect indices into a uniform grid (linear in rect count)."""
+    grid = {}
+    for idx, (x, y, w, h) in enumerate(rects):
+        x = int(x)
+        y = int(y)
+        gx0, gx1 = x // cell, (x + int(w)) // cell
+        gy0, gy1 = y // cell, (y + int(h)) // cell
+        for gx in range(gx0, gx1 + 1):
+            for gy in range(gy0, gy1 + 1):
+                grid.setdefault((gx, gy), []).append(idx)
+    return grid
+
+
+def _expand_candidates(grid, cell, nx1, ny1, nx2, ny2):
+    """Indices of rects inside the aggregate bbox grown by one cell, ascending.
+
+    _boxes_should_merge only true when the gap is <= dist_threshold on at least
+    one axis, and cell >= dist_threshold, so the grown bbox is a complete
+    superset of merge candidates.
+
+    Candidates are returned in ascending index order. Greedy merging tests
+    against the growing aggregate bbox, so its outcome depends on visit order:
+    unsorted dict-bucket order produced different clusters than the original
+    linear scan. Sorting restores exact parity with that scan.
+    """
+    gx0, gx1 = (nx1 - cell) // cell, (nx2 + cell) // cell
+    gy0, gy1 = (ny1 - cell) // cell, (ny2 + cell) // cell
+    if (gx1 - gx0 + 1) * (gy1 - gy0 + 1) > len(grid):
+        # Aggregate spans more cells than there are buckets to probe; a single
+        # set union over all rects is cheaper and still a superset.
+        return sorted({idx for bucket in grid.values() for idx in bucket})
+    found = set()
+    for gx in range(gx0, gx1 + 1):
+        for gy in range(gy0, gy1 + 1):
+            bucket = grid.get((gx, gy))
+            if bucket:
+                found.update(bucket)
+    return sorted(found)
+
+
 def merge_close_rects(rects, centers, dist_threshold=None):
+    if not rects:
+        return [], []
     if dist_threshold is None:
         dist_threshold = int(getattr(config, "detection_merge_distance", 12))
     dist_threshold = int(max(0, min(dist_threshold, 18)))
@@ -147,8 +190,10 @@ def merge_close_rects(rects, centers, dist_threshold=None):
     merged = []
     merged_centers = []
     used = [False] * len(rects)
+    cell = max(8, dist_threshold * 2 + 1)
+    grid = _build_rect_grid(rects, cell)
 
-    for i, (r1, c1) in enumerate(zip(rects, centers)):
+    for i, r1 in enumerate(rects):
         if used[i]:
             continue
 
@@ -160,9 +205,12 @@ def merge_close_rects(rects, centers, dist_threshold=None):
         while changed:
             changed = False
             current_rect = (nx1, ny1, nx2 - nx1, ny2 - ny1)
-            for j, r2 in enumerate(rects):
-                if i == j or used[j]:
+            tested = set()
+            for j in _expand_candidates(grid, cell, nx1, ny1, nx2, ny2):
+                if i == j or used[j] or j in tested:
                     continue
+                tested.add(j)
+                r2 = rects[j]
                 if _boxes_should_merge(current_rect, r2, dist_threshold):
                     x2, y2, w2, h2 = r2
                     nx1 = min(nx1, x2)
@@ -215,7 +263,9 @@ def perform_detection(model, image):
 
     hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     raw_mask = cv2.inRange(hsv_img, model[0], model[1])
-    mask = raw_mask.copy()
+    # Morphology below always returns a fresh array, so raw_mask stays intact
+    # without a defensive copy.
+    mask = raw_mask
 
     # Reference-like morphology path (close + dilate) is the default because it
     # keeps thin color edges that OPEN often removes completely.

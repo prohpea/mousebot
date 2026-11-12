@@ -30,6 +30,34 @@ _LOCK_CMD_BY_IDX = {
 
 _MOVEMENT_LOCK_TIMEOUT = 0.1
 
+# Locks live in the MAKCU firmware, so they outlive this process: if the app is
+# killed hard (taskkill / crash / power loss), the device keeps the previous
+# session's locks and the physical mouse stays dead even after a restart.
+# Clearing them on every connect makes a cold start self-healing.
+_RELEASE_ON_CONNECT = (
+    "km.lock_ml(0)",
+    "km.lock_mr(0)",
+    "km.lock_mm(0)",
+    "km.lock_ms1(0)",
+    "km.lock_ms2(0)",
+    "km.lock_mx(0)",
+    "km.lock_my(0)",
+    "km.left(0)",
+    "km.right(0)",
+    "km.middle(0)",
+)
+
+
+def _release_stale_state(ser):
+    """Drop locks/buttons left behind by a previous session. Best effort."""
+    try:
+        with state.makcu_lock:
+            for cmd in _RELEASE_ON_CONNECT:
+                ser.write(f"{cmd}\r".encode("ascii", "ignore"))
+            ser.flush()
+    except Exception as e:
+        log_print(f"[WARN] Stale mouse-state release failed: {e}")
+
 
 def find_com_ports():
     found = []
@@ -153,6 +181,8 @@ def connect(port: str = None):
                     state.makcu.write(b"km.buttons(1)\r")
                     state.makcu.flush()
 
+                _release_stale_state(state.makcu)
+
                 state.set_connected(True, "Serial")
                 _start_listener_thread()
                 log_print(f"[INFO] Connected to {dev_name} on {port_name} at {baud} baud.")
@@ -184,6 +214,11 @@ def _safe_close_port():
 
 
 def disconnect():
+    # Release device-side state while the port is still open. Closing the port
+    # does not clear the firmware's locks, so skipping this strands the
+    # physical mouse until a replug or an explicit release.
+    if state.makcu is not None:
+        _release_stale_state(state.makcu)
     state.set_connected(False, "Serial")
     _safe_close_port()
     state.listener_thread = None

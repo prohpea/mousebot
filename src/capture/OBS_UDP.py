@@ -1,5 +1,6 @@
 import cv2
 import socket
+import struct
 import threading
 import time
 import asyncio
@@ -10,6 +11,16 @@ from queue import Queue
 import logging
 
 logger = logging.getLogger(__name__)
+
+# OBS xUDP plugin fragments frames larger than 65 000 B, prefixing every
+# datagram with an 8-byte header: <IHH = total_size, frag_idx, total_frags.
+# Splicing those headers into a raw byte stream injects binary garbage into the
+# JPEG payload every MTU, which decodes as banding/garbage rather than failing
+# outright, so the damage is invisible to a "did it decode?" check.
+FRAGMENT_HEADER = struct.Struct("<IHH")
+FRAGMENT_MIN_TOTAL = 65_000     # smaller frames are sent whole, without a header
+FRAGMENT_MAX_TOTAL = 10_000_000  # sanity bound; above this it cannot be a fragment
+FRAGMENT_MAX_COUNT = 1000
 
 # Optional TurboJPEG for faster CPU JPEG decode
 _jpeg = None
@@ -42,18 +53,22 @@ class OBS_UDP_Receiver:
     Supports receiving Motion JPEG stream over UDP protocol
     """
     
-    def __init__(self, ip: str = "192.168.0.1", port: int = 1234, target_fps: int = 60, max_workers: int = None):
+    def __init__(self, ip: str = "192.168.0.1", port: int = 1234, target_fps: int = 60, max_workers: int = None,
+                 bind_ip: Optional[str] = None):
         """
         Initialize OBS UDP receiver
         
         Args:
-            ip: IP address to receive UDP stream from
+            ip: IP address to receive UDP stream from (the sender, for reference/logging)
             port: Port number to receive UDP stream on
             target_fps: Target FPS for processing (deprecated, kept for compatibility)
             max_workers: Maximum number of worker threads for frame processing (None = auto)
+            bind_ip: Local address to bind. None/"0.0.0.0" listens on every interface,
+                which is almost always what a receiver wants.
         """
         self.ip = ip
         self.port = port
+        self.bind_ip = bind_ip
         self.target_fps = target_fps  # Kept for compatibility, not used for limiting
         self.frame_interval = 1.0 / target_fps if target_fps > 0 else 0  # Not enforced
         
@@ -61,6 +76,12 @@ class OBS_UDP_Receiver:
         self.socket = None
         self.is_connected = False
         self.is_receiving = False
+        # A successful bind only proves the port was free; it says nothing about
+        # whether packets ever arrive. Track arrivals so a silent black stream can
+        # be reported instead of looking like a healthy connection.
+        self.packet_count = 0
+        self.last_packet_time = 0.0
+        self._bind_addr = None
         
         # Threading / Async
         self.receive_thread = None
@@ -109,6 +130,13 @@ class OBS_UDP_Receiver:
         self.mjpeg_start_marker = b'\xff\xd8'
         self.mjpeg_end_marker = b'\xff\xd9'
         self.max_buffer_size = 4 * 1024 * 1024  # 4MB limit
+
+        # OBS xUDP fragment reassembly state (see _try_reassemble_fragment)
+        self._frag_parts = {}
+        self._frag_total_size = 0
+        self._frag_total_count = 0
+        self._frag_started_at = 0.0
+        self._frag_bytes = 0
         
         logger.info(f"OBS_UDP_Receiver initialized: {ip}:{port}, max_workers={self.max_workers}")
     
@@ -128,6 +156,19 @@ class OBS_UDP_Receiver:
         """
         self.frame_callback_async = callback
     
+    def _reset_stream_state(self):
+        """Drop partial frames/buffers so a reconnect starts from a clean slate."""
+        with self.buffer_lock:
+            self.mjpeg_buffer.clear()
+        self._frame_start_time = None
+        self._frag_parts = {}
+        self._frag_total_size = 0
+        self._frag_total_count = 0
+        self._frag_started_at = 0.0
+        self._frag_bytes = 0
+        with self._slot_lock:
+            self._latest_jpeg_slot = None
+
     def connect(self) -> bool:
         """
         Connect to UDP stream
@@ -141,18 +182,31 @@ class OBS_UDP_Receiver:
             
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Deliberately NO SO_REUSEADDR. On Windows it lets a second process
+            # bind the same UDP port successfully while the first one keeps
+            # receiving, so a stale bot instance silently swallows the stream:
+            # the new instance reports "connected" and shows black forever.
+            # Without it, a duplicate bind fails loudly with WinError 10048.
             # Increase receive buffer size to 4MB for high FPS streams and zero packet drop
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
             self.socket.settimeout(1.0)  # 1 second timeout
-            
-            # Bind to receive UDP packets
-            self.socket.bind((self.ip, self.port))
+
+            # Bind to the wildcard address, not to self.ip. self.ip is the
+            # SENDER's address used for logging; binding the receiver to it means
+            # packets arriving on any other interface (loopback, second NIC,
+            # VPN) are dropped by the kernel before this process ever sees them.
+            # For a receiver the correct bind is INADDR_ANY on the port.
+            bind_addr = (self.bind_ip or "0.0.0.0", self.port)
+            self.socket.bind(bind_addr)
+            self._bind_addr = bind_addr
+            self.packet_count = 0
+            self.last_packet_time = 0.0
             
             self.is_connected = True
             self.stop_event.clear()
             self._frame_ready_event.clear()
-            
+            self._reset_stream_state()
+
             # Start receiving thread
             self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self.receive_thread.start()
@@ -181,6 +235,8 @@ class OBS_UDP_Receiver:
 
         def datagram_received(self, data: bytes, addr):
             receive_time = time.perf_counter()
+            self.receiver.packet_count += 1
+            self.receiver.last_packet_time = receive_time
             try:
                 self.receiver._process_mjpeg_data(data, receive_time)
             except Exception as e:
@@ -203,14 +259,21 @@ class OBS_UDP_Receiver:
         if self.is_connected:
             await self._disconnect_asyncio()
         loop = asyncio.get_running_loop()
+        # Same reasoning as the threaded connect(): a receiver binds the port on
+        # every interface, never on the sender's IP.
+        bind_addr = (self.bind_ip or "0.0.0.0", self.port)
         listen = await loop.create_datagram_endpoint(
             lambda: OBS_UDP_Receiver._UDPProtocol(self),
-            local_addr=(self.ip, self.port),
+            local_addr=bind_addr,
         )
+        self._bind_addr = bind_addr
+        self.packet_count = 0
+        self.last_packet_time = 0.0
         self._transport, self._protocol = listen
         self.is_connected = True
         self.is_receiving = True
         self.stop_event.clear()
+        self._reset_stream_state()
         
         # Start frame processing thread
         if not hasattr(self, 'processing_thread') or self.processing_thread is None or not self.processing_thread.is_alive():
@@ -340,6 +403,8 @@ class OBS_UDP_Receiver:
                 # Receive UDP packet
                 data, addr = self.socket.recvfrom(65536)  # Max UDP packet size
                 receive_time = time.perf_counter()
+                self.packet_count += 1
+                self.last_packet_time = receive_time
                 
                 # Process MJPEG data
                 self._process_mjpeg_data(data, receive_time)
@@ -397,11 +462,82 @@ class OBS_UDP_Receiver:
         """Backward-compatible alias for the decode loop"""
         return self._decode_worker_loop()
     
+    def _deliver_jpeg(self, jpeg_data: bytes, frame_start: float):
+        """Publish a complete JPEG to the single-slot decoder."""
+        if len(jpeg_data) < 100:
+            return
+        with self._slot_lock:
+            self._latest_jpeg_slot = (jpeg_data, frame_start)
+        self._frame_ready_event.set()
+
+    def _try_reassemble_fragment(self, data: bytes, receive_time: float):
+        """Strip the plugin's 8-byte fragment header and reassemble a frame.
+
+        Returns True when the datagram was consumed as a fragment (complete or
+        not), and False when it is not a fragment so the caller can treat it as
+        a raw stream.
+
+        The header must be examined BEFORE the JPEG SOI check: a valid fragment
+        whose total_size is e.g. 121087 begins FF D8 01 00, which looks like SOI.
+        A genuine single-packet JPEG always reads a huge total_size (its 4th byte
+        is a JPEG marker), so it fails the is-a-fragment test and falls through.
+        """
+        if len(data) < 8:
+            return False
+
+        total_size, frag_idx, total_frags = FRAGMENT_HEADER.unpack_from(data)
+
+        is_fragment = (
+            FRAGMENT_MIN_TOTAL < total_size <= FRAGMENT_MAX_TOTAL
+            and 1 < total_frags <= FRAGMENT_MAX_COUNT
+            and frag_idx < total_frags
+        )
+        if not is_fragment:
+            return False
+
+        payload = data[8:]
+        if not payload:
+            return True
+
+        # A frame that lost a fragment must not be spliced onto the next one:
+        # restart on size/count change or a repeated index.
+        if self._frag_parts and (
+            total_size != self._frag_total_size
+            or total_frags != self._frag_total_count
+            or frag_idx in self._frag_parts
+        ):
+            self._frag_parts = {}
+            self._frag_bytes = 0
+
+        if not self._frag_parts:
+            self._frag_total_size = total_size
+            self._frag_total_count = total_frags
+            self._frag_started_at = receive_time
+
+        self._frag_parts[frag_idx] = payload
+        self._frag_bytes += len(payload)
+
+        if len(self._frag_parts) == self._frag_total_count:
+            jpeg_data = b"".join(
+                self._frag_parts[i] for i in range(self._frag_total_count)
+            )
+            frame_start = self._frag_started_at or receive_time
+            self._frag_parts = {}
+            self._frag_bytes = 0
+            self._deliver_jpeg(jpeg_data, frame_start)
+        return True
+
     def _process_mjpeg_data(self, data: bytes, receive_time: float):
         """
         Process incoming MJPEG data with in-place bytearray searching and automatic stale frame dropping.
+
+        Called from a single thread (the receive thread, or the asyncio loop), so
+        the fragment assembly state below needs no extra lock.
         """
         try:
+            if self._try_reassemble_fragment(data, receive_time):
+                return
+
             with self.buffer_lock:
                 self.mjpeg_buffer.extend(data)
                 
@@ -447,15 +583,15 @@ class OBS_UDP_Receiver:
                         if next_end != -1:
                             continue
                     
-                    with self._slot_lock:
-                        self._latest_jpeg_slot = (jpeg_data, frame_start)
-                    self._frame_ready_event.set()
+                    self._deliver_jpeg(jpeg_data, frame_start)
                     break
         except Exception as e:
             logger.error(f"Error processing MJPEG data: {e}", exc_info=True)
             with self.buffer_lock:
                 self.mjpeg_buffer.clear()
                 self._frame_start_time = None
+            self._frag_parts = {}
+            self._frag_bytes = 0
     
     def _decode_jpeg_frame_raw(self, jpeg_data: bytes) -> Optional[np.ndarray]:
         """Decode JPEG with TurboJPEG or OpenCV fallback"""
@@ -596,6 +732,12 @@ class OBS_UDP_Receiver:
             'processing_delay_ms': processing_delay,
             'is_connected': self.is_connected,
             'is_receiving': self.is_receiving,
+            'packet_count': self.packet_count,
+            'last_packet_age_s': (
+                round(time.perf_counter() - self.last_packet_time, 3)
+                if self.last_packet_time else None
+            ),
+            'bind_addr': self._bind_addr,
             'buffer_size_bytes': buffer_size,
             'queue_size': 0,
             'max_workers': self.max_workers

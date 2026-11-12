@@ -6,6 +6,13 @@ import customtkinter as ctk
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+# Fence real game hardware and the user's real config.json before building the app.
+from ui_test_support import fence_game_hardware
+
+fence_game_hardware()
 
 from src.ui import ViewerApp
 

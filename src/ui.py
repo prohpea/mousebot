@@ -19,7 +19,7 @@ from functools import partial
 from src.utils.config import config
 from src.capture.capture_service import CaptureService
 from src.utils.mouse_input import MouseInputMonitor
-from src.utils.debug_logger import get_recent_logs, clear_logs, get_log_count, log_print
+from src.utils.debug_logger import get_recent_logs, clear_logs, get_log_count, get_log_version, log_print
 from src.utils.mouse.keycodes import to_vk_code
 from src.utils.updater import get_update_checker
 from src.ui_hsv_preview import HsvPreviewWindow
@@ -1093,8 +1093,16 @@ class ViewerApp(ctk.CTk):
 
     def _apply_runtime_settings_lock(self):
         enabled = not self._runtime_settings_locked()
-        for attr in ("mouse_hardware_frame", "keyboard_hardware_frame", "capture_settings_frame"):
-            self._set_widget_tree_enabled(getattr(self, attr, None), enabled)
+        attrs = ("mouse_hardware_frame", "keyboard_hardware_frame", "capture_settings_frame")
+        frames = [getattr(self, attr, None) for attr in attrs]
+        # This runs from the 500ms status loop; walking and re-configuring every
+        # widget in three subtrees is pure overhead when nothing changed. Frames
+        # are rebuilt (new id) whenever a tab is recreated, which busts the cache.
+        signature = (enabled, tuple(id(frame) for frame in frames))
+        if signature == getattr(self, "_runtime_lock_signature", None):
+            return
+        for frame in frames:
+            self._set_widget_tree_enabled(frame, enabled)
         if enabled:
             try:
                 if hasattr(self, "keyboard_api_option") and self.keyboard_api_option.winfo_exists():
@@ -1102,6 +1110,7 @@ class ViewerApp(ctk.CTk):
                     self.keyboard_api_option.configure(state="normal" if keyboard_enabled else "disabled")
             except Exception:
                 pass
+        self._runtime_lock_signature = signature
 
     def _restore_locked_mouse_api_option(self):
         if not hasattr(self, "mouse_api_option"):
@@ -1589,6 +1598,11 @@ class ViewerApp(ctk.CTk):
         # Clear widget maps to avoid stale destroyed references during config apply.
         self._option_widgets = {}
         self._slider_widgets = {}
+        # Force the next lock pass to walk the freshly built widgets.
+        self._runtime_lock_signature = None
+        # Drop the stale Debug-log textbox reference; the widget is gone.
+        self._debug_log_box = None
+        self._mouse_debug_last_shown = {}
         if hasattr(self, "_range_slider_widgets"):
             self._range_slider_widgets = {}
         self._pid_preview_canvas_main = None
@@ -5929,6 +5943,9 @@ class ViewerApp(ctk.CTk):
         self.debug_mouse_frame.pack(fill="x", pady=10)
 
         self.debug_button_widgets = {}
+        # Last rendered (color, count-text) per button, so the 50ms loop only
+        # touches widgets whose visible state actually changed.
+        self._mouse_debug_last_shown = {}
         button_names = {
             0: "Left Button",
             1: "Right Button",
@@ -8753,11 +8770,70 @@ class ViewerApp(ctk.CTk):
             success, error = self.capture.connect_udp(ip, port)
             if success:
                 self._set_status_indicator("Status: UDP connected", COLOR_TEXT)
-                # 閫ｆ帴鎴愬姛寰岋紝鍢楄│鐛插彇鐣潰灏哄涓︽洿鏂版粦姊濇渶澶у€?
-                self.after(500, self._update_udp_fov_sliders_after_connect)  # 寤堕伈涓€榛炰互纰轰繚鐣潰宸叉簴鍌欏ソ
+                # A successful bind only means the port was free. If no datagram
+                # ever arrives the preview stays black while the UI claims it is
+                # connected, so check for real traffic shortly after connecting.
+                self._udp_packet_baseline = self._udp_packet_count()
+                self.after(1500, self._verify_udp_traffic)
+                self.after(500, self._update_udp_fov_sliders_after_connect)
             else:
                 self._set_status_indicator(f"Status: UDP connect failed: {error}", COLOR_DANGER)
                 log_print(f"[UI] UDP connection failed: {error}")
+
+    def _udp_packet_count(self):
+        """Datagrams received so far, or 0 when the receiver is unavailable."""
+        try:
+            receiver = self.capture.udp_manager.get_receiver() if self.capture.udp_manager else None
+            return int(getattr(receiver, "packet_count", 0)) if receiver else 0
+        except Exception:
+            return 0
+
+    def _udp_stream_starved(self):
+        """True when UDP is connected but no datagram is arriving.
+
+        A successful bind proves only that the port was free. Without this check
+        the UI keeps reporting a healthy connection while the preview stays black
+        and the FPS readout never leaves its initial value.
+        """
+        try:
+            if self.capture.mode != "UDP" or not self.capture.is_connected():
+                return False
+            receiver = self.capture.udp_manager.get_receiver() if self.capture.udp_manager else None
+            if receiver is None:
+                return False
+            if int(getattr(receiver, "packet_count", 0)) <= 0:
+                return True
+            age = receiver.get_performance_stats().get("last_packet_age_s")
+            return age is not None and float(age) > 2.0
+        except Exception:
+            return False
+
+    def _verify_udp_traffic(self):
+        """Report the black-screen case: bound and 'connected', but no packets.
+
+        This is the failure the plugin guide warns about. It is invisible in the
+        old UI because is_connected() only reflects a successful bind.
+        """
+        try:
+            if self.capture.mode != "UDP" or not self.capture.is_connected():
+                return
+            now_count = self._udp_packet_count()
+            if now_count > getattr(self, "_udp_packet_baseline", 0):
+                log_print(f"[UI] UDP stream active ({now_count} packets received)")
+                return
+            port = str(getattr(config, "udp_port", "")).strip()
+            msg = (
+                f"UDP port {port} bound but no packets received. "
+                f"Check that OBS is streaming to this PC on UDP {port}, "
+                f"that the Windows firewall allows inbound UDP {port}, "
+                f"and that no other instance of this app is already listening."
+            )
+            self._set_status_indicator("Status: UDP bound, no data", COLOR_DANGER)
+            log_print(f"[UI] {msg}")
+            if hasattr(self, "pill_fps") and self.pill_fps.winfo_exists():
+                self.pill_fps.update_value("0 FPS (no data)", dot_color="#EF4444")
+        except Exception as e:
+            log_print(f"[UI] UDP traffic check error: {e}")
     
     def _update_udp_fov_sliders_after_connect(self):
         """閫ｆ帴鎴愬姛寰屾洿鏂?UDP FOV 婊戞鐨勬渶澶у€?"""
@@ -9329,7 +9405,11 @@ class ViewerApp(ctk.CTk):
             if hasattr(self, "pill_hardware") and self.pill_hardware.winfo_exists():
                 hw_name = getattr(config, "mouse_api", "Serial")
                 self.pill_hardware.update_value(f"{hw_name}", dot_color="#10B981" if hw_ok else "#F43F5E")
-            if getattr(self, "_runtime_active", False):
+            starved = self._udp_stream_starved()
+            if starved:
+                port = str(getattr(config, "udp_port", "")).strip()
+                self._set_status_indicator(f"Status: UDP bound, no data on port {port}", COLOR_DANGER)
+            elif getattr(self, "_runtime_active", False):
                 if hw_ok and is_conn:
                     self._set_status_indicator(t("Status: Running ({mode})", mode=current_mode), COLOR_SUCCESS)
                 elif hw_ok:
@@ -9354,9 +9434,14 @@ class ViewerApp(ctk.CTk):
                 receiver = self.capture.udp_manager.get_receiver()
                 if receiver:
                     stats = receiver.get_performance_stats()
-                    
+
                     # 鏇存柊 FPS
                     current_fps = stats.get('current_fps', 0)
+                    # current_fps is only recomputed when a packet arrives, so a
+                    # stalled stream would keep showing the last healthy value
+                    # forever. Report the stall instead of a stale number.
+                    if self._udp_stream_starved():
+                        current_fps = 0.0
                     self.fps_label.configure(text=f"FPS: {current_fps:.1f}")
                     
                     # 鏇存柊瑙ｇ⒓寤堕伈
@@ -9451,6 +9536,49 @@ class ViewerApp(ctk.CTk):
                 pass
         self._settings_window = SettingsWindow(self)
     
+    # Periodic jobs that reschedule themselves forever. Cancelling them on close
+    # matters: destroy() with a job still queued makes Tk run a callback whose
+    # Python command is gone ('invalid command name "..._update_debug_log"').
+    _PERIODIC_JOBS = (
+        "_process_source_updates",
+        "_update_connection_status_loop",
+        "_load_initial_config",
+        "_maybe_auto_start_runtime",
+        "_poll_clipboard_config_import",
+        "_update_performance_stats",
+        "_update_mouse_input_debug",
+        "_update_debug_log",
+        # One-shot timers the app arms itself; they fire late enough to outlive
+        # a quick teardown in tests.
+        "_ensure_taskbar_icon",
+        "_maybe_prompt_clipboard_config_import",
+    )
+
+    def destroy(self):
+        """Cancel our own pending timers, then tear the window down.
+
+        Only jobs scheduled by these loops are cancelled. Cancelling every entry
+        in `after info` also drops the callbacks CTk registers for its widgets,
+        which then makes the teardown raise "can't delete Tcl command".
+        """
+        self._closing = True
+        try:
+            for job_id in self.tk.splitlist(self.tk.call("after", "info")):
+                try:
+                    script = self.tk.call("after", "info", job_id)
+                except Exception:
+                    continue
+                if isinstance(script, (list, tuple)):
+                    script = " ".join(str(part) for part in script)
+                if any(name in str(script) for name in self._PERIODIC_JOBS):
+                    try:
+                        self.after_cancel(job_id)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        super().destroy()
+
     def _on_close(self):
         self._closing = True
         # 淇濆瓨鐣跺墠閰嶇疆
@@ -9470,7 +9598,17 @@ class ViewerApp(ctk.CTk):
             self.capture.cleanup()
         except Exception as e:
             log_print(f"[UI] Capture cleanup error: {e}")
-        
+
+        # Release mouse state BEFORE the window dies. Button-mask locks and held
+        # buttons live in the MAKCU firmware, not in this process, so if we exit
+        # without clearing them the physical mouse stays dead (and a reconnect
+        # cannot fix it either - only an explicit release or a replug can).
+        try:
+            from src.utils import mouse as mouse_backend
+            mouse_backend.Mouse.cleanup()
+        except Exception as e:
+            log_print(f"[UI] Mouse cleanup error: {e}")
+
         # 閵锋瘈绐楀彛
         self.destroy()
         
@@ -10318,17 +10456,22 @@ class ViewerApp(ctk.CTk):
                     self.mouse_input_monitor.update()
                     
                     # Update UI display
+                    # update() already polled each button once; read that cached
+                    # snapshot instead of re-polling the device per widget.
+                    cached_states = getattr(self.mouse_input_monitor, "last_button_states", {})
+                    last_shown = self._mouse_debug_last_shown
                     for idx, widgets in self.debug_button_widgets.items():
                         try:
-                            state = self.mouse_input_monitor.get_button_state(idx)
+                            state = bool(cached_states.get(idx, False))
                             count = self.mouse_input_monitor.get_button_count(idx)
-                            
+
                             # Update status indicator color (green=pressed, red=not pressed)
                             color = "#4CAF50" if state else "#CF6679"  # Green or red
-                            widgets["state_indicator"].configure(text_color=color)
-                            
-                            # Update count
-                            widgets["count_label"].configure(text=f"Count: {count}")
+                            count_text = f"Count: {count}"
+                            if last_shown.get(idx) != (color, count_text):
+                                widgets["state_indicator"].configure(text_color=color)
+                                widgets["count_label"].configure(text=count_text)
+                                last_shown[idx] = (color, count_text)
                         except Exception:
                             # Widget might be destroyed, skip this update
                             pass
@@ -10362,56 +10505,65 @@ class ViewerApp(ctk.CTk):
     def _update_debug_log(self):
         """瀹氭湡鏇存柊 Debug 鏃ヨ獙椤ず"""
         try:
-            if hasattr(self, 'debug_log_textbox'):
-                try:
-                    # Get recent logs (up to 500)
+            box = getattr(self, 'debug_log_textbox', None)
+            if box is not None and box.winfo_exists() and box.winfo_ismapped():
+                # Rebuild only when the log buffer actually changed, or when the
+                # tab was recreated (new widget). Formatting 500 entries on a
+                # timer cost ~5ms per tick even with a static log.
+                version = get_log_version()
+                dirty = (
+                    version != getattr(self, "_debug_log_version_seen", -1)
+                    or getattr(self, "_debug_log_box", None) is not box
+                )
+                if dirty:
                     logs = get_recent_logs(500)
-                    log_count = get_log_count()
-                    
-                    # Update log count
+
                     if hasattr(self, 'debug_log_count_label'):
                         try:
-                            self.debug_log_count_label.configure(text=f"Log Count: {log_count}")
+                            self.debug_log_count_label.configure(
+                                text=f"Log Count: {get_log_count()}"
+                            )
                         except Exception:
                             pass
-                    
-                    # Format log text
+
                     import datetime
-                    log_text = ""
+                    parts = []
                     for log in logs:
-                        timestamp = datetime.datetime.fromtimestamp(log["timestamp"]).strftime("%H:%M:%S.%f")[:-3]
+                        timestamp = datetime.datetime.fromtimestamp(
+                            log["timestamp"]
+                        ).strftime("%H:%M:%S.%f")[:-3]
                         log_type = log["type"]
                         source = log.get("source", "Unknown")
-                        
+
                         if log_type == "MOVE":
                             dx = log.get("dx", 0)
                             dy = log.get("dy", 0)
-                            log_text += f"[{timestamp}] {log_type:8s} [{source:15s}] dx={dx:8.2f}, dy={dy:8.2f}\n"
+                            parts.append(
+                                f"[{timestamp}] {log_type:8s} [{source:15s}] "
+                                f"dx={dx:8.2f}, dy={dy:8.2f}\n"
+                            )
                         else:
                             message = str(log.get("message", ""))
                             if message:
-                                log_text += f"[{timestamp}] {log_type:8s} [{source:15s}] {message}\n"
+                                parts.append(f"[{timestamp}] {log_type:8s} [{source:15s}] {message}\n")
                             else:
-                                log_text += f"[{timestamp}] {log_type:8s} [{source:15s}]\n"
-                    
-                    # Update text box (only when content changes to avoid frequent refresh)
+                                parts.append(f"[{timestamp}] {log_type:8s} [{source:15s}]\n")
+                    log_text = "".join(parts)
+
                     try:
-                        current_text = self.debug_log_textbox.get("1.0", "end-1c")
-                        if current_text != log_text:
-                            self.debug_log_textbox.delete("1.0", "end")
-                            self.debug_log_textbox.insert("1.0", log_text)
-                            # Auto scroll to bottom
-                            self.debug_log_textbox.see("end")
+                        box.delete("1.0", "end")
+                        box.insert("1.0", log_text)
+                        box.see("end")
                     except Exception:
                         # Widget might be destroyed
                         pass
-                except Exception as e:
-                    # Ignore errors during tab switch
-                    pass
+
+                    self._debug_log_version_seen = version
+                    self._debug_log_box = box
         except Exception:
             # Tab might have been switched
             pass
-        
+
         # Continue periodic update (every 100ms)
         self.after(100, self._update_debug_log)
     

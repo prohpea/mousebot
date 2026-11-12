@@ -30,6 +30,9 @@ _LEVEL_ORDER = {
 
 _log_buffer = deque(maxlen=5000)
 _log_lock = Lock()
+# Bumped on every mutation so consumers (Debug tab) can skip rebuilding text
+# when nothing changed instead of re-formatting 500 entries on a timer.
+_log_version = 0
 
 _console_enabled = True
 _console_level = LOG_TYPE_INFO
@@ -55,8 +58,10 @@ def _should_echo(level: str) -> bool:
 
 
 def _append_entry(entry: dict):
+    global _log_version
     with _log_lock:
         _log_buffer.append(entry)
+        _log_version += 1
 
 
 def _format_console_line(entry: dict) -> str:
@@ -223,10 +228,18 @@ def get_recent_logs(count: int = 100) -> list:
 
 
 def clear_logs():
+    global _log_version
     with _log_lock:
         _log_buffer.clear()
+        _log_version += 1
 
 
 def get_log_count() -> int:
     with _log_lock:
         return len(_log_buffer)
+
+
+def get_log_version() -> int:
+    """Monotonic counter of log buffer mutations (for change detection)."""
+    with _log_lock:
+        return _log_version

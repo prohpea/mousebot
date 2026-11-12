@@ -13,6 +13,7 @@ except Exception:
 from src.utils.config import config
 from src.utils.debug_logger import log_print
 from src.utils.activation import get_active_trigger_fov, is_binding_pressed
+from src.utils import preview_throttle
 from .trigger_strafe_helper import apply_manual_wait_gate, reset_strafe_runtime_state, run_with_auto_strafe
 
 
@@ -362,19 +363,18 @@ def process_triggerbot(
         show_windows = bool(getattr(config, "show_opencv_windows", True))
         show_roi = bool(getattr(config, "show_opencv_roi", True))
         show_mask = bool(getattr(config, "show_opencv_triggerbot_mask", True))
-        shown_any = False
+        # Preview windows are throttled: waitKey is pumped once per frame by the
+        # caller (main.track_once), not per window.
         if show_windows and show_roi:
-            cv2.imshow("ROI", roi)
-            shown_any = True
+            if preview_throttle.render_if_due("ROI"):
+                cv2.imshow("ROI", roi)
         else:
             _safe_destroy_window("ROI")
         if show_windows and show_mask:
-            cv2.imshow("Mask", mask)
-            shown_any = True
+            if preview_throttle.render_if_due("Mask"):
+                cv2.imshow("Mask", mask)
         else:
             _safe_destroy_window("Mask")
-        if shown_any:
-            cv2.waitKey(1)
 
         now = time.time()
 

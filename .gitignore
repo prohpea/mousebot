@@ -107,3 +107,7 @@ src/utils/mouse/API/Net/
 # Local UI backup snapshots (git history is the backup now)
 _backup_ui_*/
 
+# Local profiling/repro scratch (benchmarks, repro scripts, captured output).
+# Reusable tools live in tools/; this is throwaway measurement output.
+_perf_audit/
+

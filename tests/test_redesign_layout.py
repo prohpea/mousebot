@@ -13,6 +13,13 @@ from unittest.mock import MagicMock
 import customtkinter as ctk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+# Fence real game hardware and the user's real config.json before building the app.
+from ui_test_support import fence_game_hardware
+
+fence_game_hardware()
 
 from src.ui import ViewerApp
 
@@ -81,18 +88,22 @@ class TestRedesignLayout(unittest.TestCase):
 
     def test_vision_columns_split_evenly(self):
         """Vision is two columns; the split must be even and collapse when HSV hides."""
-        self.app._show_vision_tab()
-        self.app.update_idletasks()
-
-        host = self.app._vision_cols
-        left = host.grid_slaves(row=0, column=0)[0]
-        right = host.grid_slaves(row=0, column=1)[0]
-        self.assertAlmostEqual(left.winfo_width(), right.winfo_width(), delta=2)
-
-        # Hiding the HSV card must release the right column's width.
         from src.utils.config import config
         original = getattr(config, "color", "yellow")
         try:
+            # The right column is collapsed whenever the HSV card is hidden, so the
+            # two-column split only exists when a custom colour is selected. Pinning
+            # the colour also keeps the assertion independent of config.json.
+            config.color = "custom"
+            self.app._show_vision_tab()
+            self.app.update_idletasks()
+
+            host = self.app._vision_cols
+            left = host.grid_slaves(row=0, column=0)[0]
+            right = host.grid_slaves(row=0, column=1)[0]
+            self.assertAlmostEqual(left.winfo_width(), right.winfo_width(), delta=2)
+
+            # Hiding the HSV card must release the right column's width.
             config.color = "yellow"
             self.app._update_custom_hsv_visibility()
             self.app.update_idletasks()
