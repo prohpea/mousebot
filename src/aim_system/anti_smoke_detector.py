@@ -159,7 +159,117 @@ class AntiSmokeDetector:
         
         return True
 
-    def is_bbox_plausible(self, bbox, mask, frame_shape):
+    def compute_bbox_features(self, bbox, mask, frame_shape, roi=None):
+        """Compute the numeric bbox/contour features used by ``is_bbox_plausible``.
+
+        Split out so one frame with N targets can analyse each contour once and
+        share the numbers with both the main and the secondary detector. The
+        returned dict holds plain numbers (no contour references), so it stays
+        valid after the mask is released.
+
+        ``roi`` maps the analysed mask window back into frame coordinates: a
+        mask produced by ``detection.analyze(..., roi=...)`` is offset, so bboxes
+        and shapes are expressed in frame space and then translated before the
+        mask is sliced.
+
+        Returns None when the bbox is not analysable at all (missing mask,
+        degenerate size, empty region) — callers treat that as "not plausible".
+
+        Note: ``component_count`` depends on ``bbox_min_contour_area``, i.e. on
+        the *instance* that computed the features. Two detectors with different
+        ``bbox_min_contour_area`` must not share one feature dict; they are
+        constructed with the same defaults and main.py never diverges them, so
+        sharing is safe there.
+        """
+        if bbox is None or mask is None or frame_shape is None:
+            return None
+        if len(bbox) < 4:
+            return None
+
+        frame_h = int(frame_shape[0]) if len(frame_shape) >= 1 else 0
+        frame_w = int(frame_shape[1]) if len(frame_shape) >= 2 else 0
+        if frame_h <= 0 or frame_w <= 0:
+            return None
+
+        x, y, w, h = [int(v) for v in bbox[:4]]
+        if w <= 0 or h <= 0:
+            return {"degenerate": True}
+
+        x1 = max(0, min(x, frame_w - 1))
+        y1 = max(0, min(y, frame_h - 1))
+        x2 = max(x1 + 1, min(x + w, frame_w))
+        y2 = max(y1 + 1, min(y + h, frame_h))
+        bw = x2 - x1
+        bh = y2 - y1
+        bbox_area = float(max(1, bw * bh))
+
+        # Translate the frame-space slice into mask-space coordinates. The mask
+        # produced by detection.analyze() only covers [roi], so both ends are
+        # clamped into it instead of relying on Python's negative indexing.
+        mx1, my1 = x1, y1
+        if roi is not None:
+            try:
+                rx0, ry0 = int(roi[0]), int(roi[1])
+            except Exception:
+                rx0, ry0 = 0, 0
+            mx1 -= rx0
+            my1 -= ry0
+        mask_h, mask_w = mask.shape[:2]
+        mx1 = max(0, min(mx1, max(0, mask_w - 1)))
+        my1 = max(0, min(my1, max(0, mask_h - 1)))
+        mx2 = min(mx1 + bw, mask_w)
+        my2 = min(my1 + bh, mask_h)
+
+        region = mask[my1:my2, mx1:mx2]
+        if region is None or region.size == 0:
+            return {"empty": True}
+
+        if len(region.shape) == 3:
+            region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        if region.dtype != np.uint8:
+            region = region.astype(np.uint8)
+        if cv2.countNonZero(region) <= 0:
+            return {"empty": True}
+
+        roi_bin = np.ascontiguousarray((region > 0).astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return {"empty": True}
+
+        valid_contours = []
+        for contour in contours:
+            contour_area = float(cv2.contourArea(contour))
+            if contour_area >= float(self.bbox_min_contour_area):
+                valid_contours.append((contour, contour_area))
+
+        if not valid_contours:
+            return {"no_contour": True}
+
+        component_count = len(valid_contours)
+        largest_contour, contour_area = max(valid_contours, key=lambda item: item[1])
+        fill_ratio = contour_area / bbox_area
+
+        _, _, lw, lh = cv2.boundingRect(largest_contour)
+        if lh <= 0:
+            # Same outcome as the original inline check: an unusable contour.
+            return {"no_contour": True}
+        aspect_ratio = float(lw) / float(lh)
+
+        hull = cv2.convexHull(largest_contour)
+        hull_area = float(cv2.contourArea(hull))
+        solidity = contour_area / hull_area if hull_area > 0.0 else 0.0
+
+        return {
+            "bbox_area": bbox_area,
+            "component_count": component_count,
+            "contour_area": contour_area,
+            "fill_ratio": fill_ratio,
+            "aspect_ratio": aspect_ratio,
+            "solidity": solidity,
+            "bbox_area_ratio": bbox_area / float(max(1, frame_h * frame_w)),
+        }
+
+    def is_bbox_plausible(self, bbox, mask, frame_shape, features=None, roi=None):
         """
         Lightweight anti-smoke check directly on bbox + mask contour features.
 
@@ -167,6 +277,10 @@ class AntiSmokeDetector:
             bbox: Tuple/list (x, y, w, h)
             mask: Binary mask (single-channel uint8 preferred)
             frame_shape: Image shape tuple (h, w[, c])
+            features: Result of ``compute_bbox_features`` for this bbox, when the
+                caller already paid for it. Passing it skips the contour analysis
+                so both detectors can share one pass per frame.
+            roi: ROI the mask was produced from, if it is not full-frame.
 
         Returns:
             bool: True if bbox is likely a real target, False if likely smoke/noise.
@@ -191,54 +305,27 @@ class AntiSmokeDetector:
         y1 = max(0, min(y, frame_h - 1))
         x2 = max(x1 + 1, min(x + w, frame_w))
         y2 = max(y1 + 1, min(y + h, frame_h))
-        bw = x2 - x1
-        bh = y2 - y1
-        bbox_area = float(max(1, bw * bh))
+        bbox_area = float(max(1, (x2 - x1) * (y2 - y1)))
         if bbox_area < float(self.bbox_min_area):
             return False
 
-        roi = mask[y1:y2, x1:x2]
-        if roi is None or roi.size == 0:
+        feats = features
+        if feats is None:
+            feats = self.compute_bbox_features(bbox, mask, frame_shape, roi=roi)
+
+        if not feats:
+            return False
+        if feats.get("degenerate") or feats.get("empty") or feats.get("no_contour"):
             return False
 
-        if len(roi.shape) == 3:
-            roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        if roi.dtype != np.uint8:
-            roi = roi.astype(np.uint8)
-        if cv2.countNonZero(roi) <= 0:
-            return False
-
-        roi_bin = np.ascontiguousarray((roi > 0).astype(np.uint8) * 255)
-        contours, _ = cv2.findContours(roi_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return False
-
-        valid_contours = []
-        for contour in contours:
-            contour_area = float(cv2.contourArea(contour))
-            if contour_area >= float(self.bbox_min_contour_area):
-                valid_contours.append((contour, contour_area))
-
-        if not valid_contours:
-            return False
-
-        component_count = len(valid_contours)
-        largest_contour, contour_area = max(valid_contours, key=lambda item: item[1])
-        fill_ratio = contour_area / bbox_area
+        component_count = int(feats["component_count"])
+        fill_ratio = float(feats["fill_ratio"])
         if fill_ratio < float(self.bbox_min_fill_ratio):
             return False
 
-        _, _, lw, lh = cv2.boundingRect(largest_contour)
-        if lh <= 0:
-            return False
-        aspect_ratio = float(lw) / float(lh)
-
-        hull = cv2.convexHull(largest_contour)
-        hull_area = float(cv2.contourArea(hull))
-        solidity = contour_area / hull_area if hull_area > 0.0 else 0.0
-
-        frame_area = float(max(1, frame_h * frame_w))
-        bbox_area_ratio = bbox_area / frame_area
+        aspect_ratio = float(feats["aspect_ratio"])
+        solidity = float(feats["solidity"])
+        bbox_area_ratio = float(feats["bbox_area_ratio"])
 
         if aspect_ratio >= float(self.bbox_wide_aspect_ratio) and fill_ratio >= 0.16:
             return False

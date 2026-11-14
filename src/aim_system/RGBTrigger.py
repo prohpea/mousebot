@@ -244,22 +244,22 @@ def process_rgb_triggerbot(frame, img, controller, state_dict, close_debug_windo
         show_windows = bool(getattr(config, "show_opencv_windows", True))
         show_roi = bool(getattr(config, "show_opencv_roi", True))
         show_mask = bool(getattr(config, "show_opencv_triggerbot_mask", True))
-        # Preview windows are throttled: waitKey is pumped once per frame by the
-        # caller (main.track_once), not per window.
+        # Preview windows are throttled and painted by the preview render
+        # worker; submitting an image here never blocks the tracking thread.
         if show_windows and show_roi:
             if preview_throttle.render_if_due("ROI"):
-                cv2.imshow("ROI", roi)
+                preview_throttle.imshow("ROI", roi)
         else:
             try:
-                cv2.destroyWindow("ROI")
+                preview_throttle.destroy("ROI")
             except Exception:
                 pass
         if show_windows and show_mask:
             if preview_throttle.render_if_due("Mask"):
-                cv2.imshow("Mask", mask)
+                preview_throttle.imshow("Mask", mask)
         else:
             try:
-                cv2.destroyWindow("Mask")
+                preview_throttle.destroy("Mask")
             except Exception:
                 pass
 

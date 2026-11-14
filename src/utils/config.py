@@ -292,6 +292,31 @@ class Config:
         self.wm_min_delay = 0.001
         self.wm_max_delay = 0.003
         self.wm_distance_threshold = 50.0  # 璺濋洟闁惧€硷紝浣庢柤姝ゅ€兼檪绉诲嫊鏇寸簿纰?
+
+        # --- WindMouse shaping / per-frame budget (pixels unless noted) ---
+        # Geometry thresholds are PIXELS; windmouse_smooth converts to counts.
+        self.smooth_reaction_min = 0.08
+        self.smooth_reaction_max = 0.20
+        self.smooth_close_range = 30.0
+        self.smooth_close_speed = 0.15
+        self.smooth_far_range = 200.0
+        self.smooth_far_speed = 0.35
+        self.smooth_max_step_ratio = 0.08
+        self.smooth_target_area_ratio = 0.05
+        self.smooth_acceleration = 0.50
+        self.smooth_deceleration = 0.40
+        # Sec aimbot reaction window, tuned independently (the Sec sliders in
+        # src/ui.py write these names; without the attributes the values were
+        # dropped by `from_dict`'s `hasattr` guard and WindMouse read the main
+        # aimbot's window for both).
+        self.smooth_reaction_min_sec = 0.08
+        self.smooth_reaction_max_sec = 0.20
+
+        # --- WindMouse emission budget ---
+        self.wm_frame_gain = 0.50  # share of remaining error spent per frame (< 1)
+        self.wm_frame_max_step_px = 8.0  # hard per-frame cap in pixels
+        self.wm_settle_radius_px = 2.2  # no-command radius once on target
+        self.wm_deadzone_px = 0.40  # lower bound for the WindMouse stop radius
         
         # --- WindMouse Parameters (Sec) ---
         self.wm_gravity_sec = 9.0
@@ -422,6 +447,18 @@ class Config:
         
         # --- Processing FPS Limit ---
         self.target_fps = 200  # Target processing FPS (limits main loop frequency)
+
+        # --- Latency / hot-path tuning (all opt-in, defaults keep old behaviour) ---
+        self.detection_roi_enabled = False        # crop detection to the aim/trigger FOV union
+        self.detection_roi_padding = 64           # px added on each side of that union
+        self.detection_roi_max_fraction = 0.70    # ROI >= this fraction of frame -> full frame
+        self.detection_return_raw_mask = True     # expose raw_mask for the trigger hot path
+        self.receiver_rcvbuf_mb = 8               # SO_RCVBUF requested by the UDP receiver
+        self.receiver_high_priority = False       # HIGHEST thread priority for recv/decode
+        self.receiver_fragment_timeout_ms = 8.0   # drop half-assembled fragments after this
+        self.cv2_num_threads = 0                  # 0 = leave OpenCV's default alone
+        self.trigger_confirm_ms = 0.0             # >0 overrides trigger_confirm_frames
+        self.track_wait_mode = "frame"            # "frame" = wake on new frame, "grid" = old pacing
         
         # --- Button Mask Settings ---
         self.button_mask_enabled = False  # 绺介枊闂?
@@ -714,6 +751,23 @@ class Config:
             "wm_min_delay": self.wm_min_delay,
             "wm_max_delay": self.wm_max_delay,
             "wm_distance_threshold": self.wm_distance_threshold,
+            # WindMouse shaping / per-frame budget
+            "smooth_reaction_min": self.smooth_reaction_min,
+            "smooth_reaction_max": self.smooth_reaction_max,
+            "smooth_close_range": self.smooth_close_range,
+            "smooth_close_speed": self.smooth_close_speed,
+            "smooth_far_range": self.smooth_far_range,
+            "smooth_far_speed": self.smooth_far_speed,
+            "smooth_max_step_ratio": self.smooth_max_step_ratio,
+            "smooth_target_area_ratio": self.smooth_target_area_ratio,
+            "smooth_acceleration": self.smooth_acceleration,
+            "smooth_deceleration": self.smooth_deceleration,
+            "smooth_reaction_min_sec": self.smooth_reaction_min_sec,
+            "smooth_reaction_max_sec": self.smooth_reaction_max_sec,
+            "wm_frame_gain": self.wm_frame_gain,
+            "wm_frame_max_step_px": self.wm_frame_max_step_px,
+            "wm_settle_radius_px": self.wm_settle_radius_px,
+            "wm_deadzone_px": self.wm_deadzone_px,
             # WindMouse Parameters (Sec)
             "wm_gravity_sec": self.wm_gravity_sec,
             "wm_wind_sec": self.wm_wind_sec,
@@ -846,7 +900,19 @@ class Config:
             "mouse_lock_sec_y": self.mouse_lock_sec_y,
 
             # Processing FPS Limit
-            "target_fps": self.target_fps
+            "target_fps": self.target_fps,
+
+            # Latency / hot-path tuning
+            "detection_roi_enabled": self.detection_roi_enabled,
+            "detection_roi_padding": self.detection_roi_padding,
+            "detection_roi_max_fraction": self.detection_roi_max_fraction,
+            "detection_return_raw_mask": self.detection_return_raw_mask,
+            "receiver_rcvbuf_mb": self.receiver_rcvbuf_mb,
+            "receiver_high_priority": self.receiver_high_priority,
+            "receiver_fragment_timeout_ms": self.receiver_fragment_timeout_ms,
+            "cv2_num_threads": self.cv2_num_threads,
+            "trigger_confirm_ms": self.trigger_confirm_ms,
+            "track_wait_mode": self.track_wait_mode,
         }
     
     def from_dict(self, data):
@@ -1020,6 +1086,43 @@ class Config:
         trigger_ads_key_type = str(getattr(self, "trigger_ads_key_type", "hold")).strip().lower()
         self.trigger_ads_key_type = "toggle" if trigger_ads_key_type == "toggle" else "hold"
         self.enable_magnet_trigger = bool(getattr(self, "enable_magnet_trigger", False))
+        # --- WindMouse shaping / per-frame budget (clamped) ---
+        for key, default, lower_bound, upper_bound in (
+            ("smooth_reaction_min", 0.08, 0.0, 0.5),
+            ("smooth_reaction_max", 0.20, 0.0, 0.5),
+            ("smooth_close_range", 30.0, 1.0, 1000.0),
+            ("smooth_close_speed", 0.15, 0.01, 2.0),
+            ("smooth_far_range", 200.0, 1.0, 1000.0),
+            ("smooth_far_speed", 0.35, 0.01, 2.0),
+            ("smooth_max_step_ratio", 0.08, 0.01, 1.0),
+            ("smooth_target_area_ratio", 0.05, 0.01, 1.0),
+            ("smooth_acceleration", 0.50, 0.05, 1.0),
+            ("smooth_deceleration", 0.40, 0.05, 1.0),
+            ("smooth_reaction_min_sec", 0.08, 0.0, 0.5),
+            ("smooth_reaction_max_sec", 0.20, 0.0, 0.5),
+            ("wm_frame_gain", 0.50, 0.05, 1.0),
+            ("wm_frame_max_step_px", 8.0, 0.5, 30.0),
+            ("wm_settle_radius_px", 2.2, 0.0, 6.0),
+            ("wm_deadzone_px", 0.40, 0.05, 2.0),
+        ):
+            try:
+                parsed = float(getattr(self, key, default))
+            except Exception:
+                parsed = float(default)
+            setattr(self, key, max(float(lower_bound), min(float(upper_bound), parsed)))
+        if self.smooth_reaction_min > self.smooth_reaction_max:
+            self.smooth_reaction_min, self.smooth_reaction_max = (
+                self.smooth_reaction_max,
+                self.smooth_reaction_min,
+            )
+        if self.smooth_reaction_min_sec > self.smooth_reaction_max_sec:
+            self.smooth_reaction_min_sec, self.smooth_reaction_max_sec = (
+                self.smooth_reaction_max_sec,
+                self.smooth_reaction_min_sec,
+            )
+        if self.smooth_close_range > self.smooth_far_range:
+            self.smooth_close_range = self.smooth_far_range
+
         self.magnet_keybind = getattr(self, "magnet_keybind", 0)
         magnet_activation_type = str(getattr(self, "magnet_activation_type", "hold_enable")).strip().lower()
         if magnet_activation_type not in {"hold_enable", "hold_disable", "toggle"}:
@@ -1260,6 +1363,49 @@ class Config:
             )
         except Exception:
             self.trigger_strafe_manual_neutral_ms = 0
+
+        # --- Latency / hot-path tuning: clamp everything to a sane range ---
+        self.detection_roi_enabled = bool(getattr(self, "detection_roi_enabled", False))
+        try:
+            self.detection_roi_padding = max(
+                0, min(512, int(getattr(self, "detection_roi_padding", 64)))
+            )
+        except Exception:
+            self.detection_roi_padding = 64
+        try:
+            self.detection_roi_max_fraction = max(
+                0.1, min(1.0, float(getattr(self, "detection_roi_max_fraction", 0.70)))
+            )
+        except Exception:
+            self.detection_roi_max_fraction = 0.70
+        self.detection_return_raw_mask = bool(
+            getattr(self, "detection_return_raw_mask", True)
+        )
+        try:
+            self.receiver_rcvbuf_mb = max(
+                1, min(64, int(getattr(self, "receiver_rcvbuf_mb", 8)))
+            )
+        except Exception:
+            self.receiver_rcvbuf_mb = 8
+        self.receiver_high_priority = bool(getattr(self, "receiver_high_priority", False))
+        try:
+            self.receiver_fragment_timeout_ms = max(
+                1.0, min(100.0, float(getattr(self, "receiver_fragment_timeout_ms", 8.0)))
+            )
+        except Exception:
+            self.receiver_fragment_timeout_ms = 8.0
+        try:
+            self.cv2_num_threads = max(0, min(64, int(getattr(self, "cv2_num_threads", 0))))
+        except Exception:
+            self.cv2_num_threads = 0
+        try:
+            self.trigger_confirm_ms = max(
+                0.0, min(1000.0, float(getattr(self, "trigger_confirm_ms", 0.0)))
+            )
+        except Exception:
+            self.trigger_confirm_ms = 0.0
+        wait_mode = str(getattr(self, "track_wait_mode", "frame")).strip().lower()
+        self.track_wait_mode = wait_mode if wait_mode in {"frame", "grid"} else "frame"
     
     def save_to_file(self, filename="config.json"):
         """Save configuration atomically."""

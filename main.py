@@ -18,7 +18,7 @@ except Exception:
 from src.utils.config import config
 from src.utils.mouse import Mouse, is_button_pressed
 from src.utils.activation import get_active_aim_fov, get_active_trigger_fov
-from src.utils.detection import load_model, perform_detection
+from src.utils.detection import load_model, analyze
 from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
 from src.aim_system.anti_smoke_detector import AntiSmokeDetector
@@ -30,6 +30,18 @@ class FrameInfo:
     def __init__(self, width, height):
         self.xres = width
         self.yres = height
+
+
+def _pacing_deadline(next_at, now, period):
+    """Return the absolute deadline to pace against for the next iteration.
+
+    Resyncs to ``now`` when the previous iteration overran by more than one
+    period (slow work must not build a backlog of missed deadlines) or when the
+    deadline is further out than one period (target_fps was just raised).
+    """
+    if next_at < now - period or next_at > now + period:
+        return now
+    return next_at
 
 class AimTracker:
     """
@@ -137,6 +149,13 @@ class AimTracker:
         self.model, self.class_names = load_model()
         print("Classes:", self.class_names)
         self._target_fps = target_fps
+        # Publish sequence of the last frame handed to detection. None means
+        # "nothing processed yet" (and is also what non-UDP modes report).
+        self._last_frame_seq = None
+        # Per-frame latency numbers for the last processed frame. Written only by
+        # the track thread, read by UI/debug callers, so no lock is needed for
+        # the shallow dict swap.
+        self.perf = {}
         self._track_thread = threading.Thread(target=self._track_loop, daemon=True)
         self._track_thread.start()
         
@@ -176,6 +195,12 @@ class AimTracker:
         except Exception:
             pass
         self._close_raw_stream_windows()
+        # Drain and join the preview renderer before the UI destroys windows,
+        # so only one thread ever drives HighGUI.
+        try:
+            preview_throttle.shutdown()
+        except Exception:
+            pass
 
     def _process_move_queue(self):
         """
@@ -248,7 +273,24 @@ class AimTracker:
 
     def _track_loop(self):
         """
-        Main tracking loop with high-precision Windows timer and monotonic clock.
+        Main tracking loop: frame-driven when the capture has a sequence.
+
+        time.sleep() on Windows rounds up to the next timer tick, so pacing with
+        ``sleep(period - elapsed)`` loses a whole tick every frame (measured:
+        127.7 fps at target 144). Here the deadline is absolute and the last
+        sub-millisecond of each period is spun, which keeps the configured rate
+        while still sleeping most of the wait. The frame wait inside
+        track_once() also wakes us as soon as a new frame lands.
+
+        Two pacing modes:
+
+        * ``track_wait_mode="frame"`` (default): a frame that arrives mid-period
+          is handed to detection immediately instead of waiting for the next
+          poll slot. ``frame_timeout`` must therefore cover the rest of the
+          current period *plus* a full period, otherwise wait_for_new_frame()
+          returns instantly and detection spins on a stale seq.
+        * ``track_wait_mode="grid"``: the previous behaviour, kept as a rollback
+          switch (``frame_timeout`` equal to the remaining budget).
         """
         has_timer_period = False
         if sys.platform == "win32":
@@ -260,24 +302,48 @@ class AimTracker:
                 pass
 
         try:
+            next_at = time.perf_counter()
             while not self._stop_event.is_set():
-                period = 1.0 / float(self._target_fps)
-                start = time.perf_counter()
+                period = 1.0 / max(1.0, float(self._target_fps))
+                now = time.perf_counter()
+                next_at = _pacing_deadline(next_at, now, period)
+                budget = max(0.0, next_at - now)
+                wait_mode = str(getattr(config, "track_wait_mode", "frame")).strip().lower()
+                frame_driven = wait_mode != "grid"
+                if frame_driven:
+                    # Any frame landing inside this period must be able to wake
+                    # the wait, so the wait covers the remainder plus one period.
+                    frame_timeout = min(2.0 * period, budget + period)
+                else:
+                    frame_timeout = budget
+                got_frame = False
                 try:
-                    self.track_once()
+                    got_frame = bool(self.track_once(frame_timeout=frame_timeout))
                 except Exception as e:
                     print("[Track error]", e)
-                elapsed = time.perf_counter() - start
-                to_sleep = period - elapsed
-                if to_sleep > 0.0005:
-                    time.sleep(to_sleep)
+                next_at += period
+
+                # A fresh frame was just processed: skip the tail sleep and go
+                # straight back to wait_for_new_frame(), which is the real gate.
+                # Only in frame mode, and only for sequenced sources (UDP);
+                # NDI/MSS/CaptureCard report seq=None and would otherwise spin
+                # at 100% CPU.
+                if frame_driven and got_frame and getattr(self, "_last_frame_seq", None) is not None:
+                    continue
+
+                remaining = next_at - time.perf_counter()
+                spin = min(0.0015, period * 0.25)
+                if remaining > spin:
+                    time.sleep(remaining - spin)
+                while time.perf_counter() < next_at:
+                    pass
         finally:
             if has_timer_period:
                 try:
                     ctypes.windll.winmm.timeEndPeriod(1)
                 except Exception:
                     pass
-    
+
     def set_target_fps(self, fps):
         """
         Dynamically update target FPS
@@ -291,6 +357,24 @@ class AimTracker:
         self._target_fps = float(fps)
         print(f"[AimTracker] Target FPS updated to: {fps}")
     
+    def _release_masked_buttons_once(self):
+        if not hasattr(self, "_current_masked_buttons"):
+            self._current_masked_buttons = set()
+        if getattr(self, "_locks_unlocked_idle", False) and not self._current_masked_buttons:
+            return
+        try:
+            from src.utils.mouse import is_connected, unlock_all_locks
+
+            if not is_connected:
+                self._current_masked_buttons.clear()
+                self._locks_unlocked_idle = False
+                return
+            unlock_all_locks()
+            self._current_masked_buttons.clear()
+            self._locks_unlocked_idle = True
+        except Exception:
+            pass
+
     def _handle_button_mask(self):
         """
         铏曠悊鎸夐垥閬僵閭忚集
@@ -298,11 +382,7 @@ class AimTracker:
         鏍规摎閰嶇疆姹哄畾鏄惁閹栧畾鐗瑰畾鐨勬粦榧犳寜閳曪紝闃叉鍦ㄧ瀯婧栨檪瑾よЦ銆?        """
         # 濡傛灉鏈暉鐢?Button Mask锛岃В閹栨墍鏈夋寜閳?
         if not getattr(config, "button_mask_enabled", False):
-            try:
-                from src.utils.mouse import unlock_all_locks
-                unlock_all_locks()
-            except Exception as e:
-                pass
+            self._release_masked_buttons_once()
             return
         
         # 妾㈡煡鏄惁鏈変换浣?aimbot 姝ｅ湪閬嬭
@@ -313,11 +393,7 @@ class AimTracker:
         )
         
         if not aimbot_running:
-            try:
-                from src.utils.mouse import unlock_all_locks
-                unlock_all_locks()
-            except Exception as e:
-                pass
+            self._release_masked_buttons_once()
             return
         
         # 妲嬪缓闇€瑕侀伄缃╃殑鎸夐垥闆嗗悎
@@ -340,6 +416,9 @@ class AimTracker:
             from src.utils.mouse import lock_button_idx, unlock_button_idx, is_connected
             
             if not is_connected:
+                if hasattr(self, "_current_masked_buttons"):
+                    self._current_masked_buttons.clear()
+                self._locks_unlocked_idle = False
                 return
             
             # 杩借釜鐣跺墠宸查帠瀹氱殑鎸夐垥
@@ -356,6 +435,7 @@ class AimTracker:
             
             # 鏇存柊鐣跺墠鐙€鎱?
             self._current_masked_buttons = mask_set
+            self._locks_unlocked_idle = False
             
         except Exception as e:
             print(f"[Button Mask Error] {e}")
@@ -389,10 +469,10 @@ class AimTracker:
         try:
             if show_ndi:
                 if preview_throttle.render_if_due(self.RAW_STREAM_NDI_WINDOW):
-                    cv2.imshow(self.RAW_STREAM_NDI_WINDOW, raw_img)
+                    preview_throttle.imshow(self.RAW_STREAM_NDI_WINDOW, raw_img)
                 self._raw_stream_window_visible[self.RAW_STREAM_NDI_WINDOW] = True
             elif self._raw_stream_window_visible.get(self.RAW_STREAM_NDI_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_NDI_WINDOW)
+                preview_throttle.destroy(self.RAW_STREAM_NDI_WINDOW)
                 self._raw_stream_window_visible[self.RAW_STREAM_NDI_WINDOW] = False
         except Exception:
             pass
@@ -400,33 +480,134 @@ class AimTracker:
         try:
             if show_udp:
                 if preview_throttle.render_if_due(self.RAW_STREAM_UDP_WINDOW):
-                    cv2.imshow(self.RAW_STREAM_UDP_WINDOW, raw_img)
+                    preview_throttle.imshow(self.RAW_STREAM_UDP_WINDOW, raw_img)
                 self._raw_stream_window_visible[self.RAW_STREAM_UDP_WINDOW] = True
             elif self._raw_stream_window_visible.get(self.RAW_STREAM_UDP_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_UDP_WINDOW)
+                preview_throttle.destroy(self.RAW_STREAM_UDP_WINDOW)
                 self._raw_stream_window_visible[self.RAW_STREAM_UDP_WINDOW] = False
         except Exception:
             pass
 
-        # The HighGUI pump happens once at the end of track_once; pumping here too
-        # would double the waitKey cost whenever a raw-stream window is open.
+        # HighGUI is driven by the preview render worker, never by this thread.
 
     def _close_raw_stream_windows(self):
         """Close raw-stream windows."""
         try:
             if self._raw_stream_window_visible.get(self.RAW_STREAM_NDI_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_NDI_WINDOW)
+                preview_throttle.destroy(self.RAW_STREAM_NDI_WINDOW)
                 self._raw_stream_window_visible[self.RAW_STREAM_NDI_WINDOW] = False
         except Exception:
             pass
         try:
             if self._raw_stream_window_visible.get(self.RAW_STREAM_UDP_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_UDP_WINDOW)
+                preview_throttle.destroy(self.RAW_STREAM_UDP_WINDOW)
                 self._raw_stream_window_visible[self.RAW_STREAM_UDP_WINDOW] = False
         except Exception:
             pass
 
-    def _filter_targets_with_anti_smoke(self, targets, target_bboxes, mask, frame_shape, detector):
+    def _compute_detection_roi(self, frame_shape):
+        """Union of the aim/trigger FOV circles, padded and clamped.
+
+        Returns ``None`` when ROI cropping is off or meaningless, which makes
+        ``analyze`` run on the full frame. The caller's frame is already the
+        post-`apply_mode_fov` image, so this is the *only* offset applied here;
+        ``analyze`` adds it to every bbox exactly once.
+        """
+        if not bool(getattr(config, "detection_roi_enabled", False)):
+            return None
+        aim_on = bool(getattr(config, "enableaim", False) or getattr(config, "enableaim_sec", False))
+        trigger_on = bool(getattr(config, "enabletb", False))
+        if not aim_on and not trigger_on:
+            return None
+
+        h, w = int(frame_shape[0]), int(frame_shape[1])
+        if h <= 0 or w <= 0:
+            return None
+
+        radii = []
+        if aim_on:
+            try:
+                radii.append(float(get_active_aim_fov(is_sec=False, fallback=self.fovsize)))
+            except Exception:
+                radii.append(float(self.fovsize))
+            if bool(getattr(config, "enableaim_sec", False)):
+                try:
+                    radii.append(
+                        float(get_active_aim_fov(is_sec=True, fallback=self.fovsize_sec))
+                    )
+                except Exception:
+                    radii.append(float(self.fovsize_sec))
+        if trigger_on:
+            try:
+                radii.append(float(get_active_trigger_fov(fallback=self.tbfovsize)))
+            except Exception:
+                radii.append(float(self.tbfovsize))
+
+        if not radii:
+            return None
+        radius = max(1.0, max(radii))
+        pad = max(0, int(getattr(config, "detection_roi_padding", 64)))
+
+        cx, cy = w / 2.0, h / 2.0
+        x0 = int(max(0, math.floor(cx - radius - pad)))
+        y0 = int(max(0, math.floor(cy - radius - pad)))
+        x1 = int(min(w, math.ceil(cx + radius + pad)))
+        y1 = int(min(h, math.ceil(cy + radius + pad)))
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        try:
+            max_fraction = float(getattr(config, "detection_roi_max_fraction", 0.70))
+        except Exception:
+            max_fraction = 0.70
+        if ((x1 - x0) * (y1 - y0)) / float(max(1, w * h)) >= max_fraction:
+            # Cropping a near-full frame only adds border noise; run full-frame.
+            return None
+        return (x0, y0, x1, y1)
+
+    def _nearest_bbox_index(self, target, target_bboxes):
+        tx, ty = float(target[0]), float(target[1])
+        best_idx, best_d2 = -1, None
+        for idx, (center, _bbox) in enumerate(target_bboxes):
+            d2 = (float(center[0]) - tx) ** 2 + (float(center[1]) - ty) ** 2
+            if best_d2 is None or d2 < best_d2:
+                best_idx, best_d2 = idx, d2
+        return best_idx
+
+    def _build_target_features(self, targets, target_bboxes, mask, frame_shape, roi):
+        """Compute each target's bbox/contour features once, keyed by bbox index.
+
+        ``mask`` may be ROI-sized, hence the ``roi`` offset. Features are cached
+        for one frame only: the mask changes every frame (and ``HSV_MIN/MAX`` can
+        change between frames), so nothing here survives a frame boundary.
+        """
+        cache = {}
+        if mask is None or not target_bboxes:
+            return cache
+        if not (
+            self.anti_smoke_detector.is_enabled()
+            or self.anti_smoke_detector_sec.is_enabled()
+        ):
+            # Neither detector will ask: do not pay for the contours at all.
+            return cache
+
+        # One detector is enough to compute features: the thresholds live in
+        # is_bbox_plausible, not in the feature extraction. Both are the same
+        # class, so either works even when only the secondary one is enabled.
+        worker = self.anti_smoke_detector
+        if not worker.is_enabled() and self.anti_smoke_detector_sec.is_enabled():
+            worker = self.anti_smoke_detector_sec
+        for idx, (_center, bbox) in enumerate(target_bboxes):
+            try:
+                cache[idx] = worker.compute_bbox_features(
+                    bbox, mask, frame_shape, roi=roi
+                )
+            except Exception:
+                cache[idx] = None
+        return cache
+
+    def _filter_targets_with_anti_smoke(self, targets, target_bboxes, mask, frame_shape,
+                                        detector, features=None, roi=None):
         """Filter targets using nearest bbox contour checks from anti-smoke detector."""
         if not targets or not target_bboxes or detector is None:
             return targets
@@ -437,58 +618,79 @@ class AimTracker:
         for target in targets:
             if len(target) < 2:
                 continue
-            tx, ty = float(target[0]), float(target[1])
-            nearest_bbox = min(
-                target_bboxes,
-                key=lambda item: (float(item[0][0]) - tx) ** 2 + (float(item[0][1]) - ty) ** 2,
-            )[1]
-            if detector.is_bbox_plausible(nearest_bbox, mask, frame_shape):
+            nearest_idx = self._nearest_bbox_index(target, target_bboxes)
+            if nearest_idx < 0:
+                continue
+            nearest_bbox = target_bboxes[nearest_idx][1]
+            cached = None if features is None else features.get(nearest_idx)
+            if detector.is_bbox_plausible(
+                nearest_bbox, mask, frame_shape, features=cached, roi=roi
+            ):
                 filtered_targets.append(target)
         return filtered_targets
 
-    def track_once(self):
+    def track_once(self, frame_timeout=0.0):
         """
-        鍩疯涓€娆″畬鏁寸殑杩借工铏曠悊
-        
-        閫欐槸杩借工鍣ㄧ殑鏍稿績鏂规硶锛屽煼琛屼互涓嬫椹燂細
-        1. 妾㈡煡閫ｆ帴鐙€鎱?        2. 铏曠悊 Button Mask
-        3. 鎹曠嵅鐣跺墠瑕栭牷骞€
-        4. 鍩疯鐩妾㈡脯
-        5. 铏曠悊妾㈡脯绲愭灉涓︿及绠楅牠閮ㄤ綅缃?        6. 绻＝ FOV 鍜岀洰妯欐瑷?        7. 鍩疯鐬勬簴鍜岀Щ鍕曢倧杓?        8. 椤ず妾㈡脯绲愭灉绐楀彛
+        Run one full tracking iteration.
+
+        Returns True when a *new* frame was processed, False when the loop only
+        did housekeeping (no connected capture, no frame yet, or the same frame
+        the previous iteration already processed). Frame freshness comes from
+        the capture sequence number: the UDP receiver increments it once per
+        decoded frame, so an unchanged seq means nothing new arrived.
         """
         if not self.app.capture.is_connected():
             self._close_raw_stream_windows()
-            return
+            self._last_frame_seq = None
+            return False
 
-        # Button Mask 绠＄悊
+        # Button Mask management
         self._handle_button_mask()
-        
-        # Mouse Lock 绠＄悊鍣?tick
+
+        # Mouse lock manager tick
         try:
             from src.utils.mouse import tick_movement_lock_manager
             tick_movement_lock_manager()
         except Exception:
             pass
 
-        # 浣跨敤 CaptureService 璁€鍙?BGR 骞€
-        raw_bgr_img = self.app.capture.read_frame(apply_fov=False)
-        if raw_bgr_img is None:
-            return
+        # Wait (bounded by the frame budget) for a frame newer than the last
+        # one processed. Non-UDP modes report seq=None and never wait.
+        raw_bgr_img, frame_seq = self.app.capture.read_frame_with_seq(
+            apply_fov=False,
+            after_seq=self._last_frame_seq,
+            timeout=frame_timeout,
+        )
+        if frame_seq is None:
+            # No freshness signal for this capture mode: process every read
+            # so NDI/MSS/CaptureCard keep their previous behaviour.
+            self._last_frame_seq = None
+        else:
+            if raw_bgr_img is None:
+                # Nothing decoded yet (or the stream just stopped). Remember the
+                # seq so the next iteration waits for a newer frame instead of
+                # re-reading in a tight loop.
+                self._last_frame_seq = frame_seq
+                return False
+            if frame_seq == self._last_frame_seq:
+                # Already processed this frame: skip detection instead of
+                # re-running it on a stale image.
+                return False
+            self._last_frame_seq = frame_seq
 
-        # 纰轰繚鍦栧儚鏄€ｇ簩涓斿彲瀵殑鏁哥祫锛屼互閬垮厤 OpenCV 閷
+        if raw_bgr_img is None:
+            return False
+
+        # Callers downstream require a contiguous buffer
         if not raw_bgr_img.flags['C_CONTIGUOUS']:
             raw_bgr_img = np.ascontiguousarray(raw_bgr_img)
 
         self._update_raw_stream_windows(raw_bgr_img)
 
-        # From here on, the raw-stream windows may already be drawn, so every
-        # exit path has to pump HighGUI or those windows freeze. try/finally
-        # covers the two early returns below without repeating the call.
-        try:
-            self._track_frame(raw_bgr_img)
-        finally:
-            # Pump HighGUI once per frame instead of once per window
-            preview_throttle.pump()
+        # Preview submission is asynchronous, so there is no HighGUI pump (and
+        # no blocking waitKey) on this thread any more.
+        self._track_frame(raw_bgr_img)
+        return True
 
     def _track_frame(self, raw_bgr_img):
         """Body of track_once; all exits are covered by the caller's finally."""
@@ -530,15 +732,37 @@ class AimTracker:
 
         body_overlays = []
         head_overlays = []
+        head_rects = []
 
+        # Publish -> detection handoff, measured on the frame actually used.
+        frame_meta = {}
         try:
-            detection_results, mask = perform_detection(self.model, bgr_img)
-            # 顯示 MASK 視窗（如果啟用）
+            meta_candidate = self.app.capture.get_frame_meta()
+            if isinstance(meta_candidate, dict):
+                frame_meta = meta_candidate
+        except Exception:
+            frame_meta = {}
+        publish_to_detect_ms = None
+        published_at = frame_meta.get("published_at")
+        if isinstance(published_at, (int, float)):
+            publish_to_detect_ms = max(
+                0.0, (time.perf_counter() - float(published_at)) * 1000.0
+            )
+
+        roi = self._compute_detection_roi(bgr_img.shape)
+        detect_start = time.perf_counter()
+        detection = None
+        try:
+            detection = analyze(self.model, bgr_img, roi=roi)
+            detection_results = detection.detections
+            mask = detection.mask
+            # MASK preview: full_mask() allocates the full-frame image only when
+            # this consumer is actually due, not on every frame.
             if (getattr(config, "show_opencv_windows", True) and 
                 getattr(config, "show_opencv_mask", True) and 
-                mask is not None):
+                mask is not None and mask.size > 0):
                 if preview_throttle.render_if_due("MASK"):
-                    cv2.imshow("MASK", mask)
+                    preview_throttle.imshow("MASK", detection.full_mask())
         except Exception as e:
             print("[perform_detection error]", e)
             detection_results = []
@@ -547,9 +771,10 @@ class AimTracker:
             if show_detection:
                 try:
                     if preview_throttle.render_if_due("Detection"):
-                        cv2.imshow("Detection", bgr_img)
+                        preview_throttle.imshow("Detection", bgr_img)
                 except:
                     pass
+        detect_ms = (time.perf_counter() - detect_start) * 1000.0
 
         targets = []
         target_bboxes = []
@@ -587,8 +812,15 @@ class AimTracker:
                     body_cy = (y1 + y2) / 2.0
                     body_y_min = y1  # body 鐨?Y 杌告渶楂樺€硷紙鍦栧儚搴ф绯讳腑 y 瓒婂皬瓒婇潬涓婏級
                     body_y_max = y2  # body 鐨?Y 杌告渶浣庡€?                    
-                    # Estimation t锚tes dans la bbox
-                    head_positions = self._estimate_head_positions(x1, y1, x2, y2, bgr_img, mask)
+                    # Estimation têtes dans la bbox. The head ROI rectangle is
+                    # returned for the display copy only: drawing it onto
+                    # bgr_img would mutate the frame detection just read (and
+                    # the receiver still owns) and can self-trigger a yellow
+                    # target.
+                    head_positions = self._estimate_head_positions(
+                        x1, y1, x2, y2, bgr_img, mask,
+                        mask_roi=detection.roi if detection is not None and detection.roi_used else None,
+                    )
                     
                     if aim_type == "body":
                         # Body 妯″紡锛氫娇鐢?body 涓績榛?
@@ -601,6 +833,7 @@ class AimTracker:
                         for head_cx, head_cy, bbox in head_positions:
                             if show_detection:
                                 head_overlays.append((head_cx, head_cy))
+                                head_rects.append(bbox)
                             d = math.hypot(head_cx - frame.xres / 2.0, head_cy - frame.yres / 2.0)
                             
                             # 瑷堢畻 head 鐨?Y 绡勫湇锛堢敤鏂?nearest 妯″紡锛?
@@ -628,13 +861,25 @@ class AimTracker:
 
         targets_main = list(targets_all)
         targets_sec = list(targets_all)
+        shared_features = {}
+        detection_roi = detection.roi if detection is not None and detection.roi_used else None
         if targets_all and target_bboxes:
             frame_shape = bgr_img.shape
+            # One contour analysis per bbox, shared by both detectors: they keep
+            # their own thresholds, so decisions stay independent while the
+            # expensive part stops being paid twice.
+            shared_features = self._build_target_features(
+                targets_all, target_bboxes, mask, frame_shape, detection_roi
+            )
             targets_main = self._filter_targets_with_anti_smoke(
-                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector
+                targets_all, target_bboxes, mask, frame_shape,
+                self.anti_smoke_detector,
+                features=shared_features, roi=detection_roi,
             )
             targets_sec = self._filter_targets_with_anti_smoke(
-                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector_sec
+                targets_all, target_bboxes, mask, frame_shape,
+                self.anti_smoke_detector_sec,
+                features=shared_features, roi=detection_roi,
             )
 
         try:
@@ -645,9 +890,30 @@ class AimTracker:
                 targets_sec=targets_sec,
                 targets_trigger=targets_all,
                 trigger_img=trigger_source_img,
+                trigger_mask=detection.raw_mask if detection is not None else None,
+                trigger_mask_roi=detection_roi,
             )
         except Exception as e:
             print("[Aim error]", e)
+
+        track_elapsed_ms = (time.perf_counter() - detect_start) * 1000.0
+        self.perf = {
+            "frame_seq": self._last_frame_seq,
+            "publish_to_detect_ms": publish_to_detect_ms,
+            "detect_ms": detect_ms,
+            "detect_track_ms": track_elapsed_ms,
+            "roi": detection_roi,
+            "roi_used": bool(detection is not None and detection.roi_used),
+            "targets": len(targets_all),
+            "frame_start_time": frame_meta.get("frame_start_time"),
+        }
+        try:
+            from src.aim_system.Triggerbot import _triggerbot_state as _tb_state
+            decision_ms = _tb_state.get("last_decision_ms")
+        except Exception:
+            decision_ms = None
+        if decision_ms is not None:
+            self.perf["trigger_decision_ms"] = float(decision_ms)
 
         # FOV circles, tracking boxes and the enhanced overlay are all painted
         # here, on the display copy, after the aim/trigger pass has already read
@@ -664,9 +930,12 @@ class AimTracker:
                     self._draw_body(display_img, bx1, by1, bx2, by2, conf)
                 for hx, hy in head_overlays:
                     self._draw_head_bbox(display_img, hx, hy)
+                for rx1, ry1, rx2, ry2 in head_rects:
+                    cv2.rectangle(display_img, (rx1, ry1), (rx2, ry2), (0, 255, 255), 1)
                 self._draw_fovs(display_img, frame)
                 display_img = self._draw_enhanced_detection(display_img, targets_all, frame)
-                cv2.imshow("Detection", display_img)
+                # Handed to the render worker; this thread never touches HighGUI.
+                preview_throttle.imshow("Detection", display_img)
             except Exception as e:
                 print(f"[OpenCV display error] {e}")
 
@@ -883,9 +1152,18 @@ class AimTracker:
         # 鍏у湀锛堢磪鑹诧級
         cv2.circle(img, (int(headx), int(heady)), 3, (0, 0, 255), -1)
 
-    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None):
+    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None, mask_roi=None):
         """
         Estimate head position from body bbox geometry only.
+
+        Returns ``[(head_cx, head_cy, head_roi_rect), ...]``. The head ROI
+        rectangle is *returned* rather than painted on ``img``: ``img`` is the
+        frame the receiver still owns and the one Triggerbot reads, so drawing a
+        yellow marker into it would mutate shared state and, with
+        ``config.color == "yellow"``, feed the detector its own overlay.
+
+        ``mask_roi`` maps a ROI-sized ``mask`` back into frame coordinates; the
+        bbox arguments are always in frame space.
         """
         if not img.flags['C_CONTIGUOUS']:
             img = np.ascontiguousarray(img)
@@ -914,17 +1192,23 @@ class AimTracker:
         # Optional one-pass refinement from the already computed global mask.
         # Use only the upper body band and median X to reduce left/right arm jitter.
         if mask is not None:
-            mx1 = max(0, min(int(x1), mask.shape[1] - 1))
-            my1 = max(0, min(int(y1), mask.shape[0] - 1))
-            mx2 = max(mx1 + 1, min(int(x2), mask.shape[1]))
-            my2 = max(my1 + 1, min(int(y2), mask.shape[0]))
+            rx0, ry0 = (0, 0)
+            if mask_roi is not None:
+                try:
+                    rx0, ry0 = int(mask_roi[0]), int(mask_roi[1])
+                except Exception:
+                    rx0, ry0 = 0, 0
+            mx1 = max(0, min(int(x1) - rx0, mask.shape[1] - 1))
+            my1 = max(0, min(int(y1) - ry0, mask.shape[0] - 1))
+            mx2 = max(mx1 + 1, min(int(x2) - rx0, mask.shape[1]))
+            my2 = max(my1 + 1, min(int(y2) - ry0, mask.shape[0]))
             upper_h = max(6, int((my2 - my1) * 0.42))
             upper_y2 = min(my2, my1 + upper_h)
             upper_mask = mask[my1:upper_y2, mx1:mx2]
             if upper_mask.size > 0:
                 ys, xs = np.where(upper_mask > 0)
                 if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
-                    headx_base = float(mx1 + int(np.median(xs)))
+                    headx_base = float(mx1 + rx0 + int(np.median(xs)))
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
@@ -935,8 +1219,6 @@ class AimTracker:
 
         if x2_roi <= x1_roi or y2_roi <= y1_roi:
             return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
-
-        cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
 
         return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
@@ -996,6 +1278,8 @@ class AimTracker:
         targets_sec=None,
         targets_trigger=None,
         trigger_img=None,
+        trigger_mask=None,
+        trigger_mask_roi=None,
     ):
         """
         铏曠悊鐬勬簴鍜岀Щ鍕曢倧杓?        
@@ -1007,6 +1291,8 @@ class AimTracker:
             targets_sec: Secondary Aimbot target list
             targets_trigger: Triggerbot target list
             trigger_img: Source frame for Triggerbot detection (without overlay drawings)
+            trigger_mask: Raw HSV mask of ``trigger_img`` from the current frame
+            trigger_mask_roi: ROI ``trigger_mask`` was produced from, if any
         """
         try:
             process_normal_mode(
@@ -1017,6 +1303,8 @@ class AimTracker:
                 targets_sec=targets_sec,
                 targets_trigger=targets_trigger,
                 trigger_img=trigger_img,
+                trigger_mask=trigger_mask,
+                trigger_mask_roi=trigger_mask_roi,
             )
         except Exception as e:
             print("[Aim dispatch error]", e)
@@ -1033,6 +1321,16 @@ if __name__ == "__main__":
     """
     import customtkinter as ctk
     from src.ui import ViewerApp
+
+    # OpenCV's own thread pool competes with the capture/decode/track threads for
+    # the same cores; on small ROIs it usually makes p95 worse. 0 keeps OpenCV's
+    # default, which is the rollback value.
+    try:
+        _cv_threads = int(getattr(config, "cv2_num_threads", 0))
+        if _cv_threads > 0:
+            cv2.setNumThreads(_cv_threads)
+    except Exception:
+        pass
     
     # 鍒濆鍖栨崟鐛叉湇鍕?
     capture_service = CaptureService()

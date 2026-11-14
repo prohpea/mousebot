@@ -4,6 +4,7 @@ import struct
 import threading
 import time
 import asyncio
+import ctypes
 import numpy as np
 from typing import Optional, Callable, Tuple, Awaitable
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,70 @@ FRAGMENT_HEADER = struct.Struct("<IHH")
 FRAGMENT_MIN_TOTAL = 65_000     # smaller frames are sent whole, without a header
 FRAGMENT_MAX_TOTAL = 10_000_000  # sanity bound; above this it cannot be a fragment
 FRAGMENT_MAX_COUNT = 1000
+
+# Default reassembly deadline. The plugin sends every fragment of one frame back
+# to back, so 8 ms is already generous at 144 Hz (6.94 ms/frame); a partial
+# assembly older than this belongs to a frame that will never complete.
+FRAGMENT_TIMEOUT_MS_DEFAULT = 8.0
+RCVBUF_MB_DEFAULT = 8
+
+# The config object is resolved once: the fragment path runs per datagram, and a
+# fresh ``import`` on every packet is measurable at 100+ fragments per frame.
+_CONFIG = None
+
+
+def _config():
+    global _CONFIG
+    if _CONFIG is None:
+        try:
+            from src.utils.config import config as _cfg
+            _CONFIG = _cfg
+        except Exception:
+            _CONFIG = False
+    return _CONFIG or None
+
+
+def _read_int_config(name, default):
+    cfg = _config()
+    try:
+        value = getattr(cfg, name, None)
+        return int(default if value is None else value)
+    except Exception:
+        return int(default)
+
+
+def _read_float_config(name, default):
+    cfg = _config()
+    try:
+        value = getattr(cfg, name, None)
+        return float(default if value is None else value)
+    except Exception:
+        return float(default)
+
+
+def _read_bool_config(name, default):
+    cfg = _config()
+    try:
+        value = getattr(cfg, name, None)
+        return bool(default if value is None else value)
+    except Exception:
+        return bool(default)
+
+
+def _try_set_thread_high_priority():
+    """Best-effort HIGHEST priority for a real-time thread; Windows only.
+
+    Deliberately not REALTIME_PRIORITY: that can starve the UI thread and the
+    tracking thread this receiver feeds. Returns True when the call succeeded.
+    """
+    if not hasattr(ctypes, "windll"):
+        return False
+    try:
+        handle = ctypes.windll.kernel32.GetCurrentThread()
+        # THREAD_PRIORITY_HIGHEST == 2
+        return bool(ctypes.windll.kernel32.SetThreadPriority(handle, 2))
+    except Exception:
+        return False
 
 # Optional TurboJPEG for faster CPU JPEG decode
 _jpeg = None
@@ -107,6 +172,12 @@ class OBS_UDP_Receiver:
         # Frame processing
         self.current_frame = None
         self.frame_lock = threading.Lock()
+        # Published-frame counter + condition on the same lock. Consumers wait
+        # for "a frame newer than seq N" instead of polling get_current_frame(),
+        # and because publish and wait share frame_lock a wakeup can be missed
+        # only if the frame was published before the read, never in between.
+        self._frame_cond = threading.Condition(self.frame_lock)
+        self._frame_seq = 0
         self.frame_callback = None
         self.frame_callback_async: Optional[Callable[[np.ndarray], Awaitable[None]]] = None
         
@@ -137,6 +208,22 @@ class OBS_UDP_Receiver:
         self._frag_total_count = 0
         self._frag_started_at = 0.0
         self._frag_bytes = 0
+        self.fragment_drops = 0
+
+        # Latency metadata for the most recently published frame. Kept in its
+        # own lock so readers never touch frame_lock (consumers block there).
+        self._frame_meta_lock = threading.Lock()
+        self._last_frame_meta = {}
+
+        # Socket tuning, captured at connect() so stats can report what the OS
+        # actually granted rather than what was requested.
+        self.rcvbuf_requested_bytes = 0
+        self.rcvbuf_actual_bytes = 0
+
+        # Seam for tests: a decoder that can be blocked or replaced without
+        # touching the real TurboJPEG path.
+        self._decode_fn = self._decode_jpeg_frame_raw
+        self._priority_threads = set()
         
         logger.info(f"OBS_UDP_Receiver initialized: {ip}:{port}, max_workers={self.max_workers}")
     
@@ -168,6 +255,35 @@ class OBS_UDP_Receiver:
         self._frag_bytes = 0
         with self._slot_lock:
             self._latest_jpeg_slot = None
+        with self._frame_meta_lock:
+            self._last_frame_meta = {}
+
+    def _configure_socket(self, sock) -> int:
+        """Apply receive-buffer sizing and return the size the OS actually granted.
+
+        Windows silently clamps SO_RCVBUF, so the requested value is worthless as
+        evidence: only a getsockopt read-back tells whether the kernel really
+        reserved the buffer (the sender is asked for 8 MB for the same reason).
+        """
+        requested_mb = _read_int_config("receiver_rcvbuf_mb", RCVBUF_MB_DEFAULT)
+        requested_mb = max(1, min(64, int(requested_mb)))
+        requested = requested_mb * 1024 * 1024
+        self.rcvbuf_requested_bytes = requested
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, requested)
+        except OSError as exc:
+            logger.warning(f"Could not set SO_RCVBUF to {requested} bytes: {exc}")
+        actual = 0
+        try:
+            actual = int(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+        except OSError:
+            actual = 0
+        self.rcvbuf_actual_bytes = actual
+        logger.info(
+            f"SO_RCVBUF requested {requested / (1024 * 1024):.1f} MB, "
+            f"actual {actual / (1024 * 1024):.1f} MB"
+        )
+        return actual
 
     def connect(self) -> bool:
         """
@@ -187,8 +303,10 @@ class OBS_UDP_Receiver:
             # receiving, so a stale bot instance silently swallows the stream:
             # the new instance reports "connected" and shows black forever.
             # Without it, a duplicate bind fails loudly with WinError 10048.
-            # Increase receive buffer size to 4MB for high FPS streams and zero packet drop
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            # Increase receive buffer size for high FPS streams and zero packet
+            # drop. Windows clamps this value, so _configure_socket() reads it
+            # back and the granted number is what stats report.
+            self._configure_socket(self.socket)
             self.socket.settimeout(1.0)  # 1 second timeout
 
             # Bind to the wildcard address, not to self.ip. self.ip is the
@@ -384,18 +502,44 @@ class OBS_UDP_Receiver:
             with self._slot_lock:
                 self._latest_jpeg_slot = None
             
-            # Clear current frame
-            with self.frame_lock:
+            # Clear current frame. Bumping the sequence and waking waiters means
+            # a consumer blocked in wait_for_new_frame() returns immediately
+            # instead of sitting until its timeout after a disconnect.
+            with self._frame_cond:
                 self.current_frame = None
+                self._frame_seq += 1
+                self._frame_cond.notify_all()
             
             logger.info("Disconnected from UDP stream")
             
         except Exception as e:
             logger.error(f"Error during disconnect: {e}", exc_info=True)
     
+    def _maybe_raise_thread_priority(self):
+        """Boost the calling (receive/decode) thread once, if configured.
+
+        SetThreadPriority acts on the calling thread, so each worker opts in for
+        itself; ``_priority_threads`` remembers which idents were already done.
+        Best-effort and opt-in: on non-Windows, or when the call is refused, the
+        receiver keeps working exactly as before.
+        """
+        ident = threading.get_ident()
+        if ident in self._priority_threads:
+            return True
+        if not _read_bool_config("receiver_high_priority", False):
+            return False
+        applied = _try_set_thread_high_priority()
+        # Remember the attempt either way: retrying every loop iteration on a
+        # platform that refuses would just be syscall noise.
+        self._priority_threads.add(ident)
+        if applied:
+            logger.info("Receiver thread priority raised to HIGHEST")
+        return applied
+
     def _receive_loop(self):
         """Main receiving loop for UDP packets"""
         self.is_receiving = True
+        self._maybe_raise_thread_priority()
         logger.info("Started UDP receive loop")
         
         while not self.stop_event.is_set() and self.is_connected:
@@ -425,6 +569,7 @@ class OBS_UDP_Receiver:
     
     def _decode_worker_loop(self):
         """Ultra-low-latency dedicated frame decoder loop (Single-slot, Zero backlog)"""
+        self._maybe_raise_thread_priority()
         logger.info("Started ultra-low-latency frame decoder loop")
         
         while not self.stop_event.is_set() and self.is_connected:
@@ -441,7 +586,7 @@ class OBS_UDP_Receiver:
                 
                 # Fast TurboJPEG decode (Measured in real-time)
                 t_decode_start = time.perf_counter()
-                frame = self._decode_jpeg_frame_raw(jpeg_data)
+                frame = self._decode_fn(jpeg_data)
                 t_decode_end = time.perf_counter()
                 
                 if frame is not None:
@@ -450,7 +595,7 @@ class OBS_UDP_Receiver:
                     self.decode_delay = (t_decode_end - t_decode_start) * 1000.0
                     # receive_delay: Exact milliseconds from first UDP packet arrival of this frame until decoding began
                     self.receive_delay = max(0.0, (t_decode_start - frame_start_time) * 1000.0)
-                    self._update_frame(frame)
+                    self._update_frame(frame, t_published=t_decode_end, t_frame_start=frame_start_time)
             except Exception as e:
                 if self.is_connected:
                     logger.error(f"Error in frame decoder loop: {e}", exc_info=True)
@@ -499,6 +644,18 @@ class OBS_UDP_Receiver:
         if not payload:
             return True
 
+        timeout_ms = _read_float_config("receiver_fragment_timeout_ms", FRAGMENT_TIMEOUT_MS_DEFAULT)
+        timeout_s = max(0.001, float(timeout_ms) / 1000.0)
+
+        # Drop a half-assembled frame that can no longer complete. Without this,
+        # losing fragment 0 of frame N leaves the old parts sitting in the dict,
+        # frame N+1's fragment 0 does not collide with any index, and b"".join()
+        # splices two different frames into one "valid" JPEG.
+        if self._frag_parts and (receive_time - self._frag_started_at) > timeout_s:
+            self._frag_parts = {}
+            self._frag_bytes = 0
+            self.fragment_drops += 1
+
         # A frame that lost a fragment must not be spliced onto the next one:
         # restart on size/count change or a repeated index.
         if self._frag_parts and (
@@ -524,6 +681,7 @@ class OBS_UDP_Receiver:
             frame_start = self._frag_started_at or receive_time
             self._frag_parts = {}
             self._frag_bytes = 0
+            self._frag_started_at = 0.0
             self._deliver_jpeg(jpeg_data, frame_start)
         return True
 
@@ -646,12 +804,42 @@ class OBS_UDP_Receiver:
         except Exception:
             return True
     
-    def _update_frame(self, frame: np.ndarray, receive_time: float = 0.0):
-        """Update current frame and trigger processing"""
+    def _update_frame(self, frame: np.ndarray, receive_time: float = 0.0,
+                      t_published: Optional[float] = None,
+                      t_frame_start: Optional[float] = None):
+        """Update current frame and trigger processing.
+
+        ``t_published``/``t_frame_start`` carry the perf_counter stamps of the
+        decode worker for this specific frame, so latency metadata describes the
+        frame that was just published instead of whatever ran last.
+        """
         try:
-            with self.frame_lock:
+            published_at = time.perf_counter() if t_published is None else float(t_published)
+
+            # Frame, sequence and metadata are published under the same lock as
+            # the notify: a consumer that wakes up and immediately calls
+            # get_last_frame_meta() must see the timing of the frame it just
+            # received, never the previous one.
+            with self._frame_cond:
                 self.current_frame = frame
-            
+                self._frame_seq += 1
+                seq = self._frame_seq
+                latency_ms = (
+                    max(0.0, (published_at - float(t_frame_start)) * 1000.0)
+                    if t_frame_start is not None
+                    else float(self.receive_delay)
+                )
+                with self._frame_meta_lock:
+                    self._last_frame_meta = {
+                        "frame_seq": seq,
+                        "published_at": published_at,
+                        "frame_start_time": t_frame_start,
+                        "decode_ms": float(self.decode_delay),
+                        "receive_ms": latency_ms,
+                        "publish_latency_ms": latency_ms,
+                    }
+                self._frame_cond.notify_all()
+
             with self.processing_lock:
                 self.decoding_counter += 1
                 current_time = time.time()
@@ -706,7 +894,47 @@ class OBS_UDP_Receiver:
         """
         with self.frame_lock:
             return self.current_frame
+
+    def get_current_frame_with_seq(self) -> Tuple[Optional[np.ndarray], int]:
+        """Return the current frame together with its publish sequence number.
+
+        The sequence increases on every publish (and on disconnect), so a caller
+        holding a previous value can tell "same frame as last time" apart from
+        "a new frame arrived" without comparing image contents.
+        """
+        with self.frame_lock:
+            return self.current_frame, self._frame_seq
+
+    def wait_for_new_frame(self, after_seq: Optional[int] = None,
+                           timeout: float = 0.0) -> Tuple[Optional[np.ndarray], int]:
+        """Block until a frame newer than ``after_seq`` is published, or timeout.
+
+        Returns ``(frame, seq)``. On timeout ``seq`` is unchanged from the last
+        publish (equal to ``after_seq`` when nothing arrived), so the caller can
+        use ``seq == after_seq`` as the "nothing new" test. ``after_seq=None``
+        means "whatever is current", returning immediately when ``timeout`` is 0.
+        """
+        with self._frame_cond:
+            target = self._frame_seq if after_seq is None else int(after_seq)
+            deadline = time.perf_counter() + max(0.0, float(timeout or 0.0))
+            while self._frame_seq <= target:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                self._frame_cond.wait(remaining)
+            return self.current_frame, self._frame_seq
     
+    def get_last_frame_meta(self) -> dict:
+        """Latency metadata of the most recently published frame.
+
+        Returns ``{}`` before the first frame. Keys: ``frame_seq``,
+        ``published_at``, ``frame_start_time``, ``decode_ms``, ``receive_ms`` and
+        ``publish_latency_ms`` (``published_at - frame_start_time``), all in
+        ``perf_counter`` seconds / milliseconds.
+        """
+        with self._frame_meta_lock:
+            return dict(self._last_frame_meta)
+
     def get_performance_stats(self) -> dict:
         """
         Get performance statistics
@@ -721,6 +949,9 @@ class OBS_UDP_Receiver:
             processing_fps = self.processing_fps
             processing_delay = self.processing_delay
             decoding_fps = self.decoding_fps
+
+        with self.frame_lock:
+            frame_seq = self._frame_seq
         
         return {
             'current_fps': self.current_fps,
@@ -740,7 +971,11 @@ class OBS_UDP_Receiver:
             'bind_addr': self._bind_addr,
             'buffer_size_bytes': buffer_size,
             'queue_size': 0,
-            'max_workers': self.max_workers
+            'max_workers': self.max_workers,
+            'frame_seq': frame_seq,
+            'fragment_drops': self.fragment_drops,
+            'rcvbuf_requested_bytes': self.rcvbuf_requested_bytes,
+            'rcvbuf_actual_bytes': self.rcvbuf_actual_bytes,
         }
     
     def set_target_fps(self, fps: int):

@@ -18,6 +18,7 @@ SUPPORTED_DEVICES = [
 
 BAUD_RATES = [4_000_000, 2_000_000, 115_200]
 BAUD_CHANGE_COMMAND = bytearray([0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 0x3D, 0x00])
+_listener_stop_event = threading.Event()
 
 # Index mapping: 0=L, 1=R, 2=M, 3=S4, 4=S5
 _LOCK_CMD_BY_IDX = {
@@ -91,44 +92,77 @@ def km_version_ok(ser):
         return False
 
 
+def _stop_listener_thread(timeout: float = 0.3):
+    _listener_stop_event.set()
+    thread = state.listener_thread
+    if thread is not None and thread is not threading.current_thread():
+        try:
+            if thread.is_alive():
+                thread.join(timeout=timeout)
+        except Exception:
+            pass
+    state.listener_thread = None
+
+
 def _start_listener_thread():
-    if state.listener_thread is None or not state.listener_thread.is_alive():
-        log_print("[INFO] Starting serial listener thread...")
-        state.listener_thread = threading.Thread(target=_listener_loop, daemon=True)
-        state.listener_thread.start()
-        log_print("[INFO] Serial listener thread started.")
+    if state.listener_thread is not None and state.listener_thread.is_alive():
+        _stop_listener_thread()
+    _listener_stop_event.clear()
+    log_print("[INFO] Starting serial listener thread...")
+    state.listener_thread = threading.Thread(target=_listener_loop, daemon=True)
+    state.listener_thread.start()
+    log_print("[INFO] Serial listener thread started.")
+
+
+def _apply_button_mask(v: int):
+    changed = state.last_button_mask ^ v
+    if changed:
+        with state.button_states_lock:
+            for i in range(5):
+                m = 1 << i
+                if changed & m:
+                    state.button_states[i] = bool(v & m)
+        state.last_button_mask = v
+
+
+def _feed_listener_chunk(chunk: bytes, prefix: bytes = b"") -> bytes:
+    """Parse MAKCU `km.<mask>` button events (and bare 1-byte bitmasks) from serial bytes."""
+    for v in chunk:
+        if prefix == b"km." and v <= 31:
+            # Accept all 0..31 masks after "km." including 0x0A (R+S4) and 0x0D (L+M+S4).
+            _apply_button_mask(v)
+        elif v not in (0x0A, 0x0D) and v <= 31:
+            _apply_button_mask(v)
+        prefix = (prefix + bytes((v,)))[-3:]
+    return prefix
 
 
 def _listener_loop():
     state.reset_button_states()
+    prefix = b""
 
-    while state.is_connected and state.active_backend == "Serial":
+    while not _listener_stop_event.is_set() and state.is_connected and state.active_backend == "Serial":
         try:
-            if state.makcu is None:
+            ser = state.makcu
+            if ser is None or not getattr(ser, "is_open", True):
                 time.sleep(0.01)
                 continue
 
-            b = state.makcu.read(1)
-            if not b:
+            waiting = int(getattr(ser, "in_waiting", 0) or 0)
+            chunk = ser.read(waiting if waiting > 0 else 1)
+            if not chunk:
                 continue
 
-            v = b[0]
-            if v in (0x0A, 0x0D) or v > 31:
-                continue
-
-            changed = state.last_button_mask ^ v
-            if changed:
-                with state.button_states_lock:
-                    for i in range(5):
-                        m = 1 << i
-                        if changed & m:
-                            state.button_states[i] = bool(v & m)
-                state.last_button_mask = v
+            prefix = _feed_listener_chunk(chunk, prefix)
 
         except serial.SerialException as e:
+            if _listener_stop_event.is_set() or not state.is_connected:
+                break
             log_print(f"[ERROR] Serial listener exception: {e}")
             break
         except Exception as e:
+            if _listener_stop_event.is_set() or not state.is_connected or state.makcu is None:
+                break
             log_print(f"[WARN] Serial listener error: {e}")
             time.sleep(0.001)
 
@@ -219,9 +253,10 @@ def disconnect():
     # physical mouse until a replug or an explicit release.
     if state.makcu is not None:
         _release_stale_state(state.makcu)
+    _listener_stop_event.set()
     state.set_connected(False, "Serial")
     _safe_close_port()
-    state.listener_thread = None
+    _stop_listener_thread()
     state.mask_applied_idx = None
     state.reset_button_states()
 
@@ -366,11 +401,14 @@ def switch_to_4m():
             return False
 
         log_print("[INFO] Sending 4M handshake command...")
+        _listener_stop_event.set()
+        state.set_connected(False, "Serial")
         with state.makcu_lock:
             state.makcu.write(BAUD_CHANGE_COMMAND)
             state.makcu.flush()
 
-        state.makcu.close()
+        _safe_close_port()
+        _stop_listener_thread()
         time.sleep(0.15)
 
         log_print("[INFO] Attempting to connect at 4M baud rate...")

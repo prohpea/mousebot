@@ -32,6 +32,19 @@ class TestRemainingTabs(unittest.TestCase):
         self.assertEqual(app._active_tab_name, "Vision")
         self.assertTrue(hasattr(app, "card_color_preset"), "Vision tab should have card_color_preset")
         self.assertTrue(hasattr(app, "card_hsv_tuning"), "Vision tab should have card_hsv_tuning")
+        merge_slider = app._slider_widgets.get("detection_merge_distance")
+        self.assertIsNotNone(merge_slider, "Vision tab should register detection_merge_distance slider")
+        self.assertEqual((merge_slider["min"], merge_slider["max"]), (0, 18))
+        self.assertEqual(app.settings_btn.winfo_manager(), "pack", "Sidebar Settings button should be visible")
+        self.assertIn("show_opencv_windows", app._checkbox_vars)
+        from src.utils.config import config as _cfg
+        prev_opencv = bool(getattr(_cfg, "show_opencv_windows", True))
+        try:
+            app.var_show_opencv_windows.set(not prev_opencv)
+            app._on_show_opencv_windows_changed()
+            self.assertEqual(_cfg.show_opencv_windows, not prev_opencv)
+        finally:
+            _cfg.show_opencv_windows = prev_opencv
 
         # 2. Hardware tab
         app._show_general_tab()

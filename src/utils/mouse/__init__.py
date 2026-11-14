@@ -512,6 +512,15 @@ def connect_to_serial(mode=None, port=None) -> bool:
         return False
 
     ok = SerialAPI.connect(port=selected_port if selected_mode == "Manual" else None)
+    if ok:
+        try:
+            from src.utils.config import config
+
+            auto_switch_4m = bool(getattr(config, "serial_auto_switch_4m", False))
+        except Exception:
+            auto_switch_4m = False
+        if auto_switch_4m and getattr(state.makcu, "baudrate", None) == 115_200:
+            SerialAPI.switch_to_4m()
     _sync_public_state()
     return ok
 

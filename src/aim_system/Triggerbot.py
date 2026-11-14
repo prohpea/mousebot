@@ -1,6 +1,7 @@
 """
 Triggerbot module.
 """
+import math
 import random
 import threading
 import time
@@ -9,6 +10,11 @@ try:
     import cv2
 except Exception:
     cv2 = None
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 from src.utils.config import config
 from src.utils.debug_logger import log_print
@@ -38,7 +44,7 @@ def _safe_destroy_window(name):
     if cv2 is None:
         return
     try:
-        cv2.destroyWindow(name)
+        preview_throttle.destroy(name)
     except Exception:
         pass
 
@@ -83,6 +89,38 @@ def evaluate_trigger_metrics(pixel_count, roi_area, min_pixels, min_ratio):
     return detected, ratio
 
 
+def resolve_confirm_frames(frame_period_s=None):
+    """Required confirm frames, from ``trigger_confirm_ms`` when it is > 0.
+
+    ``trigger_confirm_frames`` stays the default so nothing changes for existing
+    configs. A positive ``trigger_confirm_ms`` expresses the same budget in time
+    (e.g. 6.94 ms == one frame at 144 Hz), which is what makes the click delay
+    independent of the configured frame rate.
+    """
+    frames = max(1, int(getattr(config, "trigger_confirm_frames", 2)))
+    try:
+        confirm_ms = float(getattr(config, "trigger_confirm_ms", 0.0) or 0.0)
+    except Exception:
+        confirm_ms = 0.0
+    if confirm_ms <= 0.0:
+        return frames
+
+    period_ms = None
+    if frame_period_s is not None:
+        try:
+            period_ms = max(0.001, float(frame_period_s) * 1000.0)
+        except Exception:
+            period_ms = None
+    if period_ms is None:
+        try:
+            period_ms = 1000.0 / max(1.0, float(getattr(config, "target_fps", 200)))
+        except Exception:
+            period_ms = 5.0
+    # A budget of exactly one frame must yield one frame: without the epsilon,
+    # 6.944444444444445 / 6.944444444444444 rounds up to 2.
+    return max(1, int(math.ceil((confirm_ms / period_ms) - 1e-9)))
+
+
 def update_confirm_counter(current_count, detected, confirm_frames):
     """Advance/reset trigger confirm counter."""
     required = max(1, int(confirm_frames))
@@ -108,6 +146,41 @@ def _has_target_in_trigger_fov(targets, fov_radius):
         if distance <= radius:
             return True
     return False
+
+
+def slice_mask_for_roi(source_mask, source_mask_roi, x1, y1, x2, y2):
+    """Cut the frame-space ROI ``(x1, y1, x2, y2)`` out of a (possibly offset) mask.
+
+    Returns the slice when it is exactly the requested region as uint8, and
+    ``None`` when the mask does not cover it. Callers must then fall back to
+    thresholding: a slice of the wrong region is worse than a second inRange,
+    because it silently measures colour somewhere else.
+    """
+    if source_mask is None or np is None:
+        return None
+
+    mx0, my0 = 0, 0
+    if source_mask_roi is not None:
+        try:
+            mx0, my0 = int(source_mask_roi[0]), int(source_mask_roi[1])
+        except Exception:
+            mx0, my0 = 0, 0
+
+    mh, mw = source_mask.shape[:2]
+    sx1 = max(0, min(x1 - mx0, mw))
+    sy1 = max(0, min(y1 - my0, mh))
+    sx2 = max(sx1, min(x2 - mx0, mw))
+    sy2 = max(sy1, min(y2 - my0, mh))
+    candidate = source_mask[sy1:sy2, sx1:sx2]
+
+    if (
+        candidate is None
+        or candidate.size == 0
+        or candidate.shape[:2] != (y2 - y1, x2 - x1)
+        or candidate.dtype != np.uint8
+    ):
+        return None
+    return candidate
 
 
 def _reset_tracking_state(reset_burst=False):
@@ -234,13 +307,29 @@ def process_triggerbot(
     tbburst_interval_max,
     targets=None,
     source_img=None,
+    source_mask=None,
+    source_mask_roi=None,
 ):
+    """Evaluate the trigger path for one frame.
+
+    ``source_mask``/``source_mask_roi`` let the caller hand over the raw HSV mask
+    already produced by ``detection.analyze`` for this exact frame. When given,
+    the centre ROI is sliced out of that mask instead of paying a second
+    ``cvtColor``+``inRange`` over the same pixels. The slice is byte-identical to
+    recomputing it, which is what the trigger tests assert.
+    """
     if not getattr(config, "enabletb", False):
         _reset_tracking_state(reset_burst=True)
         _close_trigger_debug_windows()
         return "DISABLED"
     if cv2 is None:
         return "ERROR: OpenCV unavailable"
+
+    # Monotonic decision deadline for this call. perf_counter never jumps when
+    # the wall clock is corrected (NTP, manual change), so cooldown/delay maths
+    # cannot fire early or hang. Every timestamp stored in ``_triggerbot_state``
+    # must use this same clock, otherwise two different epochs get compared.
+    decision_start = time.perf_counter()
 
     trigger_type = _resolve_trigger_type()
     previous_trigger_type = str(_triggerbot_state.get("active_trigger_type", "current")).strip().lower()
@@ -348,35 +437,43 @@ def process_triggerbot(
             return "INVALID_ROI"
 
         roi_bgr = _ensure_bgr(roi)
-        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-        hsv_upper = model[1]
-        hsv_lower = model[0]
-        mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+        mask = None
+        if source_mask is not None:
+            # Slice the shared raw mask in frame coordinates. It was produced
+            # from the same frame and the same HSV bounds, so this is exactly
+            # cv2.inRange(cv2.cvtColor(roi_bgr)) without the second colour pass.
+            mask = slice_mask_for_roi(source_mask, source_mask_roi, x1, y1, x2, y2)
+
+        if mask is None:
+            hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+            hsv_upper = model[1]
+            hsv_lower = model[0]
+            mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
 
         pixel_count = int(cv2.countNonZero(mask))
         roi_area = int(mask.shape[0] * mask.shape[1])
         min_pixels = max(1, int(getattr(config, "trigger_min_pixels", 4)))
         min_ratio = max(0.0, float(getattr(config, "trigger_min_ratio", 0.03)))
-        confirm_frames = max(1, int(getattr(config, "trigger_confirm_frames", 2)))
+        confirm_frames = resolve_confirm_frames()
         detected, ratio = evaluate_trigger_metrics(pixel_count, roi_area, min_pixels, min_ratio)
 
         show_windows = bool(getattr(config, "show_opencv_windows", True))
         show_roi = bool(getattr(config, "show_opencv_roi", True))
         show_mask = bool(getattr(config, "show_opencv_triggerbot_mask", True))
-        # Preview windows are throttled: waitKey is pumped once per frame by the
-        # caller (main.track_once), not per window.
+        # Preview windows are throttled and painted by the preview render
+        # worker; submitting an image here never blocks the tracking thread.
         if show_windows and show_roi:
             if preview_throttle.render_if_due("ROI"):
-                cv2.imshow("ROI", roi)
+                preview_throttle.imshow("ROI", roi)
         else:
             _safe_destroy_window("ROI")
         if show_windows and show_mask:
             if preview_throttle.render_if_due("Mask"):
-                cv2.imshow("Mask", mask)
+                preview_throttle.imshow("Mask", mask)
         else:
             _safe_destroy_window("Mask")
 
-        now = time.time()
+        now = time.perf_counter()
 
         if not detected:
             with _triggerbot_state["burst_lock"]:
@@ -397,6 +494,14 @@ def process_triggerbot(
 
         if not is_confirmed:
             return f"CONFIRMING ({confirm_count}/{confirm_frames})"
+
+        # From here on the frame has enough colour in the centre ROI: this is the
+        # point that decides whether a click is issued, and its latency is what
+        # "time to click" means.
+        try:
+            _triggerbot_state["last_decision_ms"] = (time.perf_counter() - decision_start) * 1000.0
+        except Exception:
+            pass
 
         cv2.putText(
             img,

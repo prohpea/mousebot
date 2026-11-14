@@ -594,6 +594,92 @@ class CaptureService:
         except Exception:
             return frame
 
+    def read_frame_with_seq(self, apply_fov=True, after_seq=None, timeout=0.0):
+        """Read the next frame together with a freshness sequence number.
+
+        Returns ``(frame, seq)``. For UDP, ``seq`` is the receiver's publish
+        counter: it only changes when a new frame was decoded, so a caller can
+        skip work when ``seq`` equals the previous value. ``after_seq`` /
+        ``timeout`` ask the UDP receiver to block until a frame newer than
+        ``after_seq`` arrives (or the timeout expires).
+
+        Every other capture mode has no frame counter, so it returns
+        ``(read_frame(apply_fov), None)``; ``None`` means "always treat as new"
+        and keeps those modes on exactly their previous behaviour.
+        """
+        if self.mode != "UDP":
+            return self.read_frame(apply_fov=apply_fov), None
+
+        if not self.udp_manager:
+            return None, None
+
+        try:
+            receiver = self.udp_manager.get_receiver()
+            if not receiver:
+                log_print("[Capture] UDP receiver is None")
+                return None, None
+
+            if after_seq is not None and hasattr(receiver, "wait_for_new_frame"):
+                frame, seq = receiver.wait_for_new_frame(after_seq, timeout)
+                if seq == after_seq:
+                    # Nothing new within the budget: report "no frame" rather
+                    # than handing the caller the same image again.
+                    return None, seq
+                if frame is None or frame.size == 0:
+                    return None, seq
+                if apply_fov:
+                    frame = self._apply_mode_fov(frame)
+                return frame, seq
+
+            frame, seq = receiver.get_current_frame_with_seq()
+            if frame is None or frame.size == 0:
+                return None, seq
+            if apply_fov:
+                frame = self._apply_mode_fov(frame)
+            return frame, seq
+        except Exception as e:
+            log_print(f"[Capture] UDP read frame error: {e}")
+            return None, None
+
+    def get_frame_meta(self):
+        """Return latency metadata for the newest UDP frame, or ``{}``.
+
+        Only the UDP receiver publishes per-frame timing; every other mode has
+        no timing source and reports an empty dict so callers can stay uniform.
+        """
+        if self.mode != "UDP" or not self.udp_manager:
+            return {}
+        try:
+            receiver = self.udp_manager.get_receiver()
+            if not receiver or not hasattr(receiver, "get_last_frame_meta"):
+                return {}
+            return receiver.get_last_frame_meta() or {}
+        except Exception:
+            return {}
+
+    def _read_udp_frame(self, apply_fov=True, receiver=None):
+        """Read the current UDP frame (shared by read_frame / read_frame_with_seq)."""
+        if receiver is None:
+            if not self.udp_manager:
+                return None
+            receiver = self.udp_manager.get_receiver()
+        if not receiver:
+            log_print("[Capture] UDP receiver is None")
+            return None
+
+        frame = receiver.get_current_frame()
+        if frame is None:
+            # Normal while connecting, or when no new frame has arrived.
+            return None
+
+        if frame.size == 0:
+            return None
+
+        if apply_fov:
+            frame = self._apply_mode_fov(frame)
+
+        return frame
+
     def read_frame(self, apply_fov=True):
         """
         璁€鍙栫暥鍓嶅箑
@@ -629,30 +715,8 @@ class CaptureService:
                 return None
                 
         elif self.mode == "UDP":
-            if not self.udp_manager:
-                return None
-            
             try:
-                receiver = self.udp_manager.get_receiver()
-                if not receiver:
-                    log_print("[Capture] UDP receiver is None")
-                    return None
-                
-                # OBS_UDP_Receiver.get_current_frame() 杩斿洖 BGR numpy array
-                frame = receiver.get_current_frame()
-                if frame is None:
-                    # 閫欐槸姝ｅ父鐨勶紝鍦ㄥ墰閫ｆ帴鎴栨矑鏈夋柊骞€鏅傛渻杩斿洖 None
-                    return None
-                
-                # 椹楄瓑骞€鐨勬湁鏁堟€?
-                if frame.size == 0:
-                    return None
-                
-                # 濡傛灉鍟熺敤瑁佸垏锛屽墖鎳夌敤涓績瑁佸垏锛堟鏂瑰舰锛?
-                if apply_fov:
-                    frame = self._apply_mode_fov(frame)
-                    
-                return frame
+                return self._read_udp_frame(apply_fov=apply_fov)
             except Exception as e:
                 log_print(f"[Capture] UDP read frame error: {e}")
                 return None

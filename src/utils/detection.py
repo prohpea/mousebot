@@ -257,15 +257,121 @@ def _get_cached_kernel(h: int, w: int) -> np.ndarray:
     return k
 
 
-def perform_detection(model, image):
-    if model is None or image is None:
-        return [], None
+class DetectionFrame:
+    """Result of one :func:`analyze` call, optionally computed on a sub-rectangle.
 
-    hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    ``mask``/``raw_mask`` are sized to ``roi`` when a ROI was used, so callers
+    that need a full-frame image must ask for one explicitly with
+    :meth:`full_mask`. That allocation is therefore only paid on frames where a
+    consumer (the throttled MASK preview) actually asks for the image.
+    """
+
+    __slots__ = (
+        "detections",
+        "mask",
+        "raw_mask",
+        "roi",
+        "roi_used",
+        "mask_nonzero",
+        "frame_shape",
+        "_full_mask",
+    )
+
+    def __init__(self, detections, mask, raw_mask, roi, roi_used, mask_nonzero, frame_shape):
+        self.detections = detections
+        self.mask = mask
+        self.raw_mask = raw_mask
+        self.roi = roi
+        self.roi_used = roi_used
+        self.mask_nonzero = int(mask_nonzero)
+        self.frame_shape = frame_shape
+        self._full_mask = None
+
+    def empty(self):
+        return not self.detections
+
+    def full_mask(self):
+        """Return the mask in full-frame coordinates (lazily allocated)."""
+        if self._full_mask is not None:
+            return self._full_mask
+        mask = self.mask
+        if self.frame_shape is None:
+            self._full_mask = mask
+            return mask
+
+        frame_h = int(self.frame_shape[0])
+        frame_w = int(self.frame_shape[1])
+        if mask is None or mask.size == 0 or self.roi is None:
+            # Nothing was analysed (empty/invalid ROI): an all-zero frame-sized
+            # mask is the honest answer, and keeps preview code shape-safe.
+            self._full_mask = np.zeros((frame_h, frame_w), np.uint8)
+            return self._full_mask
+
+        if mask.shape[0] == frame_h and mask.shape[1] == frame_w:
+            # Already frame-sized: either no ROI was used, or the ROI happened
+            # to equal the frame. Either way nothing to paste.
+            self._full_mask = mask
+            return mask
+
+        x0, y0, _x1, _y1 = self.roi
+        canvas = np.zeros((frame_h, frame_w), np.uint8)
+        h = min(mask.shape[0], max(0, frame_h - y0))
+        w = min(mask.shape[1], max(0, frame_w - x0))
+        if h > 0 and w > 0:
+            canvas[y0:y0 + h, x0:x0 + w] = mask[:h, :w]
+        self._full_mask = canvas
+        return canvas
+
+
+def _resolve_roi(roi, frame_w, frame_h):
+    """Normalise a caller-supplied ROI.
+
+    Returns ``(use_roi, box, invalid)``. ``box`` is clamped to the frame and
+    ``use_roi`` is False when the ROI covers so much of the frame that cropping
+    would only add offset arithmetic and border noise. ``invalid`` is True when
+    the caller asked for a ROI that contains no pixel at all (``x1 <= x0`` or
+    ``y1 <= y0``): the track thread must get an empty result instead of an
+    exception.
+    """
+    if roi is None:
+        return False, None, False
+    try:
+        x0, y0, x1, y1 = [int(round(float(v))) for v in tuple(roi)[:4]]
+    except Exception:
+        return False, None, False
+
+    x0 = max(0, min(x0, frame_w - 1))
+    y0 = max(0, min(y0, frame_h - 1))
+    x1 = max(0, min(x1, frame_w))
+    y1 = max(0, min(y1, frame_h))
+    if x1 <= x0 or y1 <= y0:
+        return True, None, True
+
+    try:
+        max_fraction = float(getattr(config, "detection_roi_max_fraction", 0.70))
+    except Exception:
+        max_fraction = 0.70
+    if max_fraction < 1.0:
+        frame_area = float(max(1, frame_w * frame_h))
+        if ((x1 - x0) * (y1 - y0)) / frame_area >= max_fraction:
+            return False, None, False
+    return True, (x0, y0, x1, y1), False
+
+
+def _analyze_region(model, sub_image, frame_w, frame_h, offset_x, offset_y):
+    """Run the HSV detection chain on ``sub_image`` and return frame-space rects.
+
+    Thresholds are derived from the *full* frame area, not from the analysed
+    rectangle, so cropping the region does not silently rescale the size
+    filters. Border rejection is evaluated in frame coordinates for the same
+    reason: a bbox touching the inner edge of a ROI is not touching the frame.
+    """
+    hsv_img = cv2.cvtColor(sub_image, cv2.COLOR_BGR2HSV)
     raw_mask = cv2.inRange(hsv_img, model[0], model[1])
     # Morphology below always returns a fresh array, so raw_mask stays intact
     # without a defensive copy.
     mask = raw_mask
+    raw_nonzero = cv2.countNonZero(raw_mask)
 
     # Reference-like morphology path (close + dilate) is the default because it
     # keeps thin color edges that OPEN often removes completely.
@@ -302,14 +408,15 @@ def perform_detection(model, image):
             mask = cv2.dilate(mask, legacy_kernel, iterations=legacy_dilate_iterations)
 
     # If morphology erased all pixels, fall back to raw mask instead of returning empty.
-    if cv2.countNonZero(mask) == 0 and cv2.countNonZero(raw_mask) > 0:
+    # One countNonZero for the raw mask: the same value answers both this
+    # decision and the raw fallback pass below.
+    if cv2.countNonZero(mask) == 0 and raw_nonzero > 0:
         mask = raw_mask
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     rects, centers = [], []
 
-    img_h, img_w = image.shape[:2]
-    frame_area = max(1, img_h * img_w)
+    frame_area = max(1, int(frame_w) * int(frame_h))
     min_bbox_area = int(getattr(config, "detection_min_bbox_area", max(36, int(frame_area * 0.00025))))
     min_contour_area = float(
         getattr(config, "detection_min_contour_area", max(8, int(frame_area * 0.00008)))
@@ -358,7 +465,9 @@ def perform_detection(model, image):
         if aspect < min_aspect or aspect > max_aspect:
             continue
 
-        touches_border = _touches_border((x, y, w, h), img_w, img_h, margin=border_margin)
+        touches_border = _touches_border(
+            (x + offset_x, y + offset_y, w, h), frame_w, frame_h, margin=border_margin
+        )
         if touches_border:
             if bbox_area < edge_reject_area:
                 continue
@@ -371,11 +480,11 @@ def perform_detection(model, image):
         if require_vertical_line and not has_color_vertical_line(mask, cx, y, y + h):
             continue
 
-        rects.append((x, y, w, h))
-        centers.append((cx, cy))
+        rects.append((x + offset_x, y + offset_y, w, h))
+        centers.append((cx + offset_x, cy + offset_y))
 
     # Fallback pass on raw mask with minimal checks if filtered pass found nothing.
-    if not rects and cv2.countNonZero(raw_mask) > 0:
+    if not rects and raw_nonzero > 0:
         raw_contours, _ = cv2.findContours(raw_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         loose_min_area = max(20, int(min_bbox_area * 0.5))
         for c in raw_contours:
@@ -383,18 +492,73 @@ def perform_detection(model, image):
             if int(w) * int(h) < loose_min_area:
                 continue
             cx, cy = x + w // 2, y + h // 2
-            rects.append((x, y, w, h))
-            centers.append((cx, cy))
+            rects.append((x + offset_x, y + offset_y, w, h))
+            centers.append((cx + offset_x, cy + offset_y))
 
     if not rects:
-        return [], mask
+        return [], mask, raw_mask
 
     rects_centers = sorted(zip(rects, centers), key=lambda rc: _bbox_area(rc[0]), reverse=True)
     rects = [rc[0] for rc in rects_centers]
     centers = [rc[1] for rc in rects_centers]
 
     merged_rects, _ = merge_close_rects(rects, centers)
-    return [{"class": "player", "bbox": r, "confidence": 1.0} for r in merged_rects], mask
+    return [{"class": "player", "bbox": r, "confidence": 1.0} for r in merged_rects], mask, raw_mask
+
+
+def analyze(model, image, roi=None):
+    """Detect colour blobs, optionally restricted to ``roi = (x0, y0, x1, y1)``.
+
+    Detections are always reported in full-frame coordinates. ``roi_used`` says
+    whether the crop actually happened (it is skipped for a near-full-frame ROI,
+    and for a caller ROI that clamps to nothing the result is empty rather than
+    an exception, because the caller is a tracking thread that must not die).
+
+    ``mask`` and ``raw_mask`` cover the analysed rectangle; ``full_mask()``
+    expands the mask on demand, so the full-frame allocation is only paid when
+    a consumer such as the MASK preview actually renders.
+    """
+    if model is None or image is None:
+        return DetectionFrame([], None, None, None, False, 0, None)
+
+    frame_shape = image.shape
+    frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+
+    use_roi, box, invalid = _resolve_roi(roi, frame_w, frame_h)
+    if invalid:
+        empty_mask = np.zeros((0, 0), np.uint8)
+        return DetectionFrame([], empty_mask, None, None, True, 0, frame_shape)
+
+    if use_roi:
+        offset_x, offset_y = box[0], box[1]
+        sub_image = image[box[1]:box[3], box[0]:box[2]]
+    else:
+        box = (0, 0, frame_w, frame_h)
+        offset_x = offset_y = 0
+        sub_image = image
+
+    detections, mask, raw_mask = _analyze_region(
+        model, sub_image, frame_w, frame_h, offset_x, offset_y
+    )
+
+    if not bool(getattr(config, "detection_return_raw_mask", True)):
+        raw_mask = None
+
+    return DetectionFrame(
+        detections,
+        mask,
+        raw_mask,
+        box,
+        use_roi,
+        cv2.countNonZero(mask) if mask is not None and mask.size else 0,
+        frame_shape,
+    )
+
+
+def perform_detection(model, image):
+    """Backward-compatible wrapper: ``(detections, mask)`` for the whole frame."""
+    result = analyze(model, image)
+    return result.detections, result.full_mask()
 
 
 def get_class_names():

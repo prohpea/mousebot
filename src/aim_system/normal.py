@@ -654,86 +654,220 @@ def _apply_ncaf_aim(dx, dy, distance_to_center, tracker, is_sec=False):
 class _WindMouseConfig:
     """WindMouse 鎵€闇€鐨勯厤缃寘瑁濆櫒"""
     def __init__(self, is_sec=False):
-        if is_sec:
-            self.smooth_gravity = float(getattr(config, "wm_gravity_sec", 9.0))
-            self.smooth_wind = float(getattr(config, "wm_wind_sec", 3.0))
-            self.smooth_max_step = float(getattr(config, "wm_max_step_sec", 15.0))
-            self.smooth_min_step = float(getattr(config, "wm_min_step_sec", 2.0))
-            self.smooth_min_delay = float(getattr(config, "wm_min_delay_sec", 0.001))
-            self.smooth_max_delay = float(getattr(config, "wm_max_delay_sec", 0.003))
-            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold_sec", 50.0))
-        else:
-            self.smooth_gravity = float(getattr(config, "wm_gravity", 9.0))
-            self.smooth_wind = float(getattr(config, "wm_wind", 3.0))
-            self.smooth_max_step = float(getattr(config, "wm_max_step", 15.0))
-            self.smooth_min_step = float(getattr(config, "wm_min_step", 2.0))
-            self.smooth_min_delay = float(getattr(config, "wm_min_delay", 0.001))
-            self.smooth_max_delay = float(getattr(config, "wm_max_delay", 0.003))
-            self.smooth_distance_threshold = float(getattr(config, "wm_distance_threshold", 50.0))
+        def _cfg_float(name, default):
+            try:
+                return float(getattr(config, name, default))
+            except Exception:
+                return float(default)
+
+        suffix = "_sec" if is_sec else ""
+        self.smooth_gravity = _cfg_float(f"wm_gravity{suffix}", 9.0)
+        self.smooth_wind = _cfg_float(f"wm_wind{suffix}", 3.0)
+        self.smooth_max_step = _cfg_float(f"wm_max_step{suffix}", 15.0)
+        self.smooth_min_step = _cfg_float(f"wm_min_step{suffix}", 2.0)
+        self.smooth_min_delay = _cfg_float(f"wm_min_delay{suffix}", 0.001)
+        self.smooth_max_delay = _cfg_float(f"wm_max_delay{suffix}", 0.003)
+        self.smooth_distance_threshold = _cfg_float(f"wm_distance_threshold{suffix}", 50.0)
         
-        # Profile "Burst & Spray" — ultra-smooth humanized tracking for burst/spray control
-        self.smooth_reaction_min = 0.08
-        self.smooth_reaction_max = 0.20
-        self.smooth_close_range = 30.0
-        self.smooth_close_speed = 0.15
-        self.smooth_far_range = 200.0
-        self.smooth_far_speed = 0.35
-        self.smooth_fatigue_effect = 0.5
-        self.smooth_max_step_ratio = 0.08
-        self.smooth_target_area_ratio = 0.05
-        self.smooth_acceleration = 0.50
-        self.smooth_deceleration = 0.40
-        self.smooth_micro_corrections = 1
+        # Humanization / shaping coefficients. Geometry above is in PIXELS; the
+        # literals are the historical defaults. The reaction window is the one
+        # per-aimbot value: the Sec sliders in src/ui.py write the `_sec` names,
+        # so reading the shared one made the Sec sliders a dead control.
+        self.smooth_reaction_min = _cfg_float(f"smooth_reaction_min{suffix}", 0.08)
+        self.smooth_reaction_max = _cfg_float(f"smooth_reaction_max{suffix}", 0.20)
+        self.smooth_close_range = _cfg_float("smooth_close_range", 30.0)
+        self.smooth_close_speed = _cfg_float("smooth_close_speed", 0.15)
+        self.smooth_far_range = _cfg_float("smooth_far_range", 200.0)
+        self.smooth_far_speed = _cfg_float("smooth_far_speed", 0.35)
+        self.smooth_max_step_ratio = _cfg_float("smooth_max_step_ratio", 0.08)
+        self.smooth_target_area_ratio = _cfg_float("smooth_target_area_ratio", 0.05)
+        self.smooth_acceleration = _cfg_float("smooth_acceleration", 0.50)
+        self.smooth_deceleration = _cfg_float("smooth_deceleration", 0.40)
+
+        # Per-frame emission budget: the anti-lump / anti-rattle controls.
+        self.wm_frame_gain = _cfg_float("wm_frame_gain", 0.50)
+        self.wm_frame_max_step_px = _cfg_float("wm_frame_max_step_px", 8.0)
+        self.wm_settle_radius_px = _cfg_float("wm_settle_radius_px", 2.2)
+        self.wm_deadzone_px = _cfg_float("wm_deadzone_px", 0.40)
+
+
+# Kept small on purpose: one frame may spend at most its configured budget, so
+# unspent sub-count movement survives to the next frame without turning into a
+# burst ("windup") of its own.
+_WM_MAX_CARRY = 1.0
+
+
+def _wm_counts_per_pixel(tracker, is_sec=False):
+    """Counts of mouse movement per screen pixel, per axis, for the active aimbot.
+
+    `normal_x_speed` / `normal_y_speed` are folded in so WindMouse keeps the
+    same 100/70 recoil asymmetry as the Normal mode.
+    """
+    if is_sec:
+        x_speed = float(getattr(config, "normal_x_speed_sec", getattr(tracker, "normal_x_speed_sec", 1.0)))
+        y_speed = float(getattr(config, "normal_y_speed_sec", getattr(tracker, "normal_y_speed_sec", 1.0)))
+    else:
+        x_speed = float(getattr(config, "normal_x_speed", getattr(tracker, "normal_x_speed", 1.0)))
+        y_speed = float(getattr(config, "normal_y_speed", getattr(tracker, "normal_y_speed", 1.0)))
+    sens = float(getattr(config, "in_game_sens", getattr(tracker, "in_game_sens", 1.0)))
+    dpi = float(getattr(config, "mouse_dpi", getattr(tracker, "mouse_dpi", 800.0)))
+
+    cpp_x, cpp_y = calculate_movement(1.0, 1.0, sens, dpi)
+    cpp_x *= x_speed
+    cpp_y *= y_speed
+    # A zero/negative/invalid speed disables that axis instead of dividing by zero.
+    if not math.isfinite(cpp_x) or cpp_x <= 1e-6:
+        cpp_x = 1e-6
+    if not math.isfinite(cpp_y) or cpp_y <= 1e-6:
+        cpp_y = 1e-6
+    return cpp_x, cpp_y
+
+
+def _wm_carry(tracker, is_sec, value=None):
+    key = "_wm_carry_sec" if is_sec else "_wm_carry_main"
+    if value is not None:
+        setattr(tracker, key, value)
+        return value
+    carry = getattr(tracker, key, (0.0, 0.0))
+    try:
+        return (float(carry[0]), float(carry[1]))
+    except Exception:
+        return (0.0, 0.0)
+
+
+def _emit_windmouse_budget(tracker, dx, dy, wm_config, is_sec=False):
+    """Send at most one movement command for this frame, capped by the frame budget.
+
+    The old code collapsed every path step into one command, so a 40 px error
+    became a 40 px jump inside a single 6.94 ms frame. Here the path only
+    decides *shape*, while `wm_frame_gain` and `wm_frame_max_step_px` decide how
+    much of the remaining error may be spent now; leftover sub-count movement is
+    carried into the next frame and a settle radius stops the 1-count rattle.
+    """
+    from .windmouse_smooth import smooth_aimer
+
+    gain = max(0.05, min(1.0, float(getattr(wm_config, "wm_frame_gain", 0.50))))
+    max_step_px = max(0.5, float(getattr(wm_config, "wm_frame_max_step_px", 8.0)))
+    settle_px = max(0.0, float(getattr(wm_config, "wm_settle_radius_px", 2.2)))
+
+    err_px = math.hypot(dx, dy)
+    if err_px < settle_px:
+        # Already on target: stay silent and bleed the carry so the crosshair
+        # cannot oscillate by one count around the centre.
+        carry_x, carry_y = _wm_carry(tracker, is_sec)
+        _wm_carry(tracker, is_sec, (carry_x * 0.5, carry_y * 0.5))
+        return
+
+    cpp_x, cpp_y = _wm_counts_per_pixel(tracker, is_sec)
+
+    path = smooth_aimer.calculate_smooth_path(
+        dx, dy, wm_config, counts_per_pixel=(cpp_x, cpp_y)
+    )
+    if getattr(smooth_aimer, "last_switch", False):
+        _wm_carry(tracker, is_sec, (0.0, 0.0))
+
+    desired_x = float(dx) * cpp_x
+    desired_y = float(dy) * cpp_y
+
+    budget_px = min(err_px * gain, max_step_px)
+    budget_x = budget_px * cpp_x
+    budget_y = budget_px * cpp_y
+
+    sum_x = 0.0
+    sum_y = 0.0
+    for step in path:
+        if len(step) < 3:
+            continue
+        sum_x += float(step[0])
+        sum_y += float(step[1])
+
+    # A path that pushes away from the target (lead overshoot, wind noise on an
+    # axis with no error) is not usable: drop that axis, and if nothing is left
+    # fall through to the straight-step anti-stall branch below.
+    if dx == 0 or sum_x * dx < 0:
+        sum_x = 0.0
+    if dy == 0 or sum_y * dy < 0:
+        sum_y = 0.0
+
+    carry_x, carry_y = _wm_carry(tracker, is_sec)
+
+    if abs(sum_x) < 1e-9 and abs(sum_y) < 1e-9:
+        if smooth_aimer.in_reaction_delay():
+            # Deliberate human reaction window: hold this frame instead of
+            # masking it with an immediate straight-line snap.
+            return
+        # Anti-stall: fall back to one straight step inside the budget.
+        step_px = min(budget_px, err_px)
+        if err_px > 1e-9:
+            target_x = (float(dx) / err_px) * step_px * cpp_x + carry_x
+            target_y = (float(dy) / err_px) * step_px * cpp_y + carry_y
+        else:
+            target_x, target_y = carry_x, carry_y
+    else:
+        scale = 1.0
+        if abs(sum_x) > 1e-9:
+            scale = min(scale, budget_x / abs(sum_x))
+        if abs(sum_y) > 1e-9:
+            scale = min(scale, budget_y / abs(sum_y))
+        target_x = sum_x * scale + carry_x
+        target_y = sum_y * scale + carry_y
+
+    emit_x = int(round(target_x))
+    emit_y = int(round(target_y))
+
+    # Never move away from the target, never spend more than what is left, and
+    # never drift along an axis that has no error left (pure wind noise there
+    # is what makes the crosshair buzz).
+    if dx == 0 or emit_x * dx < 0:
+        emit_x = 0
+    if dy == 0 or emit_y * dy < 0:
+        emit_y = 0
+    # |emit| <= min(ceil(|desired|), budget + 1 count): crossing the target by
+    # less than one count is the worst case, and the settle radius absorbs it.
+    limit_x = min(int(math.ceil(abs(desired_x))), int(math.floor(budget_x + 1.0)))
+    limit_y = min(int(math.ceil(abs(desired_y))), int(math.floor(budget_y + 1.0)))
+    emit_x = max(-limit_x, min(limit_x, emit_x))
+    emit_y = max(-limit_y, min(limit_y, emit_y))
+
+    # Re-derive the carry from what is actually sent so a clamped command does
+    # not silently drop the remainder either.
+    new_carry_x = max(-_WM_MAX_CARRY, min(_WM_MAX_CARRY, target_x - emit_x))
+    new_carry_y = max(-_WM_MAX_CARRY, min(_WM_MAX_CARRY, target_y - emit_y))
+    _wm_carry(tracker, is_sec, (new_carry_x, new_carry_y))
+
+    if emit_x == 0 and emit_y == 0:
+        return
+
+    emit_x, emit_y = tracker._clip_movement(emit_x, emit_y)
+
+    if not is_sec:
+        lock_x = getattr(config, "mouse_lock_main_x", False)
+        lock_y = getattr(config, "mouse_lock_main_y", False)
+    else:
+        lock_x = getattr(config, "mouse_lock_sec_x", False)
+        lock_y = getattr(config, "mouse_lock_sec_y", False)
+    if lock_x or lock_y:
+        try:
+            from src.utils.mouse import update_movement_lock
+            update_movement_lock(lock_x, lock_y, is_main=not is_sec)
+        except Exception:
+            pass
+
+    label = "Sec Aimbot (WindMouse)" if is_sec else "Main Aimbot (WindMouse)"
+    _queue_move(tracker, emit_x, emit_y, 0.0, drop_oldest=True)
+    log_move(emit_x, emit_y, label)
 
 
 def _apply_windmouse_aim(dx, dy, tracker, is_sec=False):
     """
     WindMouse 妯″紡鐬勬簴锛氱敓鎴愰浜哄寲婊戦紶璺緫涓﹀煼琛?
-    
-    蹇呴爤鍏堜箻浠?x_speed/y_speed锛屽惁鍓?calculate_movement 鐢㈠嚭鐨勫害鏁稿€煎お灏?
-    (閫氬父 < 1)锛學indMouse 鐨?distance < 2 鍒ゆ柗鏈冪洿鎺ヤ笩妫勩€?
+
+    Path shape comes from WindMouse; the command actually sent each frame is
+    budget-limited (see `_emit_windmouse_budget`) so one 144 Hz frame can never
+    convert the whole remaining error into a single jolt.
     """
-    from .windmouse_smooth import smooth_aimer
-    
     wm_config = _WindMouseConfig(is_sec)
-    label = "Sec Aimbot (WindMouse)" if is_sec else "Main Aimbot (WindMouse)"
-    
-    if is_sec:
-        x_speed = float(getattr(config, "normal_x_speed_sec", tracker.normal_x_speed_sec))
-        y_speed = float(getattr(config, "normal_y_speed_sec", tracker.normal_y_speed_sec))
-    else:
-        x_speed = float(getattr(config, "normal_x_speed", tracker.normal_x_speed))
-        y_speed = float(getattr(config, "normal_y_speed", tracker.normal_y_speed))
-    
-    sens = float(getattr(config, "in_game_sens", tracker.in_game_sens))
-    dpi = float(getattr(config, "mouse_dpi", tracker.mouse_dpi))
-    
-    # 杞夋彌鐐烘粦榧犵Щ鍕曢噺锛屼甫涔樹互閫熷害淇傛暩锛堣垏 Normal 妯″紡涓€鑷达級
-    ndx, ndy = calculate_movement(dx, dy, sens, dpi)
-    ndx *= x_speed
-    ndy *= y_speed
-    
-    path = smooth_aimer.calculate_smooth_path(ndx, ndy, wm_config)
-    
-    if path:
-        # 鏇存柊绉诲嫊閹栧畾鐙€鎱嬶紙濡傛灉鍟熺敤锛?
-        try:
-            from src.utils.mouse import update_movement_lock
-            if not is_sec:
-                # Main Aimbot
-                lock_x = getattr(config, "mouse_lock_main_x", False)
-                lock_y = getattr(config, "mouse_lock_main_y", False)
-            else:
-                # Sec Aimbot
-                lock_x = getattr(config, "mouse_lock_sec_x", False)
-                lock_y = getattr(config, "mouse_lock_sec_y", False)
-            if lock_x or lock_y:
-                update_movement_lock(lock_x, lock_y, is_main=not is_sec)
-        except Exception:
-            pass
-        
-        _enqueue_path(tracker, path, max_steps=24, clear_existing=False)
-        log_move(ndx, ndy, label)
+    _emit_windmouse_budget(tracker, dx, dy, wm_config, is_sec=is_sec)
 
 
 # =====================================================
@@ -831,6 +965,8 @@ def process_normal_mode(
     targets_sec=None,
     targets_trigger=None,
     trigger_img=None,
+    trigger_mask=None,
+    trigger_mask_roi=None,
 ):
     """
     涓荤瀯婧栬搴﹀櫒锛圡ain Aimbot + Sec Aimbot + Triggerbot锛?
@@ -996,7 +1132,8 @@ def process_normal_mode(
                 tracker.tbburst_interval_min, tracker.tbburst_interval_max,
                 targets=targets_trigger,
                 source_img=trigger_img,
+                source_mask=trigger_mask,
+                source_mask_roi=trigger_mask_roi,
             )
         except Exception as e:
             log_print("[Triggerbot error]", e)
-

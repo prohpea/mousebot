@@ -858,8 +858,7 @@ class ViewerApp(ctk.CTk):
             height=22,
             corner_radius=6
         )
-        if self._legacy_ui_mode:
-            self.settings_btn.pack(fill="x", pady=(0, 2))
+        self.settings_btn.pack(fill="x", pady=(0, 2))
 
         # 分隔線 Divider
         ctk.CTkFrame(self.sidebar, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=6, pady=(3, 4))
@@ -1834,13 +1833,23 @@ class ViewerApp(ctk.CTk):
         )
         self.card_contour_filters.pack(fill="x", pady=(0, 10))
 
-        self._add_slider_in_frame(self.card_contour_filters.content, "Merge Distance", "detection_merge_distance", 50, 500,
-                                  int(getattr(config, "detection_merge_distance", 250)),
+        # Match detection.merge_close_rects() clamp (0-18) so slider/entry reflect real range.
+        self._add_slider_in_frame(self.card_contour_filters.content, "Merge Distance", "detection_merge_distance", 0, 18,
+                                  max(0, min(int(getattr(config, "detection_merge_distance", 12)), 18)),
                                   self._on_detection_merge_distance_changed)
         self._add_spacer_in_frame(self.card_contour_filters.content)
         self._add_slider_in_frame(self.card_contour_filters.content, "Min Contour Points", "detection_min_contour_points", 3, 100,
                                   int(getattr(config, "detection_min_contour_points", 5)),
                                   self._on_detection_min_contour_points_changed)
+        self._add_spacer_in_frame(self.card_contour_filters.content)
+        self.var_show_opencv_windows = tk.BooleanVar(value=bool(getattr(config, "show_opencv_windows", True)))
+        self._add_switch_in_frame(
+            self.card_contour_filters.content,
+            "Show OpenCV Windows",
+            self.var_show_opencv_windows,
+            self._on_show_opencv_windows_changed,
+        )
+        self._checkbox_vars["show_opencv_windows"] = self.var_show_opencv_windows
 
     def _show_general_tab(self):
         self._active_tab_name = "Hardware"
@@ -10058,14 +10067,20 @@ class ViewerApp(ctk.CTk):
             self._set_slider_value(key, val)
 
     def _on_detection_merge_distance_changed(self, val):
-        """Detection Merge Distance 鏀硅畩鏅傜殑鍥炶"""
-        config.detection_merge_distance = int(val)
-        log_print(f"[UI] Detection merge distance updated: {int(val)}")
+        """Detection Merge Distance 改變時的回調"""
+        clamped = max(0, min(int(round(float(val))), 18))
+        config.detection_merge_distance = clamped
+        log_print(f"[UI] Detection merge distance updated: {clamped}")
     
     def _on_detection_min_contour_points_changed(self, val):
-        """Detection Min Contour Points 鏀硅畩鏅傜殑鍥炶"""
+        """Detection Min Contour Points 改變時的回調"""
         config.detection_min_contour_points = int(val)
         log_print(f"[UI] Detection min contour points updated: {int(val)}")
+
+    def _on_show_opencv_windows_changed(self):
+        enabled = bool(self.var_show_opencv_windows.get())
+        config.show_opencv_windows = enabled
+        log_print(f"[UI] Show OpenCV Windows updated: {enabled}")
     
     def _on_mode_selected(self, val): 
         mode_value = self._aim_mode_display_to_value(val)
@@ -11246,6 +11261,8 @@ class SettingsWindow(ctk.CTkToplevel):
     def _on_save(self):
         """淇濆瓨瑷疆"""
         config.show_opencv_windows = self.show_opencv_var.get()
+        if hasattr(self.parent, "var_show_opencv_windows"):
+            self.parent.var_show_opencv_windows.set(bool(config.show_opencv_windows))
         config.show_opencv_mask = self.show_opencv_mask_var.get()
         config.show_opencv_detection = self.show_opencv_detection_var.get()
         config.show_opencv_roi = self.show_opencv_roi_var.get()
