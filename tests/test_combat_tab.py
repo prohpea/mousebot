@@ -41,6 +41,16 @@ class TestCombatTab(unittest.TestCase):
         app._on_fovsize_changed(35)
         self.assertEqual(config.fovsize, 35)
 
+        # Verify WindMouse frame-budget anti-overshoot sliders exist and update config
+        for key in ("wm_frame_gain", "wm_frame_max_step_px", "wm_settle_radius_px"):
+            self.assertIn(key, app._slider_widgets, f"{key} slider missing from Combat tab")
+        app._on_wm_frame_gain_changed(0.28)
+        app._on_wm_frame_max_step_px_changed(5.5)
+        app._on_wm_settle_radius_px_changed(3.2)
+        self.assertAlmostEqual(config.wm_frame_gain, 0.28)
+        self.assertAlmostEqual(config.wm_frame_max_step_px, 5.5)
+        self.assertAlmostEqual(config.wm_settle_radius_px, 3.2)
+
         # Test Secondary Aimbot tab
         app._show_sec_aimbot_tab()
         self.assertEqual(app._active_tab_name, "Sec Aimbot")

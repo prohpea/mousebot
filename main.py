@@ -16,14 +16,42 @@ except Exception:
     pass
 
 from src.utils.config import config
+from src.utils.debug_logger import log_print
 from src.utils.mouse import Mouse, is_button_pressed
 from src.utils.activation import get_active_aim_fov, get_active_trigger_fov
 from src.utils.detection import load_model, analyze
+from src.utils.ai_detection import TARGET_CLASS_NAMES
 from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
 from src.aim_system.anti_smoke_detector import AntiSmokeDetector
 from src.aim_system.target_smoother import TargetSmoother
 from src.utils import preview_throttle
+
+HEAD_CLASS_NAME = "head"
+BODY_CLASS_NAMES = frozenset(TARGET_CLASS_NAMES - {HEAD_CLASS_NAME})
+
+# A distant head is only a handful of pixels across: a 5x5 box is 25 px² and is
+# a real target, while a 5x5 ``body`` is noise. ``head`` therefore gets its own
+# floor instead of the body-sized ``min_bbox_area`` (40-100 px² on a 320x320
+# frame), which used to delete every small head before it could become a target.
+HEAD_MIN_BBOX_AREA = 9
+
+
+def _set_pixel(img, x, y, color):
+    """Paint exactly one pixel, clipped to the image.
+
+    ``cv2.circle(..., radius=0, ...)`` is the idiomatic way to draw a single
+    pixel, but the guarantee that a zero radius still marks the centre has
+    varied between OpenCV builds. Assigning the pixel directly keeps the compact
+    marker reproducible and cannot raise when the point is on the frame edge.
+    """
+    try:
+        xi, yi = int(x), int(y)
+        if 0 <= yi < img.shape[0] and 0 <= xi < img.shape[1]:
+            img[yi, xi] = color
+    except Exception:
+        pass
+
 
 class FrameInfo:
     """绨″柈鐨勫箑淇℃伅椤烇紝鐢ㄦ柤鍏煎鐝炬湁浠ｇ⒓"""
@@ -42,6 +70,218 @@ def _pacing_deadline(next_at, now, period):
     if next_at < now - period or next_at > now + period:
         return now
     return next_at
+
+
+def min_aim_bbox_area(frame_w, frame_h):
+    """Minimum bbox area (px²) a **body** detection must have to become a target.
+
+    Legacy morphology keeps the stricter configured floor, while the stable
+    mode allows smaller boxes; both scale with the frame area.
+
+    This is the body/player/enemy floor. A ``head`` box is filtered by its own
+    floor (``HEAD_MIN_BBOX_AREA``) instead, so a distant small head is not
+    discarded by a threshold tuned to reject body-sized noise.
+    """
+    frame_area = max(1, int(frame_w) * int(frame_h))
+    min_area = int(
+        getattr(config, "min_detection_bbox_area", max(120, int(frame_area * 0.0015)))
+    )
+    morph_mode = str(getattr(config, "detection_morph_mode", "legacy")).strip().lower()
+    if morph_mode != "stable":
+        min_area = min(min_area, max(40, int(frame_area * 0.00035)))
+    return min_area
+
+
+def _head_matches_body(body_box, head_box, pad_ratio=0.15):
+    """True when ``head_box`` is the head of the player detected in ``body_box``.
+
+    Two export flavours exist and both must pair:
+
+    * ``body`` includes the head: the head box is *inside* the body box (the
+      original case, matched by the centre-in-body test).
+    * ``body`` is the torso only: the head box sits *on top of* the body box,
+      its bottom edge roughly level with (or slightly above) the body's top
+      edge. A centre test rejects this pair, which used to emit two targets for
+      one player -- the real head and the 22 % estimate inside the chest.
+
+    The test is therefore "over the body horizontally, and either inside it or
+    directly above its top edge". Horizontal padding keeps a slightly
+    off-centre head attached; the vertical slacks are proportional to the body
+    height so the rule scales with distance from the camera.
+    """
+    bx, by, bw, bh = body_box
+    hx, hy, hw, hh = head_box
+    if bw <= 0 or bh <= 0 or hw <= 0 or hh <= 0:
+        return False
+
+    head_cx = hx + hw / 2.0
+    head_top = float(hy)
+    head_bottom = float(hy + hh)
+    pad_x = max(2.0, bw * pad_ratio)
+    if not (bx - pad_x <= head_cx <= bx + bw + pad_x):
+        return False
+
+    # How far above the body top a head may float and still belong to it.
+    top_slack = max(4.0, bh * 0.35)
+    if head_bottom < by - top_slack:
+        return False
+    # A head whose top edge starts below most of the body is not this body's
+    # head (it is another player behind/below, or a mis-detection).
+    if head_top > by + bh * 0.5:
+        return False
+    return True
+
+
+def build_aim_targets(detections, aim_type, frame_w, frame_h, min_bbox_area,
+                      estimate_head_positions=None):
+    """Turn detection dicts into the tracker's aim targets.
+
+    Detections may carry a dedicated ``head`` class (the ONNX model exports
+    ``body``/``head`` as separate boxes). A head box that belongs to a body box
+    becomes that player's aim point *as-is*: re-estimating a head inside the
+    body (the 22 % heuristic) would be both redundant and wrong, and emitting a
+    body target as well would give the aimer two points for one player.
+
+    A body box with no matching head box (or any body box when the model
+    exports no head class at all, as in HSV mode) still falls back to
+    ``estimate_head_positions``. ``body``/``enemy``/``player`` boxes are aimed
+    at directly for ``aim_type == "body"``.
+
+    ``min_bbox_area`` is the floor for ``body``-class boxes only; ``head`` boxes
+    use ``min(HEAD_MIN_BBOX_AREA, min_bbox_area)`` so a distant few-pixel head
+    is not deleted by a threshold tuned against body-sized noise.
+
+    ``estimate_head_positions`` is a callable ``(x1, y1, x2, y2) -> [(cx, cy,
+    rect), ...]``; without it no head is estimated.
+
+    Returns ``(targets, target_bboxes, body_overlays, head_overlays,
+    head_rects)`` where ``targets`` entries are
+    ``(cx, cy, distance, head_y_min, body_y_max)``.
+    """
+    targets = []
+    target_bboxes = []
+    body_overlays = []
+    head_overlays = []
+    head_rects = []
+
+    body_dets = []
+    head_dets = []
+    body_floor = int(min_bbox_area)
+    # ``head`` keeps its own (much lower) floor, but never a stricter one than
+    # the caller asked for: with ``min_bbox_area=1`` (real-model tests) the
+    # behaviour is byte-identical to before.
+    head_floor = min(HEAD_MIN_BBOX_AREA, body_floor)
+    for det in detections or []:
+        try:
+            x, y, w, h = [int(round(float(v))) for v in det["bbox"][:4]]
+        except Exception:
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        conf = float(det.get("confidence", 1.0))
+        name = str(det.get("class", "player")).strip().lower()
+        # The class must be read *before* the area test: a single shared floor
+        # cannot tell a far-away head from a body-sized noise blob.
+        if name == HEAD_CLASS_NAME:
+            # Ignore tiny head blobs, but well below the body floor.
+            if w * h < head_floor:
+                continue
+            head_dets.append((x, y, w, h, conf))
+        elif name in BODY_CLASS_NAMES:
+            # Ignore tiny body blobs to reduce per-frame target flicker.
+            if w * h < body_floor:
+                continue
+            body_dets.append((x, y, w, h, conf))
+        # Anything else (teammate, breakable, dodge, ...) is not a target.
+
+    center_x = float(frame_w) / 2.0
+    center_y = float(frame_h) / 2.0
+
+    for x, y, w, h, conf in body_dets:
+        body_overlays.append((x, y, x + w, y + h, conf))
+
+    if aim_type == "body":
+        # Body mode aims at whatever body box exists; a lone head box is still
+        # a better target than none.
+        for x, y, w, h, _conf in (body_dets or head_dets):
+            cx = x + w / 2.0
+            cy = y + h / 2.0
+            d = math.hypot(cx - center_x, cy - center_y)
+            targets.append((cx, cy, d, None, None))
+            target_bboxes.append(((cx, cy), (x, y, w, h)))
+        return targets, target_bboxes, body_overlays, head_overlays, head_rects
+
+    def _add_head(head, anchor_body):
+        x, y, w, h, _conf = head
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        d = math.hypot(cx - center_x, cy - center_y)
+        head_overlays.append((int(round(cx)), int(round(cy))))
+        head_rects.append((x, y, x + w, y + h))
+        if aim_type == "nearest":
+            body_y_max = (
+                anchor_body[1] + anchor_body[3] if anchor_body is not None else y + h
+            )
+            target = (cx, cy, d, y, body_y_max)
+        else:
+            target = (cx, cy, d, None, None)
+        targets.append(target)
+        # Anti-smoke keeps checking the body area around the head box.
+        anchor = anchor_body if anchor_body is not None else (x, y, w, h)
+        target_bboxes.append(((cx, cy), anchor))
+
+    remaining_heads = list(head_dets)
+    bodies_needing_estimate = []
+    for body in body_dets:
+        box = body[:4]
+        matched = [head for head in remaining_heads if _head_matches_body(box, head[:4])]
+        if not matched:
+            # No head left to pair: estimate one, unless this body is a second
+            # box for a player whose head another body already claimed (that
+            # would emit a duplicate target).
+            if not any(_head_matches_body(box, head[:4]) for head in head_dets):
+                bodies_needing_estimate.append(body)
+            continue
+        for head in matched:
+            remaining_heads.remove(head)
+            _add_head(head, box)
+
+    # Heads the model placed outside any body box are players on their own.
+    for head in remaining_heads:
+        _add_head(head, None)
+
+    if estimate_head_positions is None:
+        return targets, target_bboxes, body_overlays, head_overlays, head_rects
+
+    for x, y, w, h, _conf in bodies_needing_estimate:
+        x1, y1, x2, y2 = x, y, x + w, y + h
+        try:
+            head_positions = estimate_head_positions(x1, y1, x2, y2)
+        except Exception as e:
+            log_print(f"[Track] head estimation failed for bbox {(x1, y1, x2, y2)}: {e}")
+            continue
+        for head_cx, head_cy, bbox in head_positions:
+            head_overlays.append((head_cx, head_cy))
+            head_rects.append(bbox)
+            d = math.hypot(head_cx - center_x, head_cy - center_y)
+            if aim_type == "nearest":
+                # The dead zone starts at the top of the head ROI the estimator
+                # returned, the same way the real-head branch uses the head
+                # box's own top edge. A fixed 30 px constant was wrong at any
+                # other distance or FOV: too tall up close, too short far away.
+                head_y_min = head_cy
+                try:
+                    head_y_min = int(min(int(head_cy), int(bbox[1])))
+                except Exception:
+                    head_y_min = int(head_cy)
+                target = (head_cx, head_cy, d, head_y_min, y2)
+            else:
+                target = (head_cx, head_cy, d, None, None)
+            targets.append(target)
+            target_bboxes.append(((head_cx, head_cy), (x1, y1, w, h)))
+
+    return targets, target_bboxes, body_overlays, head_overlays, head_rects
+
 
 class AimTracker:
     """
@@ -156,6 +396,10 @@ class AimTracker:
         # the track thread, read by UI/debug callers, so no lock is needed for
         # the shallow dict swap.
         self.perf = {}
+        # AI + UDP crop guard state: the metrics stashed before ``perf`` is
+        # rebuilt, and the last bypass flag used to log only on transitions.
+        self._ai_udp_crop_metrics = None
+        self._ai_udp_bypass_active = None
         self._track_thread = threading.Thread(target=self._track_loop, daemon=True)
         self._track_thread.start()
         
@@ -172,13 +416,19 @@ class AimTracker:
         
         self.ema_alpha = float(getattr(config, "ema_alpha", 0.35))
         self.switch_confirm_frames = int(getattr(config, "switch_confirm_frames", 3))
+        smoother_type = str(getattr(config, "smoother_type", "one_euro")).strip().lower()
         self._target_smoother = TargetSmoother(
             ema_alpha=self.ema_alpha,
             switch_confirm_frames=self.switch_confirm_frames,
+            use_one_euro=(smoother_type == "one_euro"),
+            min_cutoff=float(getattr(config, "one_euro_min_cutoff", 1.0)),
+            beta=float(getattr(config, "one_euro_beta", 0.05)),
+            d_cutoff=float(getattr(config, "one_euro_d_cutoff", 1.0)),
         )
         self.last_target = None
         self.stable_candidate = None
         self.stable_count = 0
+        self._last_engine_toggle_key_state = False
         
 
     def stop(self):
@@ -208,7 +458,17 @@ class AimTracker:
         
         鍦ㄥ緦鍙扮窔绋嬩腑鎸佺簩寰炵Щ鍕曢殜鍒椾腑鐛插彇绉诲嫊鎸囦护涓﹀煼琛屻€?        鏀寔寤堕伈鎺у埗锛岀⒑淇濈Щ鍕曟搷浣滅殑骞虫粦鍩疯銆?        
         閫欐槸涓€鍊嬬劇闄愬惊鐠帮紝鐩村埌绶氱▼琚祩姝€?        """
-        while not self._stop_event.is_set() or not self.move_queue.empty():
+        drain_budget = None
+        while True:
+            if self._stop_event.is_set():
+                # Shutdown requested: keep going only while there is already
+                # queued work and the budget lasts. A producer that keeps
+                # refilling the queue must not hold this thread past stop.
+                if drain_budget is None:
+                    drain_budget = max(1, self.move_queue.qsize())
+                if drain_budget <= 0 or self.move_queue.empty():
+                    break
+                drain_budget -= 1
             try:
                 dx, dy, delay = self.move_queue.get(timeout=0.1)
                 latest_only = bool(getattr(config, "aim_latest_frame_priority", True))
@@ -216,16 +476,19 @@ class AimTracker:
                     # Keep only the newest N commands, then merge them.
                     # This preserves immediate latest-frame behavior while avoiding
                     # dropped Bezier/WindMouse sub-steps that cause jitter.
-                    pending = [(dx, dy, delay)]
-                    while True:
-                        try:
-                            pending.append(self.move_queue.get_nowait())
-                        except queue.Empty:
-                            break
                     max_batch = max(
                         1,
                         int(getattr(config, "move_queue_merge_batch", self._move_batch_size)),
                     )
+                    pending = [(dx, dy, delay)]
+                    # Bounded drain: a producer that keeps refilling the queue
+                    # must not turn this into an endless inner loop (the batch is
+                    # capped anyway), and the stop event has to be honoured.
+                    while len(pending) < 2 * max_batch and not self._stop_event.is_set():
+                        try:
+                            pending.append(self.move_queue.get_nowait())
+                        except queue.Empty:
+                            break
                     if len(pending) > max_batch:
                         pending = pending[-max_batch:]
                     merged_dx = float(sum(float(item[0]) for item in pending))
@@ -245,7 +508,14 @@ class AimTracker:
                 except Exception as e:
                     print("[Mouse.move error]", e)
                 if merged_delay > 0:
-                    time.sleep(merged_delay)
+                    # Slice the inter-step delay so a 5 s queued step cannot
+                    # keep the thread alive through shutdown.
+                    deadline = time.perf_counter() + merged_delay
+                    while not self._stop_event.is_set():
+                        remaining = deadline - time.perf_counter()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.005, remaining))
             except queue.Empty:
                 time.sleep(0.001)
                 continue
@@ -304,24 +574,34 @@ class AimTracker:
         try:
             next_at = time.perf_counter()
             while not self._stop_event.is_set():
-                period = 1.0 / max(1.0, float(self._target_fps))
-                now = time.perf_counter()
-                next_at = _pacing_deadline(next_at, now, period)
-                budget = max(0.0, next_at - now)
-                wait_mode = str(getattr(config, "track_wait_mode", "frame")).strip().lower()
-                frame_driven = wait_mode != "grid"
-                if frame_driven:
-                    # Any frame landing inside this period must be able to wake
-                    # the wait, so the wait covers the remainder plus one period.
-                    frame_timeout = min(2.0 * period, budget + period)
-                else:
-                    frame_timeout = budget
-                got_frame = False
+                # One bad frame (config reload mid-flight, a detector raising
+                # from a shutting-down dependency) must cost one iteration, not
+                # the whole thread: everything after this loop runs only at
+                # shutdown, so an escaping exception ends aim for good.
                 try:
-                    got_frame = bool(self.track_once(frame_timeout=frame_timeout))
+                    period = 1.0 / max(1.0, float(self._target_fps))
+                    now = time.perf_counter()
+                    next_at = _pacing_deadline(next_at, now, period)
+                    budget = max(0.0, next_at - now)
+                    wait_mode = str(getattr(config, "track_wait_mode", "frame")).strip().lower()
+                    frame_driven = wait_mode != "grid"
+                    if frame_driven:
+                        # Any frame landing inside this period must be able to wake
+                        # the wait, so the wait covers the remainder plus one period.
+                        frame_timeout = min(2.0 * period, budget + period)
+                    else:
+                        frame_timeout = budget
+                    got_frame = False
+                    try:
+                        got_frame = bool(self.track_once(frame_timeout=frame_timeout))
+                    except Exception as e:
+                        print("[Track error]", e)
+                    next_at += period
                 except Exception as e:
-                    print("[Track error]", e)
-                next_at += period
+                    print("[Track loop error]", e)
+                    time.sleep(0.005)
+                    next_at = time.perf_counter()
+                    continue
 
                 # A fresh frame was just processed: skip the tail sleep and go
                 # straight back to wait_for_new_frame(), which is the real gate.
@@ -335,7 +615,7 @@ class AimTracker:
                 spin = min(0.0015, period * 0.25)
                 if remaining > spin:
                     time.sleep(remaining - spin)
-                while time.perf_counter() < next_at:
+                while time.perf_counter() < next_at and not self._stop_event.is_set():
                     pass
         finally:
             if has_timer_period:
@@ -553,6 +833,15 @@ class AimTracker:
         y0 = int(max(0, math.floor(cy - radius - pad)))
         x1 = int(min(w, math.ceil(cx + radius + pad)))
         y1 = int(min(h, math.ceil(cy + radius + pad)))
+
+        if bool(getattr(config, "dynamic_micro_roi_enabled", True)) and self.last_target is not None:
+            tx, ty = float(self.last_target[0]), float(self.last_target[1])
+            target_pad = max(16, int(getattr(config, "dynamic_micro_roi_padding", 64)))
+            x0 = min(x0, int(max(0, math.floor(tx - target_pad))))
+            y0 = min(y0, int(max(0, math.floor(ty - target_pad))))
+            x1 = max(x1, int(min(w, math.ceil(tx + target_pad))))
+            y1 = max(y1, int(min(h, math.ceil(ty + target_pad))))
+
         if x1 <= x0 or y1 <= y0:
             return None
 
@@ -676,6 +965,15 @@ class AimTracker:
                 # Already processed this frame: skip detection instead of
                 # re-running it on a stale image.
                 return False
+            if self._last_frame_seq is not None and frame_seq < self._last_frame_seq:
+                # The counter went backwards: the UDP receiver was rebuilt and
+                # restarts its publish sequence at 0. Adopt the new epoch and
+                # process this frame instead of waiting for a watermark the new
+                # receiver may never reach.
+                log_print(
+                    f"[Track] Frame sequence reset {self._last_frame_seq} -> {frame_seq} "
+                    "(capture source rebuilt)."
+                )
             self._last_frame_seq = frame_seq
 
         if raw_bgr_img is None:
@@ -692,11 +990,73 @@ class AimTracker:
         self._track_frame(raw_bgr_img)
         return True
 
+    def _log_ai_udp_crop_guard_once(self):
+        """Surface the AI UDP crop guard without spamming the log every frame.
+
+        ``get_udp_crop_state()`` is optional (other capture modes, and MagicMock
+        services in tests, do not provide it), so a non-dict answer is ignored.
+        The warning is emitted once per transition into (and out of) the bypass.
+        """
+        try:
+            state = self.app.capture.get_udp_crop_state()
+        except Exception:
+            return
+        if not isinstance(state, dict) or not state:
+            # Not in UDP mode (or the service cannot answer): never report a
+            # stale bypass left over from an earlier mode.
+            self._ai_udp_crop_metrics = None
+            return
+        bypass = bool(state.get("bypass"))
+        reason = str(state.get("reason", ""))
+        # ``perf`` is rebuilt later in this frame, so the numbers are stashed
+        # here and copied into the new dict after detection finishes.
+        self._ai_udp_crop_metrics = {"active": bypass, "reason": reason}
+        previous = getattr(self, "_ai_udp_bypass_active", None)
+        self._ai_udp_bypass_active = bypass
+        if bypass == previous:
+            return
+        try:
+            if bypass:
+                print(
+                    "[Track] AI UDP crop guard: skipping udp_fov crop "
+                    f"({state.get('total_px')}px < {state.get('min_px')}px model input)"
+                )
+            elif previous:
+                print("[Track] AI UDP crop guard released: udp_fov crop is active again")
+        except Exception:
+            pass
+
     def _track_frame(self, raw_bgr_img):
         """Body of track_once; all exits are covered by the caller's finally."""
+        # Check Engine Mode Toggle Hotkey
+        toggle_key = getattr(config, "ai_toggle_key", "")
+        if toggle_key and str(toggle_key).strip().lower() != "none":
+            try:
+                from src.utils.activation import is_binding_pressed
+                pressed = is_binding_pressed(toggle_key)
+                if pressed and not getattr(self, "_last_engine_toggle_key_state", False):
+                    new_ai = not bool(getattr(config, "ai_detection_enabled", False))
+                    config.ai_detection_enabled = new_ai
+                    config.detection_engine = "ai_detection" if new_ai else "colorbot"
+                    print(f"[Engine] Hotkey: switched detection engine to {config.detection_engine.upper()}")
+                    try:
+                        from src.utils.network_feedback import send_toggle_feedback
+                        send_toggle_feedback(new_ai)
+                    except Exception:
+                        pass
+                    if hasattr(self.app, "after") and hasattr(self.app, "_sync_engine_ui_from_config"):
+                        try:
+                            self.app.after(0, self.app._sync_engine_ui_from_config)
+                        except Exception:
+                            pass
+                self._last_engine_toggle_key_state = pressed
+            except Exception:
+                pass
+
         bgr_img = self.app.capture.apply_mode_fov(raw_bgr_img)
         if bgr_img is None:
             return
+        self._log_ai_udp_crop_guard_once()
         if not bgr_img.flags['C_CONTIGUOUS']:
             bgr_img = np.ascontiguousarray(bgr_img)
 
@@ -749,18 +1109,30 @@ class AimTracker:
                 0.0, (time.perf_counter() - float(published_at)) * 1000.0
             )
 
-        roi = self._compute_detection_roi(bgr_img.shape)
+        engine = "ai" if bool(getattr(config, "ai_detection_enabled", False)) else "hsv"
+        # AI ONNX models always run on their fixed tensor size, so cropping a
+        # narrow FOV/ADS ROI gives zero speedup while cutting enemy bodies and
+        # adding upscale blur.
+        roi = None if engine == "ai" else self._compute_detection_roi(bgr_img.shape)
         detect_start = time.perf_counter()
         detection = None
         try:
-            detection = analyze(self.model, bgr_img, roi=roi)
+            # The engine is chosen here, not inside analyze(): the colour model
+            # is still handed over so ``analyze`` can fall back to it when the
+            # AI detector is enabled but unusable (no onnxruntime, model file
+            # missing) -- exactly what models/README.md promises.
+            detection = analyze(self.model, bgr_img, roi=roi, engine=engine)
             detection_results = detection.detections
-            mask = detection.mask
-            # MASK preview: full_mask() allocates the full-frame image only when
+            # Only a colour pass has a measured mask. An AI frame rasterises its
+            # boxes on demand, so merely reading ``detection.mask`` here would
+            # pay a full-frame allocation plus a full-frame countNonZero on
+            # every frame, including frames where nothing consumes the mask.
+            mask = detection.mask if getattr(detection, "source", "hsv") == "hsv" else None
+            # MASK preview: full_mask() builds the frame-sized image only when
             # this consumer is actually due, not on every frame.
             if (getattr(config, "show_opencv_windows", True) and 
                 getattr(config, "show_opencv_mask", True) and 
-                mask is not None and mask.size > 0):
+                detection.has_mask):
                 if preview_throttle.render_if_due("MASK"):
                     preview_throttle.imshow("MASK", detection.full_mask())
         except Exception as e:
@@ -778,78 +1150,48 @@ class AimTracker:
 
         targets = []
         target_bboxes = []
+        # Whether ``mask`` describes real pixels or was rasterised from AI
+        # boxes. Colour-statistics consumers (anti-smoke, head refinement) are
+        # only meaningful on a measured mask.
+        mask_is_measured = detection is None or getattr(detection, "source", "hsv") == "hsv"
         if detection_results:
             # 鐛插彇鐣跺墠 aim_type锛圡ain Aimbot锛?
             aim_type = getattr(config, "aim_type", "head")
-            frame_area = max(1, int(frame.xres) * int(frame.yres))
-            dynamic_min_area = int(
-                getattr(
-                    config,
-                    "min_detection_bbox_area",
-                    max(120, int(frame_area * 0.0015)),
+            dynamic_min_area = min_aim_bbox_area(frame.xres, frame.yres)
+
+            # Target selection lives in build_aim_targets(): a 'head' box is
+            # aimed at directly, and only bodies without one are estimated.
+            mask_roi = detection.roi if detection is not None and detection.roi_used else None
+            # Head refinement reads the colour mask to find where the head
+            # pixels actually are. An AI mask is the detected box filled in, so
+            # it holds no head information: feeding it in would centre the
+            # estimate on the middle of the box. Geometry only in that case.
+            estimate_mask = mask if mask_is_measured else None
+
+            def _estimate(x1, y1, x2, y2):
+                return self._estimate_head_positions(
+                    x1, y1, x2, y2, bgr_img, estimate_mask, mask_roi=mask_roi
                 )
+
+            (
+                targets,
+                target_bboxes,
+                body_overlays,
+                head_overlays,
+                head_rects,
+            ) = build_aim_targets(
+                detection_results,
+                aim_type,
+                frame.xres,
+                frame.yres,
+                dynamic_min_area,
+                estimate_head_positions=_estimate,
             )
-            if str(getattr(config, "detection_morph_mode", "legacy")).strip().lower() != "stable":
-                dynamic_min_area = min(dynamic_min_area, max(40, int(frame_area * 0.00035)))
-            
-            for det in detection_results:
-                try:
-                    x, y, w, h = det['bbox']
-                    conf = det.get('confidence', 1.0)
-                    if int(w) <= 0 or int(h) <= 0:
-                        continue
-                    # Ignore tiny blobs to reduce per-frame target flicker.
-                    if int(w) * int(h) < dynamic_min_area:
-                        continue
-                    x1, y1 = int(x), int(y)
-                    x2, y2 = int(x + w), int(y + h)
-                    # Defer body overlay to the display copy (see trigger_source_img).
-                    if show_detection:
-                        body_overlays.append((x1, y1, x2, y2, conf))
-                    
-                    # 瑷堢畻 body 鐨勪腑蹇冮粸鍜?Y 绡勫湇
-                    body_cx = (x1 + x2) / 2.0
-                    body_cy = (y1 + y2) / 2.0
-                    body_y_min = y1  # body 鐨?Y 杌告渶楂樺€硷紙鍦栧儚搴ф绯讳腑 y 瓒婂皬瓒婇潬涓婏級
-                    body_y_max = y2  # body 鐨?Y 杌告渶浣庡€?                    
-                    # Estimation têtes dans la bbox. The head ROI rectangle is
-                    # returned for the display copy only: drawing it onto
-                    # bgr_img would mutate the frame detection just read (and
-                    # the receiver still owns) and can self-trigger a yellow
-                    # target.
-                    head_positions = self._estimate_head_positions(
-                        x1, y1, x2, y2, bgr_img, mask,
-                        mask_roi=detection.roi if detection is not None and detection.roi_used else None,
-                    )
-                    
-                    if aim_type == "body":
-                        # Body 妯″紡锛氫娇鐢?body 涓績榛?
-                        d = math.hypot(body_cx - frame.xres / 2.0, body_cy - frame.yres / 2.0)
-                        target_tuple = (body_cx, body_cy, d, None, None)
-                        targets.append(target_tuple)  # 鏈€寰屽叐鍊嬪弮鏁哥偤 head_y_min, body_y_max锛坆ody 妯″紡涓嶉渶瑕侊級
-                        target_bboxes.append(((body_cx, body_cy), (x1, y1, int(w), int(h))))
-                    else:
-                        # Head 鎴?Nearest 妯″紡锛氫娇鐢?head 浣嶇疆
-                        for head_cx, head_cy, bbox in head_positions:
-                            if show_detection:
-                                head_overlays.append((head_cx, head_cy))
-                                head_rects.append(bbox)
-                            d = math.hypot(head_cx - frame.xres / 2.0, head_cy - frame.yres / 2.0)
-                            
-                            # 瑷堢畻 head 鐨?Y 绡勫湇锛堢敤鏂?nearest 妯″紡锛?
-                            # head_y_min 鏄?head 鐨勬渶楂?Y 鍊硷紙鏈€灏忕殑 y锛屽湪鍦栧儚搴ф绯讳腑锛?
-                            # 浣跨敤 head_cy 娓涘幓涓€鍊嬩及绠楃殑 head 鍗婇珮锛堢磩 15 鍍忕礌锛?
-                            estimated_head_height = 30  # 浼扮畻 head 楂樺害
-                            head_y_min = head_cy - estimated_head_height // 2  # head 鏈€楂?Y 鍊?                            
-                            if aim_type == "nearest":
-                                # Nearest 妯″紡锛氫繚瀛?Y 绡勫湇淇℃伅
-                                target_tuple = (head_cx, head_cy, d, head_y_min, body_y_max)
-                            else:  # head 妯″紡
-                                target_tuple = (head_cx, head_cy, d, None, None)
-                            targets.append(target_tuple)
-                            target_bboxes.append(((head_cx, head_cy), (x1, y1, int(w), int(h))))
-                except Exception as e:
-                    print("Erreur dans _estimate_head_positions:", e)
+            if not show_detection:
+                # Overlays are display-only; skip building them entirely.
+                body_overlays = []
+                head_overlays = []
+                head_rects = []
 
         targets_all = targets
         use_temporal_smoothing = bool(getattr(config, "enable_target_temporal_smoothing", False))
@@ -863,7 +1205,11 @@ class AimTracker:
         targets_sec = list(targets_all)
         shared_features = {}
         detection_roi = detection.roi if detection is not None and detection.roi_used else None
-        if targets_all and target_bboxes:
+        # Anti-smoke decides from colour statistics of the mask (fill ratio,
+        # solidity, density). An AI mask is the rasterised bbox itself, i.e.
+        # perfectly filled, so every heuristic would classify the detection as
+        # smoke and drop it. The classifier only makes sense on a colour mask.
+        if targets_all and target_bboxes and mask_is_measured:
             frame_shape = bgr_img.shape
             # One contour analysis per bbox, shared by both detectors: they keep
             # their own thresholds, so decisions stay independent while the
@@ -883,6 +1229,15 @@ class AimTracker:
             )
 
         try:
+            # The trigger mask is only read by ``process_triggerbot``, which
+            # returns "DISABLED" before touching it when ``enabletb`` is off.
+            # Passing ``None`` there keeps a deferred AI mask from being built
+            # just to be thrown away (the magnet trigger uses colour matching,
+            # not this mask). The colour model is still handed to ``analyze`` so
+            # an enabled-but-unusable AI detector can fall back to it.
+            trigger_mask = None
+            if detection is not None and bool(getattr(config, "enabletb", False)):
+                trigger_mask = detection.raw_mask
             self._aim_and_move(
                 targets_main,
                 frame,
@@ -890,7 +1245,7 @@ class AimTracker:
                 targets_sec=targets_sec,
                 targets_trigger=targets_all,
                 trigger_img=trigger_source_img,
-                trigger_mask=detection.raw_mask if detection is not None else None,
+                trigger_mask=trigger_mask,
                 trigger_mask_roi=detection_roi,
             )
         except Exception as e:
@@ -907,6 +1262,10 @@ class AimTracker:
             "targets": len(targets_all),
             "frame_start_time": frame_meta.get("frame_start_time"),
         }
+        crop_metrics = getattr(self, "_ai_udp_crop_metrics", None)
+        if isinstance(crop_metrics, dict):
+            self.perf["ai_udp_crop_bypass"] = bool(crop_metrics.get("active"))
+            self.perf["ai_udp_crop_reason"] = crop_metrics.get("reason")
         try:
             from src.aim_system.Triggerbot import _triggerbot_state as _tb_state
             decision_ms = _tb_state.get("last_decision_ms")
@@ -1022,22 +1381,29 @@ class AimTracker:
                 is_best = target == best_target
                 
                 # 鐩榛為鑹诧紙鏈€浣崇洰妯欑敤涓嶅悓椤忚壊锛?
+                # Compact marker: a thin ring, never a filled disc. The old filled
+                # r=8 disc was 17 px across and covered a distant head completely,
+                # hiding the very thing being aimed at.
                 if is_best:
                     target_color = (0, 0, 255)  # 绱呰壊
-                    circle_radius = 8
-                    thickness = -1  # 瀵﹀績
                 else:
                     target_color = (255, 0, 0)  # 钘嶈壊
-                    circle_radius = 5
-                    thickness = 2
+                circle_radius = 3
+                thickness = 1
                 
                 # 绻＝鐩榛?
-                cv2.circle(img, (int(tx), int(ty)), circle_radius, target_color, thickness)
+                # LINE_8 (not LINE_AA) on purpose: the marker must stay inside a
+                # 7x7 box so it cannot bleed onto a distant head.
+                cv2.circle(img, (int(tx), int(ty)), circle_radius, target_color,
+                           thickness, cv2.LINE_8)
                 
                 # 绻＝寰炰腑蹇冨埌鐩鐨勯€ｇ窔锛堝儏鏈€浣崇洰妯欙級
                 if is_best:
                     cv2.line(img, (center_x, center_y), (int(tx), int(ty)), 
                             (0, 255, 0), 1, cv2.LINE_AA)
+                    # Redrawn after the line: the guide line's endpoint would
+                    # otherwise paint over the marker's centre pixel.
+                    _set_pixel(img, tx, ty, target_color)
                 
                 # 绻＝璺濋洟鏂囧瓧 - 鏍规摎瑷疆
                 if getattr(config, "show_distance_text", True):
@@ -1054,6 +1420,11 @@ class AimTracker:
             mode = getattr(config, "mode", "Normal")
             cv2.putText(img, f"Mode: {mode}", (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            y_offset += line_height
+            engine_name = "AI (DirectML)" if getattr(config, "ai_detection_enabled", False) else f"Colorbot ({getattr(config, 'color', 'yellow').upper()})"
+            engine_col = (0, 255, 255) if getattr(config, "ai_detection_enabled", False) else (255, 180, 0)
+            cv2.putText(img, f"Engine: {engine_name}", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.55, engine_col, 2, cv2.LINE_AA)
             y_offset += line_height
         
         # Aimbot 鐙€鎱?& Visual Toggle Banner
@@ -1147,10 +1518,10 @@ class AimTracker:
             headx: 闋儴 X 搴ф
             heady: 闋儴 Y 搴ф
         """
-        # 澶栧湀锛堢櫧鑹诧級
-        cv2.circle(img, (int(headx), int(heady)), 6, (255, 255, 255), 2)
-        # 鍏у湀锛堢磪鑹诧級
-        cv2.circle(img, (int(headx), int(heady)), 3, (0, 0, 255), -1)
+        # 澶栧湀锛堢櫧鑹诧級- thin ring so a 5 px head stays visible inside it
+        cv2.circle(img, (int(headx), int(heady)), 3, (255, 255, 255), 1, cv2.LINE_8)
+        # 鍏у湀锛堢磪鑹诧級- single centre pixel instead of a filled r=3 disc
+        _set_pixel(img, headx, heady, (0, 0, 255))
 
     def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None, mask_roi=None):
         """
@@ -1202,13 +1573,17 @@ class AimTracker:
             my1 = max(0, min(int(y1) - ry0, mask.shape[0] - 1))
             mx2 = max(mx1 + 1, min(int(x2) - rx0, mask.shape[1]))
             my2 = max(my1 + 1, min(int(y2) - ry0, mask.shape[0]))
-            upper_h = max(6, int((my2 - my1) * 0.42))
+            band_ratio = float(getattr(config, "head_refine_band_ratio", 0.25))
+            upper_h = max(6, int((my2 - my1) * band_ratio))
             upper_y2 = min(my2, my1 + upper_h)
             upper_mask = mask[my1:upper_y2, mx1:mx2]
             if upper_mask.size > 0:
                 ys, xs = np.where(upper_mask > 0)
                 if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
                     headx_base = float(mx1 + rx0 + int(np.median(xs)))
+                    if bool(getattr(config, "head_refine_y_enabled", True)):
+                        heady_mask = float(my1 + ry0 + int(np.median(ys)))
+                        heady_base = 0.60 * heady_mask + 0.40 * heady_base
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))

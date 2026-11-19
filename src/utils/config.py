@@ -39,6 +39,26 @@ class Config:
         self.min_detection_bbox_area = 150
         self.head_estimate_ratio = 0.22
         self.head_refine_min_pixels = 20
+        self.head_refine_band_ratio = 0.25
+        self.head_refine_y_enabled = True
+        self.dynamic_micro_roi_enabled = True
+        self.dynamic_micro_roi_padding = 64
+        self.smoother_type = "one_euro"
+        self.one_euro_min_cutoff = 1.0
+        self.one_euro_beta = 0.05
+        self.one_euro_d_cutoff = 1.0
+        self.detection_engine = "colorbot"
+        self.ai_detection_enabled = False
+        self.ai_toggle_key = ""
+        self.ai_model_path = "models/valorant_detector.onnx"
+        self.ai_device = "dml"
+        self.ai_confidence_threshold = 0.45
+        self.ai_iou_threshold = 0.45
+        # Enemy-outline guard: player-only models cannot tell a team-mate from an
+        # enemy, so AI boxes are verified against the enemy highlight colour.
+        # "auto" = only for real models without a 'teammate' class, "on" = always.
+        self.ai_enemy_outline_filter = "auto"
+        self.ai_enemy_outline_min_pixels = 4
         self.aim_latest_frame_priority = True
         self.enable_target_temporal_smoothing = False
         self.move_queue_merge_batch = 4
@@ -394,6 +414,10 @@ class Config:
         self.ui_collapsible_states = {}
         self.legacy_ui_mode = False
         self.ui_theme = "nord"
+        # Tactical HUD shell state (width mode, accent cycle, background variant).
+        self.ui_hud_mode = "simple"
+        self.ui_accent = "emerald"
+        self.ui_theme_variant = "dark"
         self.language = "en"
         
         # --- Capture Settings ---
@@ -423,6 +447,18 @@ class Config:
         self.udp_fov_enabled = False  # 鏄惁鍟熺敤 UDP 涓績瑁佸垏
         self.udp_fov = 320            # UDP 姝ｆ柟褰㈣鍒囧崁鍩熼倞闀风殑涓€鍗?(鍍忕礌)
         
+        # --- AI + UDP Stream (OBS xUDP plugin) ---
+        # The udp_fov crop keeps only a 2*udp_fov square; for an ONNX model that
+        # consumes 320/640 px that is upscale blur and lost body/head detail, so
+        # AI mode skips a crop smaller than the tensor. HSV Colorbot keeps the
+        # old behaviour because the guard also requires an AI engine.
+        self.ai_udp_bypass_tiny_crop = True
+        self.ai_udp_min_crop_px = 0         # 0 = derive from the selected model
+        # Last requested AI UDP stream state. It is only ever written by the
+        # Vision card's switch / Apply button; nothing auto-connects at start-up
+        # (binding a port just because the app opened would be a side effect).
+        self.ai_udp_stream_enabled = False
+
         # --- CaptureCard Settings ---
         self.capture_device_index = 0
         self.capture_device_name = ""
@@ -511,6 +547,23 @@ class Config:
             "min_detection_bbox_area": self.min_detection_bbox_area,
             "head_estimate_ratio": self.head_estimate_ratio,
             "head_refine_min_pixels": self.head_refine_min_pixels,
+            "head_refine_band_ratio": self.head_refine_band_ratio,
+            "head_refine_y_enabled": self.head_refine_y_enabled,
+            "dynamic_micro_roi_enabled": self.dynamic_micro_roi_enabled,
+            "dynamic_micro_roi_padding": self.dynamic_micro_roi_padding,
+            "smoother_type": self.smoother_type,
+            "one_euro_min_cutoff": self.one_euro_min_cutoff,
+            "one_euro_beta": self.one_euro_beta,
+            "one_euro_d_cutoff": self.one_euro_d_cutoff,
+            "detection_engine": getattr(self, "detection_engine", "colorbot"),
+            "ai_toggle_key": getattr(self, "ai_toggle_key", ""),
+            "ai_detection_enabled": self.ai_detection_enabled,
+            "ai_model_path": self.ai_model_path,
+            "ai_device": self.ai_device,
+            "ai_confidence_threshold": self.ai_confidence_threshold,
+            "ai_iou_threshold": self.ai_iou_threshold,
+            "ai_enemy_outline_filter": self.ai_enemy_outline_filter,
+            "ai_enemy_outline_min_pixels": self.ai_enemy_outline_min_pixels,
             "aim_latest_frame_priority": self.aim_latest_frame_priority,
             "enable_target_temporal_smoothing": self.enable_target_temporal_smoothing,
             "move_queue_merge_batch": self.move_queue_merge_batch,
@@ -834,6 +887,9 @@ class Config:
             "ui_collapsible_states": self.ui_collapsible_states,
             "legacy_ui_mode": self.legacy_ui_mode,
             "ui_theme": self.ui_theme,
+            "ui_hud_mode": self.ui_hud_mode,
+            "ui_accent": self.ui_accent,
+            "ui_theme_variant": self.ui_theme_variant,
             "language": self.language,
             
             # Capture & Network Feedback Settings
@@ -862,6 +918,11 @@ class Config:
             # UDP FOV Settings
             "udp_fov_enabled": self.udp_fov_enabled,
             "udp_fov": self.udp_fov,
+
+            # AI + UDP Stream (OBS xUDP plugin)
+            "ai_udp_bypass_tiny_crop": self.ai_udp_bypass_tiny_crop,
+            "ai_udp_min_crop_px": self.ai_udp_min_crop_px,
+            "ai_udp_stream_enabled": self.ai_udp_stream_enabled,
             
             # CaptureCard Settings
             "capture_device_index": self.capture_device_index,
@@ -924,6 +985,33 @@ class Config:
             self.target_fps = max(1, min(1000, int(getattr(self, "target_fps", 200))))
         except Exception:
             self.target_fps = 200
+        engine = str(getattr(self, "detection_engine", "colorbot")).strip().lower()
+        if engine not in ("colorbot", "ai_detection"):
+            engine = "ai_detection" if bool(getattr(self, "ai_detection_enabled", False)) else "colorbot"
+        self.detection_engine = engine
+        self.ai_detection_enabled = (self.detection_engine == "ai_detection")
+        # AI + UDP Stream: the bypass defaults ON (it only ever fires for the AI
+        # engine) and the threshold is a 0..4096 px clamp, 0 meaning "from model".
+        self.ai_udp_bypass_tiny_crop = bool(getattr(self, "ai_udp_bypass_tiny_crop", True))
+        try:
+            self.ai_udp_min_crop_px = max(
+                0, min(4096, int(getattr(self, "ai_udp_min_crop_px", 0)))
+            )
+        except Exception:
+            self.ai_udp_min_crop_px = 0
+        self.ai_udp_stream_enabled = bool(getattr(self, "ai_udp_stream_enabled", False))
+        # Enemy-outline guard: a hand-edited config must never be able to turn the
+        # mode into something the pipeline does not implement, nor set a pixel
+        # threshold that silently blinds the AI engine.
+        outline_filter = str(getattr(self, "ai_enemy_outline_filter", "auto")).strip().lower()
+        self.ai_enemy_outline_filter = (
+            outline_filter if outline_filter in ("auto", "on", "off") else "auto"
+        )
+        try:
+            outline_px = int(getattr(self, "ai_enemy_outline_min_pixels", 4))
+        except Exception:
+            outline_px = 4
+        self.ai_enemy_outline_min_pixels = max(1, min(50, outline_px))
         serial_mode = str(getattr(self, "serial_port_mode", "Auto")).strip().lower()
         self.serial_port_mode = "Manual" if serial_mode == "manual" else "Auto"
         keyboard_api = str(getattr(self, "keyboard_api", "Follow Mouse API")).strip()
@@ -1334,6 +1422,12 @@ class Config:
         if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic", "tactical"}:
             theme = "classic" if self.legacy_ui_mode else "nord"
         self.ui_theme = theme
+        hud_mode = str(getattr(self, "ui_hud_mode", "simple")).strip().lower()
+        self.ui_hud_mode = hud_mode if hud_mode in {"simple", "wide"} else "simple"
+        accent = str(getattr(self, "ui_accent", "emerald")).strip().lower()
+        self.ui_accent = accent if accent in {"emerald", "cyan", "amber", "crimson"} else "emerald"
+        theme_variant = str(getattr(self, "ui_theme_variant", "dark")).strip().lower()
+        self.ui_theme_variant = theme_variant if theme_variant in {"dark", "midnight"} else "dark"
 
         mode = str(getattr(self, "trigger_strafe_mode", "off")).strip().lower()
         if mode not in {"off", "auto", "manual_wait"}:

@@ -211,6 +211,17 @@ class SmoothAiming:
         """
         if self.last_target_pos is not None and self.last_target_time > 0:
             dt = current_time - self.last_target_time
+            if dt < 0:
+                # The wall clock jumped backwards (NTP/PTP correction, manual
+                # clock change). A negative interval is not a velocity sample:
+                # zero the estimate and re-anchor so the next frame is valid.
+                self.velocity_x = 0.0
+                self.velocity_y = 0.0
+                self.dir_history_x.clear()
+                self.dir_history_y.clear()
+                self.last_target_pos = (dx, dy)
+                self.last_target_time = current_time
+                return
             if 0.005 <= dt <= 0.25:  # Valid frame interval (4fps - 200fps)
                 step_x = dx - self.last_target_pos[0]
                 step_y = dy - self.last_target_pos[1]
@@ -300,6 +311,10 @@ class SmoothAiming:
         """
         if current_time is None:
             current_time = time.time()
+        if current_time < self.last_reaction_time:
+            # Clock moved backwards: the window can never elapse, so nothing is
+            # being waited for.
+            return False
         return (current_time - self.last_reaction_time) < self.reaction_delay
 
     def reset_tracking_state(self):
@@ -329,6 +344,16 @@ class SmoothAiming:
         """
         current_time = time.time()
         self.last_switch = False
+
+        # Clock jump guard. `reaction_delay` is measured against
+        # `last_reaction_time`; if the wall clock steps backwards (NTP/PTP
+        # correction, DST/manual change) that difference stays negative and the
+        # reaction window never closes, freezing the aim forever. Re-anchor
+        # instead: the frame then behaves exactly like a normal post-reaction
+        # frame.
+        if self.last_reaction_time > 0.0 and current_time < self.last_reaction_time:
+            self.last_reaction_time = 0.0
+            self.reaction_delay = 0.0
 
         try:
             cpp_x = float(counts_per_pixel[0])

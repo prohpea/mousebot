@@ -16,6 +16,18 @@ except ImportError as e:
     log_print(f"[Capture] OBS_UDP module import failed: {e}")
     log_print("[Capture] UDP mode will be unavailable. Please ensure OBS_UDP.py exists in 'capture/' folder.")
 
+# AI + UDP crop policy. Imported once (module is stdlib-only, no cycle) because
+# _apply_mode_fov runs on the per-frame hot path.
+try:
+    from src.utils.obs_udp_plugin import (
+        udp_crop_decision as _udp_crop_decision_policy,
+    )
+    HAS_OBS_UDP_POLICY = True
+except ImportError as e:
+    HAS_OBS_UDP_POLICY = False
+    _udp_crop_decision_policy = None
+    log_print(f"[Capture] OBS UDP crop policy unavailable: {e}")
+
 # 灏庡叆 OBS Teleport 妯＄祫 (Python implementation)
 try:
     from .obs_teleport_capture import OBSTeleportManager
@@ -152,6 +164,13 @@ class CaptureService:
         self._gstreamer_no_frame_last_log = 0.0
         self._io_lock = threading.RLock()
         self._mode_switch_job_id = 0
+        # Last (signature, decision) pair from _udp_crop_decision(); the crop
+        # policy used to be evaluated twice per frame on the 144 Hz hot path.
+        self._udp_crop_cache = None
+        # Receiver that produced the last sequence number handed to the caller.
+        # A reconnect swaps in a fresh receiver whose counter restarts at 0, so a
+        # stale ``after_seq`` from the old one would look like "forever new".
+        self._last_udp_receiver = None
 
     def set_mode(self, mode):
         """切換採集模式。採集卡釋放在背景執行，避免 UI 卡住。"""
@@ -224,26 +243,45 @@ class CaptureService:
         return self.ndi.connect_to_source(source_name)
 
     def connect_udp(self, ip, port):
-        """閫ｆ帴 UDP 渚嗘簮"""
-        self.mode = "UDP"
-        self._ip = ip
-        self._port = int(port)
-        
+        """閫ｆ帴 UDP 渚嗘簮
+
+        The mode/endpoint only switch over once the bind succeeded. Assigning
+        them up-front (the old behaviour) left the service claiming ``mode ==
+        "UDP"`` after a failed bind - a port already held by another instance is
+        the everyday case - so the crop guard, telemetry, footer and
+        ``read_frame`` all talked about a stream that was never connected.
+        """
+        try:
+            port_value = int(port)
+        except (TypeError, ValueError):
+            return False, "UDP port must be an integer"
+
         if not HAS_UDP:
             return False, "UDP module not loaded (OBS_UDP.py missing or failed to import)"
-            
+
         if not self.udp_manager:
             return False, "UDP manager not initialized"
-            
+
+        previous = (self.mode, self._ip, self._port)
+        self.mode = "UDP"
+        self._ip = ip
+        self._port = port_value
+        # The crop memo keys on the mode, which just changed: drop it so a
+        # decision taken in the old mode can never leak into the new one.
+        self._udp_crop_cache = None
         try:
             success = self.udp_manager.connect(self._ip, self._port, target_fps=0)
-            if success:
-                return True, None
-            else:
-                return False, "Connection failed - check IP/Port and ensure OBS is streaming"
         except Exception as e:
+            self.mode, self._ip, self._port = previous
             log_print(f"[Capture] UDP connection exception: {e}")
             return False, str(e)
+        if success:
+            return True, None
+        # Failed bind: put the service back exactly where it was, including the
+        # crop-policy memo (it keys on the mode, which just changed twice).
+        self.mode, self._ip, self._port = previous
+        self._udp_crop_cache = None
+        return False, "Connection failed - check IP/Port and ensure OBS is streaming"
 
     def connect_teleport(self, host="", port=0, stream_key=""):
         """閫ｆ帴 OBS Teleport 渚嗘簮"""
@@ -583,9 +621,79 @@ class CaptureService:
 
         if self.mode == "UDP" and getattr(global_config, "udp_fov_enabled", False):
             fov = int(getattr(global_config, "udp_fov", 320))
-            return self._crop_frame_center(frame, fov, fov)
+            # AI Detection consumes a fixed 320/640 tensor: a 2*udp_fov crop
+            # smaller than that is upscale blur and cuts players in half, so the
+            # guard skips it. The policy reads `ai_udp_bypass_tiny_crop`,
+            # `ai_udp_min_crop_px`, `detection_engine` and `ai_model_path`, and
+            # HSV Colorbot never qualifies (engine check), which keeps its
+            # 2*udp_fov crop byte-identical to before.
+            #
+            # The decision is computed once per (mode, fov, config) signature and
+            # handed to `get_udp_crop_state`, instead of being rebuilt twice per
+            # frame on the 144 Hz path.
+            decision = self._udp_crop_decision(fov)
+            if not bool(decision.get("bypass")):
+                return self._crop_frame_center(frame, fov, fov)
 
         return frame
+
+    def _udp_crop_signature(self, fov):
+        """Cheap key describing everything the crop policy reads."""
+        from src.utils.config import config as global_config
+
+        def _int(name, default):
+            try:
+                return int(getattr(global_config, name, default))
+            except Exception:
+                return default
+
+        resolved_fov = _int("udp_fov", 320)
+        if fov is not None:
+            try:
+                resolved_fov = int(fov)
+            except Exception:
+                pass
+        return (
+            str(self.mode),
+            resolved_fov,
+            bool(getattr(global_config, "udp_fov_enabled", False)),
+            bool(getattr(global_config, "ai_udp_bypass_tiny_crop", True)),
+            _int("ai_udp_min_crop_px", 0),
+            str(getattr(global_config, "detection_engine", "colorbot")),
+            bool(getattr(global_config, "ai_detection_enabled", False)),
+            str(getattr(global_config, "ai_model_path", "")),
+        )
+
+    def _udp_crop_decision(self, fov=None):
+        """The crop policy result, memoised per signature; never raises."""
+        if not HAS_OBS_UDP_POLICY:
+            return {}
+        try:
+            key = self._udp_crop_signature(fov)
+        except Exception:
+            return {}
+        cached = getattr(self, "_udp_crop_cache", None)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == key:
+            return cached[1]
+        try:
+            state = _udp_crop_decision_policy(None, fov=fov, mode=self.mode)
+        except Exception:
+            return {}
+        if not isinstance(state, dict):
+            return {}
+        self._udp_crop_cache = (key, state)
+        return state
+
+    def get_udp_crop_state(self):
+        """Why the UDP crop is (or is not) applied, for the UI/telemetry.
+
+        Returns the decision already computed for this frame whenever the
+        signature is unchanged (no per-frame dict churn on the hot path), and an
+        empty dict whenever the state cannot be derived, so callers (including
+        MagicMock capture services in tests) never see an exception.
+        """
+        state = self._udp_crop_decision()
+        return state if isinstance(state, dict) else {}
 
     def apply_mode_fov(self, frame):
         """Public wrapper for applying mode-specific FOV crop."""
@@ -593,6 +701,29 @@ class CaptureService:
             return self._apply_mode_fov(frame)
         except Exception:
             return frame
+
+    def _adopt_udp_receiver(self, receiver, after_seq):
+        """Forget ``after_seq`` when the receiver was swapped for a new instance.
+
+        A receiver's publish counter is per-instance and restarts at 0, so an
+        ``after_seq`` produced by the previous receiver can sit above every
+        sequence the new one will ever produce: the caller then waits forever on
+        "nothing newer". The reset only happens once the *previous* receiver was
+        actually in use and has stopped (disconnected or stopped) - the first
+        read against a fresh/mock receiver must keep the caller's ``after_seq``
+        exactly as before.
+        """
+        previous = self._last_udp_receiver
+        if receiver is not previous and previous is not None and after_seq is not None:
+            try:
+                stale = (not previous.is_connected) or previous.stop_event.is_set()
+            except Exception:
+                stale = False
+            if stale:
+                log_print("[Capture] UDP receiver replaced; resetting frame sequence.")
+                after_seq = None
+        self._last_udp_receiver = receiver
+        return after_seq
 
     def read_frame_with_seq(self, apply_fov=True, after_seq=None, timeout=0.0):
         """Read the next frame together with a freshness sequence number.
@@ -618,6 +749,8 @@ class CaptureService:
             if not receiver:
                 log_print("[Capture] UDP receiver is None")
                 return None, None
+
+            after_seq = self._adopt_udp_receiver(receiver, after_seq)
 
             if after_seq is not None and hasattr(receiver, "wait_for_new_frame"):
                 frame, seq = receiver.wait_for_new_frame(after_seq, timeout)

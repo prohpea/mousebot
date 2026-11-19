@@ -1,19 +1,23 @@
 """
-UI 模組 - Ultra Minimalist 風格
+UI 模組 - Tactical Gaming HUD (CVM colorBot)
 處理主視窗、分頁內容與設定互動 (GUI layer)
 """
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
+import tkinter.font as tkfont
 import ctypes
 from ctypes import wintypes
 import os
 import json
+import math
+import random
 import cv2
+import numpy as np
 import threading
 import time
 import webbrowser
-from PIL import Image
+from PIL import Image, ImageTk
 from functools import partial
 
 from src.utils.config import config
@@ -22,14 +26,19 @@ from src.utils.mouse_input import MouseInputMonitor
 from src.utils.debug_logger import get_recent_logs, clear_logs, get_log_count, get_log_version, log_print
 from src.utils.mouse.keycodes import to_vk_code
 from src.utils.updater import get_update_checker
-from src.ui_hsv_preview import HsvPreviewWindow
-from src.utils.i18n import heading, i18n, t
+from src.ui_hsv_preview import HsvPreviewWindow, _apply_hsv_mask, _grab_frame_bgr
+from src.utils.i18n import heading, i18n, t, t_hud
 from src import ui_components
 from src.ui_components import (
+    HudBadge,
+    HudSectionTitle,
     ModernCard,
     ModernSlider,
     ModernSwitch,
     StatusPill,
+    SubCard,
+    mix,
+    readable_on,
 )
 
 # --- Theme constants (Nord, Emerald, Dracula, Ocean, Neon, Classic, Tactical) ---
@@ -212,14 +221,161 @@ THEME_PRESETS = {
 }
 
 
-def _apply_theme_preset(theme_name):
-    theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["nord"])
+def _apply_theme_preset(theme_name, accent=None, variant=None):
+    """Push a theme preset (plus optional accent / HUD variant overlay) into globals.
+
+    THEME_PRESETS stays immutable and keeps its 23-key contract: the accent and
+    variant overlays are merged into a *copy*, so cycling accents at runtime can
+    never add a key to a preset or mutate the shipped palette. The HUD chrome is
+    reprojected from the same resolved palette so COLOR_HUD_* can never drift
+    away from the theme it claims to render.
+    """
+    theme = dict(THEME_PRESETS.get(theme_name, THEME_PRESETS["nord"]))
+    theme.update(_accent_overlay(accent))
+    theme.update(_variant_overlay(variant, theme))
     for key, value in theme.items():
         globals()[key] = value
     ui_components.apply_theme(theme)
+    _sync_hud_tokens_to_variant(theme)
 
 
-_apply_theme_preset(getattr(config, "ui_theme", "nord"))
+# HUD chrome is *projected* from the active theme instead of being hardcoded.
+# The 202 COLOR_HUD_* call sites used to be pinned to one navy palette, so six of
+# the seven themes rendered identically; now every shell color mirrors a
+# COLOR_* token and a theme change repaints the whole HUD.
+HUD_TOKENS = {
+    "HEADER": "#06090F",
+    "NAV": "#080C14",
+    "MAIN": "#0B0F17",
+    "CARD": "#101622",
+    "SUB": "#0C111A",
+    "INPUT": "#070A10",
+    "BORDER": "#1E293B",
+    "TEXT": "#E2E8F0",
+    "DIM": "#94A3B8",
+    "MUTED": "#64748B",
+    "BADGE": "#0F1724",
+}
+
+# `Dark` is the theme as authored; `Midnight` deepens that same ladder rather
+# than swapping in a fixed one. Factors are measured so every preset keeps
+# card/background >= 1.5:1 and text/card >= 7:1 in both variants.
+MIDNIGHT_SHELL_KEEP = 0.50
+MIDNIGHT_CARD_KEEP = 0.90
+MIDNIGHT_BORDER_KEEP = 0.70
+
+
+def _project_hud_tokens(theme):
+    """Derive the HUD chrome (COLOR_HUD_*) from a resolved theme palette."""
+    sidebar = theme["COLOR_SIDEBAR"]
+    return {
+        "HEADER": sidebar,
+        "NAV": mix(sidebar, theme["COLOR_BG"], 0.45),
+        "MAIN": theme["COLOR_BG"],
+        "CARD": theme["COLOR_CARD"],
+        "SUB": theme["COLOR_CARD_HEADER"],
+        "INPUT": theme["COLOR_INPUT"],
+        "BORDER": theme["COLOR_BORDER"],
+        "BADGE": theme["COLOR_BADGE_BG"],
+        "TEXT": theme["COLOR_TEXT"],
+        "DIM": theme["COLOR_TEXT_DIM"],
+        "MUTED": theme["COLOR_MENU_GHOST"],
+    }
+
+# Four HUD accents, cycled by the footer button (emerald -> cyan -> amber -> crimson).
+ACCENT_PRESETS = {
+    "emerald": {
+        "accent": "#00F59B",
+        "hover": "#00D2FF",
+        "accent2": "#00D2FF",
+        "success": "#00F59B",
+    },
+    "cyan": {
+        "accent": "#00E5FF",
+        "hover": "#7DD3FC",
+        "accent2": "#A855F7",
+        "success": "#00E5FF",
+    },
+    "amber": {
+        "accent": "#FF9E00",
+        "hover": "#FBBF24",
+        "accent2": "#F43F5E",
+        "success": "#FF9E00",
+    },
+    "crimson": {
+        "accent": "#FF2A5F",
+        "hover": "#FB7185",
+        "accent2": "#00E5FF",
+        "success": "#FF2A5F",
+    },
+}
+ACCENT_ORDER = ("emerald", "cyan", "amber", "crimson")
+COLOR_HUD_PING = "#00E5FF"
+
+
+def _accent_overlay(accent):
+    """Return the COLOR_* overrides for one of the four HUD accents."""
+    name = str(accent or "").strip().lower()
+    preset = ACCENT_PRESETS.get(name)
+    if not preset:
+        return {}
+    accent_color = preset["accent"]
+    return {
+        "COLOR_ACCENT": accent_color,
+        "COLOR_ACCENT_HOVER": preset["hover"],
+        "COLOR_ACCENT_2": preset["accent2"],
+        "COLOR_SUCCESS": preset["success"],
+        "COLOR_BADGE_BG": mix(accent_color, HUD_TOKENS["CARD"], 0.10),
+        "COLOR_NAV_ACTIVE_BG": mix(accent_color, HUD_TOKENS["NAV"], 0.12),
+    }
+
+
+def _variant_overlay(variant, theme):
+    """Return the background overrides for the Dark / Midnight HUD variants.
+
+    `theme` must be the already-resolved preset (accent overlay applied):
+    Midnight deepens that palette, so each theme keeps its own hue instead of
+    collapsing onto a single fixed navy ladder.
+    """
+    name = str(variant or "").strip().lower()
+    if name != "midnight":
+        return {}
+    overlay = {}
+    for key in ("COLOR_BG", "COLOR_SIDEBAR", "COLOR_SURFACE",
+                "COLOR_CARD_HEADER", "COLOR_INPUT"):
+        overlay[key] = mix(theme[key], "#000000", MIDNIGHT_SHELL_KEEP)
+    overlay["COLOR_BORDER"] = mix(theme["COLOR_BORDER"], "#000000", MIDNIGHT_BORDER_KEEP)
+    overlay["COLOR_CARD_BORDER"] = mix(
+        theme["COLOR_CARD_BORDER"], "#000000", MIDNIGHT_BORDER_KEEP)
+    # The card is darkened far less than the shell: that gap *is* the contrast.
+    overlay["COLOR_CARD"] = mix(theme["COLOR_CARD"], "#000000", MIDNIGHT_CARD_KEEP)
+    return overlay
+
+
+def _sync_hud_tokens_to_variant(theme=None):
+    """Materialize COLOR_HUD_* chrome colors for the active theme and variant."""
+    if theme is None:
+        theme = dict(THEME_PRESETS.get(
+            getattr(config, "ui_theme", "nord"), THEME_PRESETS["nord"]))
+        theme.update(_accent_overlay(getattr(config, "ui_accent", "emerald")))
+        theme.update(_variant_overlay(getattr(config, "ui_theme_variant", "dark"), theme))
+    projected = _project_hud_tokens(theme)
+    for key, value in projected.items():
+        HUD_TOKENS[key] = value
+        globals()[f"COLOR_HUD_{key}"] = value
+    ui_components.apply_theme({
+        "COLOR_HUD_MUTED": projected["MUTED"],
+        "COLOR_TEXT_DIM": projected["DIM"],
+        "COLOR_SUB": projected["SUB"],
+        "COLOR_CARD_BORDER": projected["BORDER"],
+    })
+
+
+_apply_theme_preset(
+    getattr(config, "ui_theme", "nord"),
+    accent=getattr(config, "ui_accent", "emerald"),
+    variant=getattr(config, "ui_theme_variant", "dark"),
+)
 
 # Hardware API 專用 accent colors / 跟主題一致的灰階層次
 COLOR_HARDWARE_PANEL = "#202020"
@@ -292,6 +448,12 @@ BUTTONS = {
     3: 'Side Mouse 4 Button',
     4: 'Side Mouse 5 Button'
 }
+
+# The capture modes `CaptureService.set_mode` accepts. Used to validate the mode
+# remembered before switching to UDP, so a test/Mock capture object can never
+# become a restore target.
+_CAPTURE_MODES = ("NDI", "UDP", "Teleport", "CaptureCard", "CaptureCardGStreamer", "MSS")
+
 BUTTON_NAME_TO_IDX = {name: idx for idx, name in BUTTONS.items()}
 BUTTON_IDX_TO_VK = {
     0: 0x01,
@@ -393,7 +555,11 @@ class ViewerApp(ctk.CTk):
         if self._ui_theme not in THEME_PRESETS:
             self._ui_theme = "classic" if self._legacy_ui_mode else "nord"
         config.language = i18n.set_language(getattr(config, "language", "en"))
-        _apply_theme_preset(self._ui_theme)
+        _apply_theme_preset(
+            self._ui_theme,
+            accent=getattr(config, "ui_accent", "emerald"),
+            variant=getattr(config, "ui_theme_variant", "dark"),
+        )
         
         # 注意: 若啟用 overrideredirect(True)，系統框線與 taskbar 行為可能不同
         # If you need normal window decorations, keep it commented out.
@@ -444,6 +610,9 @@ class ViewerApp(ctk.CTk):
         init_mode = getattr(config, "capture_mode", "NDI")
         self.capture.set_mode(init_mode)
         self.capture_method_var = tk.StringVar(value=init_mode)
+        # Capture mode to return to when the AI UDP switch is turned off (set by
+        # `_apply_ai_udp_stream` right before it switches to UDP).
+        self._ai_udp_previous_mode = ""
         
         # --- Capture control cache (restore from config) ---
         self.saved_udp_ip = getattr(config, "udp_ip", "127.0.0.1")
@@ -514,10 +683,27 @@ class ViewerApp(ctk.CTk):
         self._runtime_busy = False
         self._runtime_job_id = 0
         self._ignore_settings_events = False
-        
+        # Tactical HUD state (never aim logic: the slot only picks which config keys
+        # the shared Combat view renders).
+        self._active_aim_slot = "main"
+        self._hud_mode = str(getattr(config, "ui_hud_mode", "simple")).strip().lower()
+        if self._hud_mode not in ("simple", "wide"):
+            self._hud_mode = "simple"
+        self._hsv_drawer = None
+        self._hsv_thread = None
+        self._hsv_stop_event = None
+        self._hsv_after_id = None
+        self._inline_hsv_size = (165, 118)
+        self._footer_blink_on = True
+        self._telemetry_job_id = None
+        self._active_config_name = ""
+        self._telemetry_history = [0.0] * 40
+        self._hsv_photo_raw = None
+        self._hsv_photo_mask = None
+
         # --- Build layout ---
         self._build_layout()
-        
+
         # --- Periodic jobs ---
         self.after(100, self._process_source_updates)
         self.after(500, self._update_connection_status_loop)
@@ -527,188 +713,885 @@ class ViewerApp(ctk.CTk):
         self.after(300, self._update_performance_stats)  # 更新效能統計 Performance stats
         self.after(50, self._update_mouse_input_debug)  # 更新滑鼠輸入監控 Mouse input debug
         self.after(100, self._update_debug_log)  # 更新 Debug log
+        self.after(600, self._blink_footer_state)
+
+    # Tactical HUD window geometry per width mode (see _apply_hud_mode).
+    HUD_GEOMETRY = {
+        "simple": {"size": (800, 760), "minsize": (780, 640)},
+        "wide": {"size": (1080, 800), "minsize": (1040, 680)},
+    }
 
     def _build_layout(self):
-        """建立主版面：title bar + sidebar + content area。"""
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        
-        # 標題列 Title bar
-        self._build_title_bar()
-        
-        # 側欄導覽 Sidebar
-        self._build_sidebar()
-        
-        # 內容區 Content frame
+        """Build the 4-tier Tactical HUD shell.
+
+        row 0 header (`#06090f`) -> row 1 nav & power bar (`#080c14`) ->
+        row 2 scrolling workspace (`#0b0f17`) -> row 3 footer (`#06090f`).
+        The legacy left sidebar is gone; the workspace spans the full width.
+        """
+        self._detect_hud_fonts()
+        self.grid_columnconfigure(0, weight=1)
+        for row in (0, 1, 3):
+            self.grid_rowconfigure(row, weight=0)
+        self.grid_rowconfigure(2, weight=1)
+
+        self._build_header()
+        self._build_nav_bar()
+
+        self.main_host = ctk.CTkFrame(self, fg_color=COLOR_HUD_MAIN, corner_radius=0)
+        self.main_host.grid(row=2, column=0, sticky="nsew")
+        self.main_host.grid_columnconfigure(0, weight=1)
+        self.main_host.grid_rowconfigure(0, weight=1)
+
         self.content_frame = ctk.CTkScrollableFrame(
-            self, fg_color="transparent",
-            scrollbar_button_color=COLOR_BORDER,
-            scrollbar_button_hover_color=COLOR_ACCENT
+            self.main_host,
+            fg_color="transparent",
+            scrollbar_button_color=COLOR_HUD_BORDER,
+            scrollbar_button_hover_color=COLOR_ACCENT,
+            corner_radius=0,
         )
-        self.content_frame.grid(row=1, column=1, sticky="nsew", padx=14, pady=10)
-        
+        self.content_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=7)
+
+        self._build_footer()
+        self._apply_hud_mode(getattr(config, "ui_hud_mode", "simple"), persist=False)
+
         if self._legacy_ui_mode:
             self._show_general_tab()
         else:
+            self._show_aimtab_entry()
+
+    def _show_aimtab_entry(self):
+        """Render the Combat view for the slot that was active before a rebuild."""
+        if str(getattr(self, "_active_aim_slot", "main")).strip().lower() == "sec":
+            self._show_sec_aimbot_tab()
+        else:
             self._show_aimbot_tab()
 
-    def _build_title_bar(self):
-        """建立標題列 (title bar)：當前頁面標題 + 副標題 + 遙測膠囊 + 視窗控制。"""
-        self.title_bar = ctk.CTkFrame(self, height=30, fg_color=COLOR_BG, corner_radius=10)
-        self.title_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+    def _detect_hud_fonts(self):
+        """Pick HUD font families from what is actually installed."""
+        gaming = "Segoe UI Semibold"
+        mono = "Consolas"
+        try:
+            families = {str(name).lower(): str(name) for name in tkfont.families(self)}
+        except Exception:
+            families = {}
+        for candidate in ("Chakra Petch", "Bahnschrift", "Segoe UI Semibold", "Segoe UI"):
+            if candidate.lower() in families:
+                gaming = families[candidate.lower()]
+                break
+        for candidate in ("JetBrains Mono", "Cascadia Mono", "Consolas", "Courier New"):
+            if candidate.lower() in families:
+                mono = families[candidate.lower()]
+                break
+        self._hud_font_family = gaming
+        self._hud_mono_family = mono
+        ui_components.set_fonts(gaming=gaming, mono=mono)
+        return gaming, mono
 
-        # Left: contextual page heading (kept in sync by _set_page_header)
-        title_container = ctk.CTkFrame(self.title_bar, fg_color="transparent")
-        title_container.pack(side="left", padx=20, pady=(6, 6))
+    def _hud_font(self, size=9, weight="normal", mono=False):
+        family = self._hud_mono_family if mono else self._hud_font_family
+        return (family, size, weight)
 
-        # Logo icon
-        logo_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cvm.jpg")
-        self.logo_lbl = None
-        if os.path.exists(logo_path):
-            try:
-                logo_image = Image.open(logo_path)
-                # 調整 logo 尺寸為 20x20
-                logo_image = logo_image.resize((20, 20), Image.Resampling.LANCZOS)
-                logo_ctk = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(20, 20))
-                self.logo_lbl = ctk.CTkLabel(
-                    title_container,
-                    image=logo_ctk,
-                    text=""
-                )
-                self.logo_lbl.pack(side="left", padx=(0, 10))
-            except Exception as e:
-                log_print(f"[UI] Failed to load logo: {e}")
+    def _measure_text(self, text, size=9, weight="normal", mono=False):
+        """Width in pixels of `text` in the HUD font (0 when fonts are unavailable)."""
+        try:
+            font = tkfont.Font(root=self, family=self._hud_mono_family if mono else self._hud_font_family,
+                               size=size, weight=weight)
+            return int(font.measure(str(text)))
+        except Exception:
+            return 0
 
-        heading_col = ctk.CTkFrame(title_container, fg_color="transparent")
-        heading_col.pack(side="left", anchor="w")
+    def _hud_button_width(self, text, size=9, weight="bold", padx=16, minimum=30):
+        measured = self._measure_text(text, size=size, weight=weight)
+        return max(int(minimum), int(measured) + int(padx))
+
+    def _build_header(self):
+        """Row 1: compact tactical header (`#06090f`)."""
+        self.header_bar = ctk.CTkFrame(
+            self, fg_color=COLOR_HUD_HEADER, corner_radius=0,
+            border_width=0, height=40,
+        )
+        self.header_bar.grid(row=0, column=0, sticky="ew")
+        self.header_bar.grid_columnconfigure(1, weight=1)
+
+        # --- Left: brand badge + COLORBOT // <ACTIVE MODULE TITLE> + version ---
+        self.hud_brand = ctk.CTkFrame(self.header_bar, fg_color="transparent")
+        self.hud_brand.grid(row=0, column=0, sticky="w", padx=(8, 6), pady=(5, 4))
+        self.hud_brand.grid_columnconfigure(1, weight=1)
+
+        self.hud_brand_badge = ctk.CTkButton(
+            self.hud_brand,
+            text="CVM",
+            width=30,
+            height=26,
+            fg_color=COLOR_HUD_BADGE,
+            hover=False,
+            border_width=1,
+            border_color=COLOR_ACCENT,
+            corner_radius=4,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(9, "bold"),
+        )
+        self.hud_brand_badge.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 7))
+
+        self.hud_brand_text = ctk.CTkFrame(self.hud_brand, fg_color="transparent")
+        self.hud_brand_text.grid(row=0, column=1, rowspan=2, sticky="w")
+
+        self.brand_label = ctk.CTkLabel(
+            self.hud_brand_text,
+            text=t_hud("HUD_COLORBOT"),
+            font=self._hud_font(10, "bold"),
+            text_color=COLOR_ACCENT,
+            anchor="w",
+        )
+        self.brand_label.grid(row=0, column=0, sticky="w")
+
+        self.brand_sep_label = ctk.CTkLabel(
+            self.hud_brand_text,
+            text="//",
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED,
+            anchor="w",
+        )
+        self.brand_sep_label.grid(row=0, column=1, sticky="w", padx=3)
 
         self.page_title_label = ctk.CTkLabel(
-            heading_col,
-            text="Combat",
-            font=FONT_TITLE,
-            text_color=COLOR_TEXT,
+            self.hud_brand_text,
+            text="MAIN AIMBOT",
+            font=self._hud_font(10, "bold"),
+            text_color=COLOR_HUD_TEXT,
             anchor="w",
+            justify="left",
         )
-        self.page_title_label.pack(anchor="w")
+        self.page_title_label.grid(row=0, column=2, sticky="w")
 
-        self.page_sub_label = ctk.CTkLabel(
-            heading_col,
-            text="",
-            font=("Segoe UI", 9),
-            text_color=COLOR_TEXT_DIM,
-            anchor="w",
-        )
-        self.page_sub_label.pack(anchor="w")
-
-        # Version label
         current_version = self.update_checker.get_current_version()
         self.version_lbl = ctk.CTkLabel(
-            title_container,
+            self.hud_brand_text,
             text=f"v{current_version}",
-            font=("Consolas", 9),
-            text_color=COLOR_TEXT_DIM
+            font=self._hud_font(8, mono=True),
+            fg_color="#1E293B",
+            corner_radius=2,
+            text_color=COLOR_HUD_DIM,
+            padx=3,
+            height=13,
         )
-        self.version_lbl.pack(side="left", padx=(10, 0), pady=(0, 14))
+        self.version_lbl.grid(row=0, column=3, sticky="w", padx=(5, 0))
+        self.hud_version_badge = self.version_lbl
 
-        # Update button (only show if update available)
+        self.page_sub_label = ctk.CTkLabel(
+            self.hud_brand_text,
+            text="",
+            font=self._hud_font(8),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        self.page_sub_label.grid(row=1, column=0, columnspan=4, sticky="w")
+
+        # --- Right: telemetry pills + HUD width toggle + window controls ---
+        self.header_cluster = ctk.CTkFrame(self.header_bar, fg_color="transparent")
+        self.header_cluster.grid(row=0, column=1, sticky="e", padx=(4, 7), pady=(5, 4))
+
+        self.telemetry_container = ctk.CTkFrame(self.header_cluster, fg_color="transparent")
+        self.telemetry_container.pack(side="left", padx=(0, 5))
+
+        hw_init = str(getattr(config, "mouse_api", "Serial"))
+        self.pill_fps = StatusPill(self.telemetry_container, t_hud("HUD_FPS"), "--", dot_color=COLOR_SUCCESS)
+        self.pill_fps.pack(side="left", padx=(0, 3))
+
+        self.pill_delay = StatusPill(
+            self.telemetry_container, t_hud("HUD_PING"), "-- ms", dot_color=COLOR_HUD_PING,
+        )
+        self.pill_delay.pack(side="left", padx=(0, 3))
+
+        self.pill_hardware = StatusPill(
+            self.telemetry_container, t_hud("HUD_HW"), hw_init, dot_color=COLOR_HUD_MUTED,
+        )
+        self.pill_hardware.pack(side="left")
+
+        self.hud_mode_btn = ctk.CTkButton(
+            self.header_cluster,
+            text=self._hud_mode_label(),
+            width=self._hud_button_width("Simple", padx=14),
+            height=19,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            corner_radius=3,
+            command=self._toggle_hud_mode,
+        )
+        self.hud_mode_btn.pack(side="left", padx=(0, 4))
+
+        self.window_box = ctk.CTkFrame(
+            self.header_cluster,
+            fg_color=COLOR_HUD_SUB,
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3,
+        )
+        self.window_box.pack(side="left")
+
+        self.minimize_btn = self._make_window_button("_", t_hud("HUD_MINIMIZE"), self._on_minimize)
+        self.maximize_btn = self._make_window_button("[]", t_hud("HUD_MAXIMIZE"), self._toggle_maximize)
+        self.close_btn = self._make_window_button("X", t_hud("HUD_CLOSE"), self._on_close, danger=True)
+
+        # Keep the legacy "Simple / Pro" disclosure toggle available in the dock of
+        # the nav bar; the header toggle only changes the HUD width mode.
+        self.mode_toggle_btn = None
         self.update_btn = None
 
-        # Real-time Telemetry Pills in Title Bar (Modern Dashboard Header).
-        # Packed at the end of this method so it lands left of the window controls.
-        self.telemetry_container = ctk.CTkFrame(self.title_bar, fg_color="transparent")
+        # Drag the window from the header chrome (no OS title bar).
+        for widget in (self.header_bar, self.hud_brand, self.hud_brand_text,
+                       self.brand_label, self.page_title_label, self.page_sub_label,
+                       self.hud_brand_badge):
+            widget.bind("<Button-1>", self.start_move)
+            widget.bind("<B1-Motion>", self.do_move)
 
-        self.pill_fps = StatusPill(self.telemetry_container, "OBS UDP", "FPS: --", dot_color="#10B981")
-        self.pill_fps.pack(side="left", padx=(0, 6))
-
-        self.pill_delay = StatusPill(self.telemetry_container, "Delay", "-- ms", dot_color="#06B6D4")
-        self.pill_delay.pack(side="left", padx=(0, 6))
-
-        hw_init = getattr(config, "mouse_api", "Serial")
-        self.pill_hardware = StatusPill(self.telemetry_container, "Hardware", str(hw_init), dot_color="#94A3B8")
-        self.pill_hardware.pack(side="left", padx=(0, 6))
-        
-        # 關閉按鈕 Close button
-        close_btn = ctk.CTkButton(
-            self.title_bar, 
-            text="X",
-            width=30, 
-            height=30,
-            fg_color="transparent", 
-            hover_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT_DIM,
-            font=("Arial", 12),
-            command=self._on_close,
-            corner_radius=8
-        )
-        close_btn.pack(side="right", padx=5)
-
-        self.maximize_btn = ctk.CTkButton(
-            self.title_bar,
-            text="[]",
-            width=30,
-            height=30,
+    def _make_window_button(self, text, tooltip, command, danger=False):
+        button = ctk.CTkButton(
+            self.window_box,
+            text=text,
+            width=self._hud_button_width(text, size=9, padx=10, minimum=18),
+            height=17,
             fg_color="transparent",
-            hover_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT_DIM,
-            font=("Arial", 10),
-            command=self._toggle_maximize,
-            corner_radius=8
+            hover_color=COLOR_DANGER if danger else COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_DIM,
+            font=self._hud_font(8, "bold" if danger else "normal"),
+            corner_radius=2,
+            command=command,
         )
-        self.maximize_btn.pack(side="right", padx=(0, 2))
+        button.pack(side="left", padx=(2, 2), pady=1)
+        self._create_tooltip(button, tooltip)
+        return button
 
-        self.minimize_btn = ctk.CTkButton(
-            self.title_bar,
-            text="_",
-            width=30,
-            height=30,
-            fg_color="transparent",
-            hover_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT_DIM,
-            font=("Arial", 12),
-            command=self._on_minimize,
-            corner_radius=8
+    def _build_nav_bar(self):
+        """Row 2: horizontal ENGINE/PLATFORM nav + power dock (`#080c14`)."""
+        self.nav_bar = ctk.CTkFrame(
+            self, fg_color=COLOR_HUD_NAV, corner_radius=0,
+            border_width=0, height=30,
         )
-        self.minimize_btn.pack(side="right", padx=(0, 2))
+        self.nav_bar.grid(row=1, column=0, sticky="ew")
+        self.nav_bar.grid_columnconfigure(0, weight=1)
 
-        # Mode Toggle (Simple vs Pro Mode)
-        self.mode_toggle_btn = ctk.CTkButton(
-            self.title_bar,
+        self.hud_nav_groups = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
+        self.hud_nav_groups.grid(row=0, column=0, sticky="w", padx=(8, 4), pady=2)
+
+        self.nav_buttons = {}
+        self.nav_indicators = {}
+        self.nav_cells = {}
+        self.nav_group_labels = {}
+
+        self.nav_group_labels["ENGINE"] = self._add_nav_group_label(self.hud_nav_groups, t_hud("HUD_ENGINE"))
+        combat_btn = self._add_nav_tab(self.hud_nav_groups, "Combat", t_hud("NAV_COMBAT"),
+                                       self._show_aimbot_tab, icon="\u25ce")
+        vision_btn = self._add_nav_tab(self.hud_nav_groups, "Vision", t_hud("NAV_VISION"),
+                                       self._show_vision_tab, icon="\u25c9")
+        self.nav_divider = ctk.CTkLabel(
+            self.hud_nav_groups,
+            text="|",
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_MUTED,
+            width=8,
+        )
+        self.nav_divider.pack(side="left", padx=1)
+        self.nav_group_labels["PLATFORM"] = self._add_nav_group_label(self.hud_nav_groups, t_hud("HUD_PLATFORM"))
+        hw_btn = self._add_nav_tab(self.hud_nav_groups, "Hardware", t_hud("NAV_HARDWARE"),
+                                   self._show_general_tab, icon="\u26a1")
+        prof_btn = self._add_nav_tab(self.hud_nav_groups, "Profiles", t_hud("NAV_PROFILES"),
+                                     self._show_config_tab, icon="\u25a4")
+        tel_btn = self._add_nav_tab(self.hud_nav_groups, "Telemetry", t_hud("NAV_TELEMETRY"),
+                                    self._show_debug_tab, icon="\u25a5")
+
+        self.nav_buttons["Combat"] = combat_btn
+        self.nav_buttons["Vision"] = vision_btn
+        self.nav_buttons["Hardware"] = hw_btn
+        self.nav_buttons["Profiles"] = prof_btn
+        self.nav_buttons["Telemetry"] = tel_btn
+
+        # Alias mappings to prevent any KeyError from direct indexing across legacy callers
+        self.nav_buttons["Main Aimbot"] = combat_btn
+        self.nav_buttons["Sec Aimbot"] = combat_btn
+        self.nav_buttons["RCS"] = combat_btn
+        self.nav_buttons["Trigger"] = combat_btn
+        self.nav_buttons["Magnet Trigger"] = combat_btn
+        self.nav_buttons["System"] = hw_btn
+        self.nav_buttons["General"] = hw_btn
+        self.nav_buttons["Hardware & Capture"] = hw_btn
+        self.nav_buttons["Config"] = prof_btn
+        self.nav_buttons["Profiles & Config"] = prof_btn
+        self.nav_buttons["Debug"] = tel_btn
+        self.nav_buttons["Debug & Telemetry"] = tel_btn
+
+        # --- Right dock: CFG pill + Settings + START/STOP ENGINE ---
+        self.nav_dock = ctk.CTkFrame(self.nav_bar, fg_color="transparent")
+        self.nav_dock.grid(row=0, column=1, sticky="e", padx=(4, 8), pady=2)
+
+        self.runtime_btn = ctk.CTkButton(
+            self.nav_dock,
+            text=t_hud("HUD_START_ENGINE"),
+            command=lambda: self._toggle_runtime(),
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            text_color=readable_on(COLOR_ACCENT),
+            font=self._hud_font(9, "bold"),
+            height=20,
+            width=self._hud_button_width(t_hud("HUD_START_ENGINE"), padx=18),
+            corner_radius=3,
+            border_width=1,
+            border_color=COLOR_ACCENT,
+        )
+        self.runtime_btn.pack(side="right", padx=(4, 0))
+
+        self.settings_btn = ctk.CTkButton(
+            self.nav_dock,
+            text=t_hud("HUD_SETTINGS"),
+            command=self._open_settings_window,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width(t_hud("HUD_SETTINGS"), padx=16),
+            corner_radius=3,
+        )
+        self.settings_btn.pack(side="right", padx=(4, 0))
+
+        self.pro_mode_btn = ctk.CTkButton(
+            self.nav_dock,
             text="Pro" if self._ui_pro_mode else "Simple",
-            width=58,
-            height=22,
-            fg_color=COLOR_ACCENT if self._ui_pro_mode else COLOR_SURFACE,
-            hover_color=COLOR_ACCENT_HOVER if self._ui_pro_mode else COLOR_BORDER,
-            text_color="#04140A" if self._ui_pro_mode else COLOR_TEXT,
-            font=("Roboto", 9, "bold"),
             command=self._toggle_pro_mode,
-            corner_radius=6,
+            fg_color=COLOR_HUD_CARD if not self._ui_pro_mode else COLOR_ACCENT,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER if not self._ui_pro_mode else COLOR_ACCENT,
+            text_color=COLOR_HUD_TEXT if not self._ui_pro_mode else readable_on(COLOR_ACCENT),
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width("Simple", padx=12),
+            corner_radius=3,
         )
-        self.mode_toggle_btn.pack(side="right", padx=(0, 6))
+        self.pro_mode_btn.pack(side="right", padx=(4, 0))
 
-        # Now that the window controls occupy the right edge, the telemetry pills
-        # pack into the remaining space to their left.
-        self.telemetry_container.pack(side="right", padx=(0, 10), pady=(0, 14))
+        self.cfg_pill = ctk.CTkFrame(
+            self.nav_dock,
+            fg_color="#0D1420",
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3,
+        )
+        self.cfg_pill.pack(side="right", padx=(0, 0))
 
-        # 視窗拖曳事件 Drag behavior
-        self.title_bar.bind("<Button-1>", self.start_move)
-        self.title_bar.bind("<B1-Motion>", self.do_move)
-        self.page_title_label.bind("<Button-1>", self.start_move)
-        self.page_title_label.bind("<B1-Motion>", self.do_move)
-        self.page_sub_label.bind("<Button-1>", self.start_move)
-        self.page_sub_label.bind("<B1-Motion>", self.do_move)
-        if self.logo_lbl:
-            self.logo_lbl.bind("<Button-1>", self.start_move)
-            self.logo_lbl.bind("<B1-Motion>", self.do_move)
+        ctk.CTkLabel(
+            self.cfg_pill,
+            text=t_hud("HUD_CFG"),
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_HUD_MUTED,
+            height=14,
+        ).pack(side="left", padx=(5, 3), pady=1)
+
+        self.active_profile_label = ctk.CTkLabel(
+            self.cfg_pill,
+            text=self._active_profile_display(),
+            font=self._hud_font(8, "bold", mono=True),
+            text_color=COLOR_ACCENT,
+            anchor="w",
+            height=14,
+        )
+        self.active_profile_label.pack(side="left", padx=(0, 5), pady=1)
+
+        self.nav_buttons["_runtime"] = self.runtime_btn
+        self._refresh_runtime_button()
+        self._set_nav_active(getattr(self, "_active_tab_name", "Main Aimbot"))
+
+    def _add_nav_group_label(self, parent, text):
+        label = ctk.CTkLabel(
+            parent,
+            text=str(text).upper(),
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_HUD_MUTED,
+            anchor="w",
+        )
+        label.pack(side="left", padx=(0, 3))
+        return label
+
+    def _add_nav_tab(self, parent, key, text, command, icon=None):
+        """One horizontal nav tab: button + 2px accent underline in its own cell."""
+        cell = ctk.CTkFrame(parent, fg_color="transparent")
+        cell.pack(side="left", padx=1)
+        display = f"{icon}  {text}" if icon else str(text)
+        button = ctk.CTkButton(
+            cell,
+            text=display,
+            height=20,
+            width=self._hud_button_width(display, size=9, padx=16),
+            fg_color="transparent",
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_NAV, 0.10),
+            text_color=COLOR_HUD_DIM,
+            font=self._hud_font(9, "bold"),
+            corner_radius=3,
+            border_width=0,
+            border_color=COLOR_ACCENT,
+            command=lambda: self._handle_nav_click(key, command),
+        )
+        button.pack(fill="x")
+        underline = ctk.CTkFrame(cell, height=2, fg_color=COLOR_ACCENT, corner_radius=0)
+        self.nav_buttons[key] = button
+        self.nav_indicators[key] = underline
+        self.nav_cells[key] = cell
+        return button
+
+
+    def _build_footer(self):
+        """Row 4: tactical status footer (`#06090f`)."""
+        self.footer_bar = ctk.CTkFrame(
+            self, fg_color=COLOR_HUD_HEADER, corner_radius=0,
+            border_width=0, height=32,
+        )
+        self.footer_bar.grid(row=3, column=0, sticky="ew")
+        self.footer_bar.grid_columnconfigure(0, weight=1)
+
+        self.footer_status = ctk.CTkFrame(self.footer_bar, fg_color="transparent")
+        self.footer_status.grid(row=0, column=0, sticky="w", padx=(8, 4), pady=2)
+
+        self.footer_state_label = ctk.CTkLabel(
+            self.footer_status,
+            text="\u25cf " + t_hud("HUD_READY"),
+            font=self._hud_font(8, "bold", mono=True),
+            text_color=COLOR_SUCCESS,
+            anchor="w",
+        )
+        self.footer_state_label.pack(side="left")
+
+        self.footer_sep_one = ctk.CTkLabel(
+            self.footer_status, text="|", font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED,
+        )
+        self.footer_sep_one.pack(side="left", padx=4)
+
+        self.footer_hotkey_label = ctk.CTkLabel(
+            self.footer_status,
+            text=self._footer_hotkey_text(),
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED,
+            anchor="w",
+        )
+        self.footer_hotkey_label.pack(side="left")
+
+        self.footer_sep_two = ctk.CTkLabel(
+            self.footer_status, text="|", font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED,
+        )
+        self.footer_sep_two.pack(side="left", padx=4)
+
+        self.footer_udp_label = ctk.CTkLabel(
+            self.footer_status,
+            text=self._footer_udp_text(),
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED,
+            anchor="w",
+        )
+        self.footer_udp_label.pack(side="left")
+
+        # Legacy status line: every _set_status_indicator() call lands here.
+        self.status_indicator = ctk.CTkLabel(
+            self.footer_status,
+            text=t("Status: Offline"),
+            font=self._hud_font(8),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+            justify="left",
+        )
+        self.status_indicator.pack(side="left", padx=(6, 0))
+
+        # Hardware detail labels are only used by the status loop's bookkeeping.
+        self.hardware_type_label = ctk.CTkLabel(self.footer_status, text="", font=self._hud_font(8))
+        self.hardware_conn_label = ctk.CTkLabel(self.footer_status, text="", font=self._hud_font(8))
+        self._hardware_info_expanded = False
+        self.hardware_details_toggle = None
+        self.hardware_details_label = None
+
+        # Off-screen bookkeeping labels for the performance loop. They are created
+        # but never packed: the visible numbers live in the header pills, while
+        # these keep _update_performance_stats() writing to a real widget.
+        self.fps_label = ctk.CTkLabel(self.footer_status, text="FPS: --", font=self._hud_font(8))
+        self.decode_delay_label = ctk.CTkLabel(self.footer_status, text="Decode: -- ms", font=self._hud_font(8))
+        self.total_delay_label = ctk.CTkLabel(self.footer_status, text="Delay: -- ms", font=self._hud_font(8))
+
+        self.footer_controls = ctk.CTkFrame(self.footer_bar, fg_color="transparent")
+        self.footer_controls.grid(row=0, column=1, sticky="e", padx=(4, 8), pady=2)
+
+        self.accent_btn = self._make_footer_button(
+            self._accent_label(), self._cycle_accent, accent=True,
+        )
+        self.accent_btn.pack(side="right", padx=(4, 0))
+
+        self.theme_btn = self._make_footer_button(
+            self._variant_label(), self._toggle_theme_variant,
+        )
+        self.theme_btn.pack(side="right", padx=(4, 0))
+
+        self.lang_btn = self._make_footer_button(
+            f"\U0001F310 {self._language_label()}", self._toggle_language_quick,
+        )
+        self.lang_btn.pack(side="right")
+
+        self._set_footer_state()
+
+    def _make_footer_button(self, text, command, accent=False):
+        return ctk.CTkButton(
+            self.footer_controls,
+            text=text,
+            command=command,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT if accent else COLOR_HUD_DIM,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(text, size=8, padx=14, minimum=28),
+            corner_radius=3,
+        )
+
+    def _accent_label(self):
+        key = f"HUD_{str(getattr(config, 'ui_accent', 'emerald')).upper()}"
+        return t_hud(key, str(getattr(config, "ui_accent", "emerald")).capitalize())
+
+    def _variant_label(self):
+        variant = str(getattr(config, "ui_theme_variant", "dark")).strip().lower()
+        return t_hud("HUD_MIDNIGHT" if variant == "midnight" else "HUD_DARK")
+
+    def _language_label(self):
+        code = str(getattr(i18n, "language", "en")).strip().lower()
+        if code == "vi":
+            return t_hud("HUD_LANG_VI")
+        return t_hud("HUD_LANG_EN")
+
+    def _hud_mode_label(self):
+        mode = str(getattr(config, "ui_hud_mode", "simple")).strip().lower()
+        return t_hud("HUD_WIDE" if mode == "wide" else "HUD_SIMPLE")
+
+    def _active_profile_display(self):
+        """Name of the profile the app is actually using (real file, not a mock)."""
+        for attr in ("_active_config_name", "_loaded_config_name"):
+            value = str(getattr(self, attr, "") or "").strip()
+            if value:
+                return value
+        option = getattr(self, "config_option", None)
+        if option is not None:
+            try:
+                if option.winfo_exists():
+                    selected = str(option.get() or "").strip()
+                    if selected:
+                        return selected
+            except Exception:
+                pass
+        try:
+            candidates = sorted(
+                name for name in os.listdir("configs") if str(name).lower().endswith(".json")
+            )
+        except Exception:
+            candidates = []
+        if candidates:
+            return candidates[0]
+        return "default"
+
+    def _footer_hotkey_text(self):
+        button_name = BUTTONS.get(int(getattr(config, "selected_mouse_button", 3)), "MOUSE5")
+        return f"{t_hud('HUD_HOTKEY')}: {str(button_name).upper()}"
+
+    def _footer_udp_text(self):
+        ip = str(getattr(config, "udp_ip", "0.0.0.0") or "0.0.0.0")
+        port = str(getattr(config, "udp_port", "5000") or "5000")
+        return f"{t_hud('HUD_UDP')}: {ip}:{port}"
+
+    def _refresh_footer_hotkey(self):
+        if hasattr(self, "footer_hotkey_label") and self.footer_hotkey_label.winfo_exists():
+            self.footer_hotkey_label.configure(text=self._footer_hotkey_text())
+
+    def _refresh_footer_udp(self):
+        if hasattr(self, "footer_udp_label") and self.footer_udp_label.winfo_exists():
+            self.footer_udp_label.configure(text=self._footer_udp_text())
+
+    def _footer_state_text(self):
+        if getattr(self, "_runtime_busy", False):
+            key = "HUD_STOPPING" if getattr(self, "_runtime_active", False) else "HUD_STARTING"
+        elif getattr(self, "_runtime_active", False):
+            key = "HUD_RUNNING"
+        else:
+            key = "HUD_READY"
+        return "\u25cf " + t_hud(key)
+
+    def _set_footer_state(self):
+        """Repaint the footer state chip from the real runtime flags."""
+        if not hasattr(self, "footer_state_label") or not self.footer_state_label.winfo_exists():
+            return
+        if getattr(self, "_runtime_busy", False):
+            color = COLOR_HUD_DIM
+        elif getattr(self, "_runtime_active", False):
+            color = COLOR_ACCENT
+        else:
+            color = COLOR_SUCCESS
+        try:
+            self.footer_state_label.configure(text=self._footer_state_text(), text_color=color)
+        except Exception:
+            pass
+
+    def _schedule_periodic(self, delay_ms, callback):
+        """Re-arm a periodic Tk job unless the window is going away.
+
+        Tk callbacks are not protected: an exception escaping one of these loops
+        prevents its own ``after()`` re-arm, and that status loop is then dead
+        for the rest of the session - the UI keeps showing whatever it last
+        painted. Every caller wraps its body in try/except and defers the
+        reschedule to here, where ``_closing``/``winfo_exists()`` are checked
+        (both can change between the body and the re-arm, e.g. a close event
+        processed while the body was running).
+        """
+        if getattr(self, "_closing", False):
+            return None
+        try:
+            if not self.winfo_exists():
+                return None
+        except Exception:
+            return None
+        try:
+            return self.after(delay_ms, callback)
+        except Exception as e:
+            try:
+                log_print(f"[UI] Failed to reschedule {getattr(callback, '__name__', callback)}: {e}")
+            except Exception:
+                pass
+            return None
+
+    def _blink_footer_state(self):
+        """Pulse the RUNNING dot while the engine is active."""
+        try:
+            indicator = getattr(self, "footer_state_label", None)
+            if indicator is not None and indicator.winfo_exists():
+                if getattr(self, "_runtime_active", False) and not getattr(self, "_runtime_busy", False):
+                    self._footer_blink_on = not getattr(self, "_footer_blink_on", True)
+                    indicator.configure(
+                        text_color=COLOR_ACCENT if self._footer_blink_on else COLOR_HUD_MUTED
+                    )
+                else:
+                    self._set_footer_state()
+        except Exception as e:
+            try:
+                log_print(f"[UI] Footer blink error: {e}")
+            except Exception:
+                pass
+        finally:
+            self._schedule_periodic(600, self._blink_footer_state)
+
+    # --- HUD width mode / accent / variant -----------------------------------
+
+    def _apply_hud_mode(self, mode=None, persist=True):
+        """Switch between the Compact HUD (`simple`) and the Wide Dock layout."""
+        mode = str(mode or getattr(config, "ui_hud_mode", "simple")).strip().lower()
+        if mode not in ("simple", "wide"):
+            mode = "simple"
+        self._hud_mode = mode
+        config.ui_hud_mode = mode
+        if persist:
+            try:
+                config.save_to_file()
+            except Exception:
+                pass
+
+        simple = mode == "simple"
+        geometry = self.HUD_GEOMETRY[mode]
+        try:
+            self.minsize(*geometry["minsize"])
+            width, height = geometry["size"]
+            self.geometry(f"{width}x{height}")
+            self._restore_geometry = self.geometry()
+        except Exception:
+            pass
+
+        # Captions and the CFG pill only fit in the wide dock; the reference HUD
+        # hides them (Tailwind `hidden md:inline`) in compact mode.
+        engine_label = self.nav_group_labels.get("ENGINE")
+        platform_label = self.nav_group_labels.get("PLATFORM")
+        for key in ("ENGINE", "PLATFORM"):
+            label = self.nav_group_labels.get(key)
+            if label is None:
+                continue
+            try:
+                if simple:
+                    label.pack_forget()
+            except Exception:
+                pass
+        if not simple:
+            try:
+                if engine_label is not None and not engine_label.winfo_ismapped():
+                    engine_label.pack(side="left", padx=(0, 3), before=self.nav_cells["Combat"])
+                if platform_label is not None and not platform_label.winfo_ismapped():
+                    platform_label.pack(side="left", padx=(0, 3), before=self.nav_cells["Hardware"])
+            except Exception:
+                pass
+        try:
+            if simple:
+                self.cfg_pill.pack_forget()
+            elif not self.cfg_pill.winfo_ismapped():
+                # Right dock packs from the right; CFG sits left of the buttons.
+                before = self.pro_mode_btn if self.pro_mode_btn.winfo_ismapped() else None
+                self.cfg_pill.pack(side="right", padx=(0, 0), before=before)
+        except Exception:
+            pass
+
+        # Compact: pills wrap onto a second header row (HTML `flex-wrap`).
+        try:
+            if simple:
+                self.header_cluster.grid_configure(row=1, column=0, columnspan=2, sticky="e",
+                                                   padx=(8, 7), pady=(0, 4))
+                self.header_bar.grid_columnconfigure(0, weight=1)
+                self.header_bar.grid_columnconfigure(1, weight=0)
+            else:
+                self.header_cluster.grid_configure(row=0, column=1, columnspan=1, sticky="e",
+                                                   padx=(4, 7), pady=(5, 4))
+                self.header_bar.grid_columnconfigure(0, weight=0)
+                self.header_bar.grid_columnconfigure(1, weight=1)
+                self.hud_brand.grid_configure(pady=(5, 5))
+        except Exception:
+            pass
+
+        if hasattr(self, "hud_mode_btn") and self.hud_mode_btn.winfo_exists():
+            self.hud_mode_btn.configure(text=self._hud_mode_label())
+
+        self._apply_nav_labels(simple)
+
+        # Footer: the legacy status line does not fit next to HOTKEY/UDP at 800px.
+        status = getattr(self, "status_indicator", None)
+        if status is not None:
+            try:
+                if simple:
+                    if status.winfo_ismapped():
+                        status.pack_forget()
+                elif not status.winfo_ismapped():
+                    status.pack(side="left", padx=(6, 0))
+            except Exception:
+                pass
+
+        # The subtitle wraps against the widths that are actually available.
+        self._refresh_header_wrap()
+        self._refresh_inline_hsv_geometry()
+
+    def _apply_nav_labels(self, simple):
+        """Use the short nav captions in Compact HUD so the dock still fits.
+
+        Vietnamese captions ("Phần cứng", "Cấu hình") are far wider than English;
+        the short forms from `t_hud` keep the five tabs + dock inside 780px.
+        """
+        specs = {
+            "Combat": ("NAV_COMBAT", "NAV_COMBAT_SHORT", "\u25ce"),
+            "Vision": ("NAV_VISION", "NAV_VISION_SHORT", "\u25c9"),
+            "Hardware": ("NAV_HARDWARE", "NAV_HARDWARE_SHORT", "\u26a1"),
+            "Profiles": ("NAV_PROFILES", "NAV_PROFILES_SHORT", "\u25a4"),
+            "Telemetry": ("NAV_TELEMETRY", "NAV_TELEMETRY_SHORT", "\u25a5"),
+        }
+
+        for key, (long_key, short_key, icon) in specs.items():
+            button = self.nav_buttons.get(key)
+            if button is None:
+                continue
+            text = t_hud(short_key) if simple else t_hud(long_key)
+            display = f"{icon}  {text}"
+            try:
+                if not button.winfo_exists():
+                    continue
+                button.configure(text=display, width=self._hud_button_width(display, size=9, padx=16))
+            except Exception:
+                pass
+
+    def _refresh_header_wrap(self):
+        """Wrap the header text against the width actually left of the pill cluster.
+
+        A wraplength larger than the free space makes the brand column demand more
+        than the window has, which squeezes (and clips) the telemetry cluster; the
+        cap below is derived from the measured cluster width, not hardcoded.
+        """
+        try:
+            bar_width = int(self.header_bar.winfo_width())
+        except Exception:
+            bar_width = 0
+        if bar_width <= 1:
+            try:
+                bar_width = int(self.winfo_width())
+            except Exception:
+                bar_width = 0
+        if bar_width <= 1:
+            bar_width = self.HUD_GEOMETRY.get(str(getattr(self, "_hud_mode", "simple")),
+                                              self.HUD_GEOMETRY["simple"])["size"][0]
+        try:
+            cluster_width = int(self.header_cluster.winfo_reqwidth())
+        except Exception:
+            cluster_width = 0
+        if cluster_width <= 1:
+            cluster_width = 340
+        # 26px badge + 14px padding + 8px breathing room around the cluster.
+        free = bar_width - cluster_width - 52
+        budget = max(150, min(520, free))
+        try:
+            self.page_sub_label.configure(wraplength=budget)
+            self.page_title_label.configure(wraplength=budget)
+        except Exception:
+            pass
+
+    def _toggle_hud_mode(self):
+        current = str(getattr(self, "_hud_mode", "simple"))
+        self._apply_hud_mode("wide" if current == "simple" else "simple")
+
+    def _cycle_accent(self):
+        """emerald -> cyan -> amber -> crimson -> emerald, applied immediately."""
+        current = str(getattr(config, "ui_accent", "emerald")).strip().lower()
+        try:
+            index = ACCENT_ORDER.index(current)
+        except ValueError:
+            index = 0
+        next_accent = ACCENT_ORDER[(index + 1) % len(ACCENT_ORDER)]
+        config.ui_accent = next_accent
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        _apply_theme_preset(self._ui_theme, accent=next_accent,
+                            variant=getattr(config, "ui_theme_variant", "dark"))
+        self._rebuild_layout_for_ui_style()
 
     def _build_sidebar(self):
-        """建立側邊欄：navigation + status widgets。"""
+        """Removed: the Tactical HUD has no left sidebar (see _build_nav_bar)."""
+        return
+
+    def _removed_legacy_sidebar(self):
+        """Dead code kept out of the build path; the HUD never calls this."""
+        return
+
+    def _removed_sidebar_builder(self):
+        """RETIRED: the 210px left sidebar. Replaced by _build_nav_bar (Top-Nav HUD).
+
+        Kept only as a tombstone so the diff shows exactly what was replaced; no
+        caller references it and it must never be wired back into _build_layout.
+        """
+        return
+
+    def _legacy_sidebar_body(self):
+        """RETIRED sidebar body; unreachable. The HUD shell has no left rail."""
+        return
+
         sidebar_width = 160 if self._legacy_ui_mode else 210
         self.sidebar = ctk.CTkFrame(self, width=sidebar_width, fg_color=COLOR_SIDEBAR, corner_radius=0)
         self.sidebar.grid(row=1, column=0, sticky="ns")
         # CTkFrame overrides grid_propagate into a no-op, so the sidebar used to grow
         # from its declared width to whatever the packed children asked for.
         self.sidebar.pack_propagate(False)
-        
+
         # 分隔線 Separator
         sep_color = COLOR_BORDER
         sep = ctk.CTkFrame(self.sidebar, width=1, fg_color=sep_color)
@@ -994,20 +1877,11 @@ class ViewerApp(ctk.CTk):
             self.nav_buttons["Telemetry"] = tel_btn
 
             # Alias mappings to prevent any KeyError from direct indexing across legacy callers
-            self.nav_buttons["Main Aimbot"] = combat_btn
-            self.nav_buttons["Sec Aimbot"] = combat_btn
-            self.nav_buttons["RCS"] = combat_btn
-            self.nav_buttons["Trigger"] = combat_btn
-            self.nav_buttons["Magnet Trigger"] = combat_btn
-            self.nav_buttons["System"] = hw_btn
-            self.nav_buttons["General"] = hw_btn
-            self.nav_buttons["Hardware & Capture"] = hw_btn
-            self.nav_buttons["Config"] = prof_btn
-            self.nav_buttons["Profiles & Config"] = prof_btn
-            self.nav_buttons["Debug"] = tel_btn
             self.nav_buttons["Debug & Telemetry"] = tel_btn
 
-        self._set_nav_active(self._active_tab_name)
+    def _dead_sidebar_tail(self):
+        """Unreachable tail of the removed sidebar builder (kept for reference)."""
+        return
 
     def _two_column_container(self, parent=None, pady=(0, 0)):
         """Even two-column card grid.
@@ -1081,10 +1955,11 @@ class ViewerApp(ctk.CTk):
         if not hasattr(self, "status_indicator") or not self.status_indicator.winfo_exists():
             return
         msg = t(str(text).replace("\n", " ").strip())
-        max_chars = 30
+        max_chars = 46
         if len(msg) > max_chars:
             msg = msg[: max_chars - 3] + "..."
         self.status_indicator.configure(text=msg, text_color=text_color)
+        self._set_footer_state()
 
     def _toggle_language_quick(self):
         new_lang = "en" if i18n.language == "vi" else "vi"
@@ -1099,31 +1974,43 @@ class ViewerApp(ctk.CTk):
         if not hasattr(self, "runtime_btn") or not self.runtime_btn.winfo_exists():
             return
         if getattr(self, "_runtime_busy", False):
-            label = t("STOPPING...") if getattr(self, "_runtime_active", False) else t("STARTING...")
+            label = t_hud("HUD_STOPPING") if getattr(self, "_runtime_active", False) else t_hud("HUD_STARTING")
             self.runtime_btn.configure(
                 text=label,
+                width=self._hud_button_width(label, padx=18),
                 state="disabled",
-                fg_color=COLOR_SURFACE,
-                hover_color=COLOR_SURFACE,
-                text_color=COLOR_TEXT_DIM,
+                fg_color=COLOR_HUD_CARD,
+                hover_color=COLOR_HUD_CARD,
+                border_color=COLOR_HUD_BORDER,
+                text_color=COLOR_HUD_DIM,
             )
+            self._set_footer_state()
             return
         if getattr(self, "_runtime_active", False):
+            danger = "#FF2A5F"
+            label = t_hud("HUD_STOP_ENGINE")
             self.runtime_btn.configure(
-                text=t("STOP ENGINE"),
+                text=label,
+                width=self._hud_button_width(label, padx=18),
                 state="normal",
-                fg_color="#F43F5E",
+                fg_color=danger,
                 hover_color="#E11D48",
+                border_color="#FF6B8A",
                 text_color="#FFFFFF",
             )
+            self._set_footer_state()
             return
+        label = t_hud("HUD_START_ENGINE")
         self.runtime_btn.configure(
-            text=t("START ENGINE"),
+            text=label,
+            width=self._hud_button_width(label, padx=18),
             state="normal",
-            fg_color="#10B981",
-            hover_color="#059669",
-            text_color="#022C22",
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            border_color=COLOR_ACCENT,
+            text_color=readable_on(COLOR_ACCENT),
         )
+        self._set_footer_state()
 
     def _runtime_settings_locked(self):
         return bool(getattr(self, "_runtime_active", False) or getattr(self, "_runtime_busy", False))
@@ -1539,60 +2426,29 @@ class ViewerApp(ctk.CTk):
     def _toggle_pro_mode(self):
         self._ui_pro_mode = not getattr(self, "_ui_pro_mode", False)
         config.ui_pro_mode = self._ui_pro_mode
-        if hasattr(self, "mode_toggle_btn") and self.mode_toggle_btn.winfo_exists():
-            self.mode_toggle_btn.configure(
+        if hasattr(self, "pro_mode_btn") and self.pro_mode_btn.winfo_exists():
+            self.pro_mode_btn.configure(
                 text="Pro" if self._ui_pro_mode else "Simple",
-                fg_color=COLOR_ACCENT if self._ui_pro_mode else COLOR_SURFACE,
-                hover_color=COLOR_ACCENT_HOVER if self._ui_pro_mode else COLOR_BORDER,
-                text_color="#04140A" if self._ui_pro_mode else COLOR_TEXT,
+                fg_color=COLOR_ACCENT if self._ui_pro_mode else COLOR_HUD_CARD,
+                hover_color=COLOR_ACCENT_HOVER if self._ui_pro_mode else mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+                border_color=COLOR_ACCENT if self._ui_pro_mode else COLOR_HUD_BORDER,
+                text_color=readable_on(COLOR_ACCENT) if self._ui_pro_mode else COLOR_HUD_TEXT,
             )
         self._collapsible_section_states.clear()
-        refresh_tab_map = {
-            "Main Aimbot": self._show_aimbot_tab,
-            "Combat": self._show_aimbot_tab,
-            "Sec Aimbot": self._show_sec_aimbot_tab,
-            "Vision": self._show_vision_tab,
-            "General": self._show_general_tab,
-            "Hardware": self._show_general_tab,
-            "Config": self._show_config_tab,
-            "Profiles": self._show_config_tab,
-            "Debug": self._show_debug_tab,
-            "Telemetry": self._show_debug_tab,
-        }
-        handler = refresh_tab_map.get(self._active_tab_name, self._show_aimbot_tab)
-        handler()
+        # Re-render the current page through the shared tab map; the local copy
+        # that used to live here silently sent Trigger/RCS/Magnet to Combat.
+        self._refresh_current_page()
 
     def _add_sub_nav_bar(self, values, current_val, callback_map):
-        """Adds a sleek segmented top bar for switching between related tabs."""
-        if self._legacy_ui_mode:
-            return
-        bar_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        bar_frame.pack(fill="x", padx=4, pady=(2, 8))
+        """RETIRED: the HUD uses _add_platform_sub_nav. Kept as a no-op shim."""
+        return
 
-        def _on_sub_change(selected):
-            cmd = callback_map.get(selected)
-            if cmd:
-                # Defer execution to avoid destroying the widget in the middle of its click event handler
-                self.after_idle(cmd)
-
-        seg = ctk.CTkSegmentedButton(
-            bar_frame,
-            values=values,
-            command=_on_sub_change,
-            selected_color=COLOR_ACCENT,
-            selected_hover_color=COLOR_ACCENT_HOVER,
-            unselected_color=COLOR_SURFACE,
-            unselected_hover_color=COLOR_BORDER,
-            text_color=COLOR_TEXT,
-            height=28,
-            font=("Roboto", 10, "bold"),
-            corner_radius=6,
-        )
-        seg.pack(fill="x")
-        if current_val in values:
-            seg.set(current_val)
+    def _retired_sub_nav_body(self, values, current_val, callback_map):
+        """Dead body of the retired segmented sub-nav (never called)."""
+        return
 
     def _set_nav_active(self, active_text):
+        """Highlight the active HUD tab: tinted fill, accent border, 2px underline."""
         group_map = {
             "Main Aimbot": "Combat",
             "Sec Aimbot": "Combat",
@@ -1623,25 +2479,58 @@ class ViewerApp(ctk.CTk):
             indicator = self.nav_indicators.get(nav_name)
             if not btn:
                 continue
+            try:
+                if not btn.winfo_exists():
+                    continue
+            except Exception:
+                continue
             if nav_name == target_nav or nav_name == active_text:
-                btn.configure(text_color=COLOR_ACCENT, fg_color=COLOR_NAV_ACTIVE_BG)
+                btn.configure(
+                    text_color="#FFFFFF",
+                    fg_color=mix(COLOR_ACCENT, COLOR_HUD_NAV, 0.12),
+                    border_width=1,
+                    border_color=COLOR_ACCENT,
+                )
                 if indicator is not None:
                     indicator.configure(fg_color=COLOR_ACCENT)
+                    if not indicator.winfo_ismapped():
+                        indicator.pack(fill="x")
             else:
-                inactive_bg = "transparent"
-                btn.configure(text_color=COLOR_TEXT_DIM if not self._legacy_ui_mode else COLOR_TEXT,
-                              fg_color=inactive_bg)
+                btn.configure(
+                    text_color=COLOR_HUD_DIM if not self._legacy_ui_mode else COLOR_TEXT,
+                    fg_color="transparent",
+                    border_width=0,
+                )
                 if indicator is not None:
                     indicator.configure(fg_color="transparent")
+                    if indicator.winfo_ismapped():
+                        indicator.pack_forget()
+
+    def _page_meta(self, title, subtitle=""):
+        """Resolve the header title/subtitle pair for a page heading."""
+        meta = {
+            "Main Aimbot": ("PAGE_COMBAT_TITLE", "PAGE_COMBAT_SUB"),
+            "Secondary Aimbot": ("PAGE_SEC_TITLE", "PAGE_SEC_SUB"),
+            "Vision & Color Detection": ("PAGE_VISION_TITLE", "PAGE_VISION_SUB"),
+            "Hardware & Capture Service": ("PAGE_HARDWARE_TITLE", "PAGE_HARDWARE_SUB"),
+            "Configuration Profiles": ("PAGE_PROFILES_TITLE", "PAGE_PROFILES_SUB"),
+            "Debug & Telemetry": ("PAGE_TELEMETRY_TITLE", "PAGE_TELEMETRY_SUB"),
+        }
+        keys = meta.get(str(title))
+        if keys is None:
+            return t(title), (t(subtitle) if subtitle else "")
+        return t_hud(keys[0]), (t(subtitle) if subtitle else t_hud(keys[1]))
 
     def _set_page_header(self, title, subtitle=""):
-        """Keep the title-bar heading in sync with whichever page is showing."""
+        """Keep the HUD header in sync with whichever page is showing."""
+        label_title, label_sub = self._page_meta(title, subtitle)
         title_label = getattr(self, "page_title_label", None)
         if title_label is not None and title_label.winfo_exists():
-            title_label.configure(text=t(title))
+            title_label.configure(text=str(label_title).upper())
         sub_label = getattr(self, "page_sub_label", None)
         if sub_label is not None and sub_label.winfo_exists():
-            sub_label.configure(text=t(subtitle) if subtitle else "")
+            sub_label.configure(text=label_sub)
+        self._refresh_header_wrap()
 
     def _handle_nav_click(self, text, command):
         self._active_tab_name = str(text)
@@ -1650,8 +2539,18 @@ class ViewerApp(ctk.CTk):
 
     def _clear_content(self):
         self._cancel_binding_capture()
+        self._stop_inline_hsv_preview()
+        self._stop_obs_udp_telemetry()
         for widget in self.content_frame.winfo_children():
             widget.destroy()
+        # Destroying a CTk widget does not cancel the `after` jobs its internals
+        # armed (CTkTextbox's 50 ms scrollbar loop, CTkButton's click animation,
+        # CTk's DPI tracker): the timer survives in this interpreter while the
+        # Python callback died with the widget, so it later fires as
+        # "invalid command name ...". Rebuilding the page is now an everyday
+        # operation (the deferred first-config pass redraws the open page), so
+        # drop those orphaned timers explicitly.
+        self._cancel_orphan_after_jobs()
         # Clear widget maps to avoid stale destroyed references during config apply.
         self._option_widgets = {}
         self._slider_widgets = {}
@@ -1666,34 +2565,74 @@ class ViewerApp(ctk.CTk):
         self._pid_preview_canvas_sec = None
         self._pid_preview_info_main = None
         self._pid_preview_info_sec = None
+        self._hsv_drawer = None
+        self.hsv_raw_canvas = None
+        self.hsv_mask_canvas = None
+        self.hsv_gradient_canvas = None
+        self.hsv_readout = None
+        self.telemetry_canvas = None
+        self.tele_dxdy = None
+        self.tele_baud = None
+        self.tele_step = None
+        self.debug_log_textbox = None
+        self._telemetry_job_id = None
+        # The Vision OBS UDP card is rebuilt by every _show_vision_tab call; the
+        # telemetry `after` job is cancelled above and the refs are dropped so a
+        # later tick can never touch destroyed widgets.
+        self._obs_udp_plugin_status_cache = None
+        self.card_obs_udp_stream = None
+        self.obs_udp_plugin_label = None
+        self.obs_udp_telemetry_label = None
+        self.obs_udp_crop_label = None
+        self.obs_udp_ip_entry = None
+        self.obs_udp_port_entry = None
+        self.obs_udp_connect_btn = None
+        self.obs_udp_preset_btn = None
+        self.obs_udp_install_btn = None
+        # The switches' Tk variables are owned by the card; dropping them keeps
+        # _sync_engine_ui_from_config() honest about "no engine widgets here".
+        self.var_ai_udp_stream = None
+        self.var_ai_udp_bypass = None
+        # Anti-teammate guard widgets live in the AI card as well: a stale
+        # reference would make sync touch a destroyed widget.
+        self.ai_teammate_status_label = None
+        self.ai_enemy_filter_option = None
+        self.enemy_outline_color_option = None
+        self.enemy_outline_swatch = None
+        self.enemy_outline_hex_label = None
 
     def _toggle_theme(self):
-        if ctk.get_appearance_mode() == "Dark":
-            ctk.set_appearance_mode("Light")
-            self.theme_btn.configure(text=t("Light Mode"))
-        else:
-            ctk.set_appearance_mode("Dark")
-            self.theme_btn.configure(text=t("Dark Mode"))
+        """Legacy hook: the footer theme button now toggles Dark / Midnight."""
+        self._toggle_theme_variant()
 
-    def _toggle_ui_style(self):
-        theme_keys = list(THEME_PRESETS.keys())
-        idx = theme_keys.index(self._ui_theme) if self._ui_theme in theme_keys else 0
-        next_theme = theme_keys[(idx + 1) % len(theme_keys)]
-        self._ui_theme = next_theme
-        config.ui_theme = next_theme
-        self._legacy_ui_mode = (next_theme == "classic")
-        config.legacy_ui_mode = self._legacy_ui_mode
+    def _toggle_theme_variant(self):
+        """Switch the HUD background ladder between Dark and Midnight."""
+        current = str(getattr(config, "ui_theme_variant", "dark")).strip().lower()
+        next_variant = "midnight" if current != "midnight" else "dark"
+        config.ui_theme_variant = next_variant
         try:
             config.save_to_file()
         except Exception:
             pass
+        _apply_theme_preset(self._ui_theme, accent=getattr(config, "ui_accent", "emerald"),
+                            variant=next_variant)
         self._rebuild_layout_for_ui_style()
+
+    def _toggle_ui_style(self):
+        """Legacy hook: kept as an alias of the HUD accent cycle."""
+        self._cycle_accent()
 
     def _rebuild_layout_for_ui_style(self):
         tab_name = str(getattr(self, "_active_tab_name", "General"))
+        aim_slot = str(getattr(self, "_active_aim_slot", "main"))
         self._cancel_binding_capture()
+        self._stop_inline_hsv_preview()
+        # The shell (and the Vision card with it) is about to be destroyed, so a
+        # pending telemetry tick must not fire against dead widgets.
+        self._stop_obs_udp_telemetry()
+        self.card_obs_udp_stream = None
 
-        for attr in ("title_bar", "sidebar", "content_frame"):
+        for attr in ("header_bar", "nav_bar", "footer_bar", "main_host", "content_frame"):
             widget = getattr(self, attr, None)
             if widget is not None:
                 try:
@@ -1701,13 +2640,33 @@ class ViewerApp(ctk.CTk):
                 except Exception:
                     pass
 
-        _apply_theme_preset(self._ui_theme)
+        _apply_theme_preset(
+            self._ui_theme,
+            accent=getattr(config, "ui_accent", "emerald"),
+            variant=getattr(config, "ui_theme_variant", "dark"),
+        )
         self.configure(fg_color=COLOR_BG)
         self._build_layout()
 
-        tab_map = {
+        tab_map = self._tab_builder_map()
+        tab_fn = tab_map.get(tab_name)
+        if tab_fn is None:
+            self._show_aimbot_tab()
+            return
+        self._active_aim_slot = aim_slot
+        self._handle_nav_click(tab_name, tab_fn)
+
+    def _default_tab_name(self):
+        """Page shown when the shell is first built."""
+        return "General" if self._legacy_ui_mode else "Main Aimbot"
+
+    def _tab_builder_map(self):
+        """Single source of truth: every accepted page name -> its builder."""
+        return {
             "General": self._show_general_tab,
+            "System": self._show_general_tab,
             "Hardware": self._show_general_tab,
+            "Hardware & Capture": self._show_general_tab,
             "Main Aimbot": self._show_aimbot_tab,
             "Combat": self._show_aimbot_tab,
             "Sec Aimbot": self._show_sec_aimbot_tab,
@@ -1717,12 +2676,25 @@ class ViewerApp(ctk.CTk):
             "RCS": self._show_rcs_tab,
             "Config": self._show_config_tab,
             "Profiles": self._show_config_tab,
+            "Profiles & Config": self._show_config_tab,
             "Debug": self._show_debug_tab,
             "Telemetry": self._show_debug_tab,
+            "Debug & Telemetry": self._show_debug_tab,
         }
-        tab_fn = tab_map.get(tab_name)
-        if tab_fn is not None and tab_name != "General":
-            self._handle_nav_click(tab_name, tab_fn)
+
+    def _refresh_current_page(self):
+        """Redraw the page that is on screen; never navigate to a different one.
+
+        The deferred first-config pass has to rebuild the visible widgets so they
+        show the loaded values, but it must not pick the page: doing so used to
+        yank the user off Vision (or any other page) opened during the first
+        200 ms and destroy the widgets they were already using.
+        """
+        default = self._default_tab_name()
+        tab_name = str(getattr(self, "_active_tab_name", "") or default)
+        builders = self._tab_builder_map()
+        tab_fn = builders.get(tab_name) or builders[default]
+        self._handle_nav_click(tab_name, tab_fn)
 
     def _apply_language(self):
         self._rebuild_layout_for_ui_style()
@@ -1739,7 +2711,1337 @@ class ViewerApp(ctk.CTk):
 
     # --- 各分頁內容 Tabs ---
 
+    # --- Vision ---------------------------------------------------------------
+
     def _show_vision_tab(self):
+        self._active_tab_name = "Vision"
+        self._clear_content()
+        self._add_title("Vision & Color Detection")
+
+        col_left, col_right, self._vision_cols = self._two_column_container(pady=(0, 0))
+
+        # 0. Detection Engine Mode (Colorbot vs AI Detection)
+        self.card_detection_engine = ModernCard(
+            col_left,
+            "Detection Engine Mode",
+            icon="\u26a1",
+            badge_text="Engine",
+            accent_color=COLOR_ACCENT,
+        )
+        self.card_detection_engine.pack(fill="x", pady=(0, 6))
+
+        engine_display_map = {
+            "colorbot": "Colorbot (HSV)",
+            "ai_detection": "AI Detection (DirectML ONNX)",
+        }
+        current_engine = getattr(config, "detection_engine", "colorbot")
+        current_engine_disp = engine_display_map.get(current_engine, "Colorbot (HSV)")
+
+        self.engine_option = self._add_option_row_in_frame(
+            self.card_detection_engine.content,
+            "Active Engine",
+            ["Colorbot (HSV)", "AI Detection (DirectML ONNX)"],
+            self._on_detection_engine_selected,
+        )
+        self.engine_option.set(current_engine_disp)
+
+        self.engine_hotkey_option = self._add_option_row_in_frame(
+            self.card_detection_engine.content,
+            "Switch Engine Hotkey",
+            ["None", "F5", "F6", "F7", "X", "C", "V", "Side Mouse 4 Button", "Side Mouse 5 Button"],
+            self._on_engine_hotkey_selected,
+        )
+        current_hotkey = getattr(config, "ai_toggle_key", "") or "None"
+        self.engine_hotkey_option.set(current_hotkey)
+
+        # 0.1 AI Detection & DirectML GPU Settings
+        self.card_ai_settings = ModernCard(
+            col_left,
+            "AI Detection & DirectML (GTX 1060)",
+            icon="\U0001f9e0",
+            badge_text="GPU DirectML",
+            accent_color=COLOR_ACCENT_2,
+        )
+        self.card_ai_settings.pack(fill="x", pady=(0, 6))
+
+        model_options = self._get_available_ai_models()
+        self.ai_model_option = self._add_option_row_in_frame(
+            self.card_ai_settings.content,
+            "ONNX Model File",
+            model_options,
+            self._on_ai_model_selected,
+        )
+        curr_model = getattr(config, "ai_model_path", "models/valorant_detector.onnx")
+        self.ai_model_option.set(curr_model if curr_model in model_options else model_options[0])
+
+        self.ai_device_option = self._add_option_row_in_frame(
+            self.card_ai_settings.content,
+            "Inference Device",
+            ["DirectML (GPU)", "CPU"],
+            self._on_ai_device_selected,
+        )
+        curr_dev = "DirectML (GPU)" if getattr(config, "ai_device", "dml") == "dml" else "CPU"
+        self.ai_device_option.set(curr_dev)
+
+        # 0.1a Anti-teammate guard. A player-only export labels a team-mate as
+        # "body"/"head" exactly like an enemy, so this card has to say which kind
+        # of model is selected and let the user pick the guard mode and the
+        # outline colour the guard verifies against.
+        self.ai_teammate_status_label = ctk.CTkLabel(
+            self.card_ai_settings.content,
+            text=self._get_teammate_capability_text(),
+            font=self._hud_font(8),
+            text_color=COLOR_ACCENT_2,
+            anchor="w",
+            justify="left",
+            wraplength=260,
+        )
+        self.ai_teammate_status_label.pack(fill="x", pady=(2, 0))
+
+        # "Auto (No Teammate Class)" is far wider than a normal option value, so
+        # the label sits above the menu and the menu gets the card's full width.
+        # A two-widget row would have to shrink one of them below its requested
+        # width in the Compact HUD layout, i.e. clip it.
+        ctk.CTkLabel(
+            self.card_ai_settings.content,
+            text=t_hud("Anti-Teammate Filter", "Anti-Teammate Filter"),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        labels = [
+            self._ai_enemy_filter_display("auto"),
+            self._ai_enemy_filter_display("on"),
+            self._ai_enemy_filter_display("off"),
+        ]
+        self.ai_enemy_filter_option = self._add_option_menu(
+            labels,
+            self._on_ai_enemy_filter_selected,
+            parent=self.card_ai_settings.content,
+        )
+        self.ai_enemy_filter_option.pack(fill="x", pady=(2, 2))
+        self.ai_enemy_filter_option.set(
+            self._ai_enemy_filter_display(getattr(config, "ai_enemy_outline_filter", "auto"))
+        )
+
+        outline_row = ctk.CTkFrame(self.card_ai_settings.content, fg_color="transparent")
+        outline_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(
+            outline_row,
+            text=t_hud("Enemy Outline Color", "Enemy Outline Color"),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_DIM,
+        ).pack(side="left")
+
+        self.enemy_outline_color_option = self._add_option_menu(
+            ["purple", "yellow", "red", "custom"],
+            self._on_enemy_outline_color_selected,
+            parent=outline_row,
+        )
+        self.enemy_outline_color_option.configure(width=96)
+        self.enemy_outline_color_option.set(str(getattr(config, "color", "purple")))
+        self.enemy_outline_color_option.pack(side="right")
+
+        # Swatch + hex on their own line: the colour row above already fills the
+        # card width, and squeezing two more widgets into it would clip one of
+        # them at the Compact HUD width.
+        outline_preview = ctk.CTkFrame(
+            self.card_ai_settings.content, fg_color="transparent"
+        )
+        outline_preview.pack(fill="x", pady=(2, 2))
+        self.enemy_outline_swatch = ctk.CTkFrame(
+            outline_preview,
+            width=14,
+            height=14,
+            fg_color=self._enemy_outline_color_hex(),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3,
+        )
+        self.enemy_outline_swatch.pack(side="left")
+        self.enemy_outline_hex_label = ctk.CTkLabel(
+            outline_preview,
+            text=self._enemy_outline_color_hex(),
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_DIM,
+        )
+        self.enemy_outline_hex_label.pack(side="left", padx=(6, 0))
+
+        self._add_slider_in_frame(
+            self.card_ai_settings.content,
+            "Confidence Threshold",
+            "ai_confidence_threshold",
+            10, 95,
+            int(float(getattr(config, "ai_confidence_threshold", 0.45)) * 100),
+            lambda v: setattr(config, "ai_confidence_threshold", round(float(v) / 100.0, 2))
+        )
+
+        self._add_slider_in_frame(
+            self.card_ai_settings.content,
+            "NMS IoU Threshold",
+            "ai_iou_threshold",
+            10, 95,
+            int(float(getattr(config, "ai_iou_threshold", 0.45)) * 100),
+            lambda v: setattr(config, "ai_iou_threshold", round(float(v) / 100.0, 2))
+        )
+
+        self.var_micro_roi = tk.BooleanVar(value=bool(getattr(config, "dynamic_micro_roi_enabled", True)))
+        ctk.CTkSwitch(
+            self.card_ai_settings.content,
+            text=t_hud("Dynamic Micro-ROI (Long-Range ADS)", "Dynamic Micro-ROI (Long-Range ADS)"),
+            variable=self.var_micro_roi,
+            command=lambda: setattr(config, "dynamic_micro_roi_enabled", self.var_micro_roi.get()),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(anchor="w", pady=(4, 2))
+
+        ai_status_row = ctk.CTkFrame(self.card_ai_settings.content, fg_color="transparent")
+        ai_status_row.pack(fill="x", pady=(6, 2))
+        self.ai_status_label = ctk.CTkLabel(
+            ai_status_row,
+            text=self._get_ai_status_text(),
+            font=self._hud_font(8),
+            text_color=COLOR_ACCENT_2,
+        )
+        self.ai_status_label.pack(side="left")
+
+        ctk.CTkButton(
+            ai_status_row,
+            text="Reload Model",
+            command=self._reload_ai_model,
+            font=self._hud_font(8, "bold"),
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.20),
+            border_width=1,
+            border_color=COLOR_ACCENT_2,
+            text_color=COLOR_ACCENT_2,
+            height=20,
+            corner_radius=3,
+        ).pack(side="right")
+
+        # 0.2 OBS UDP Stream (xUDP plugin) — AI Detection only.
+        # It lives in col_left on purpose: the right column belongs to the HSV
+        # calibration card and collapses with it (tests/test_redesign_layout.py
+        # asserts both the even split and that collapse), so an AI-only card
+        # there would fight the colour rule instead of following it.
+        self._build_obs_udp_stream_card(col_left)
+
+        # 1. Target Color Selection
+        self.card_color_preset = ModernCard(
+            col_left,
+            "Target Color Selection",
+            icon="\u25d0",
+            badge_text="Color",
+            accent_color=COLOR_ACCENT,
+        )
+        self.card_color_preset.pack(fill="x", pady=(0, 6))
+
+        self.color_option = self._add_option_row_in_frame(
+            self.card_color_preset.content,
+            "Target Color Preset",
+            ["yellow", "purple", "red", "custom"],
+            self._on_color_selected,
+        )
+        self._option_widgets["color"] = self.color_option
+        current_color = getattr(config, "color", "yellow")
+        self.color_option.set(current_color)
+
+        # 2. Contour & Detection Filters (drawer host)
+        self.card_contour_filters = ModernCard(
+            col_left,
+            "Contour & Detection Filters",
+            icon="\u25cb",
+            badge_text="Pro",
+            accent_color=COLOR_WARNING,
+        )
+        self.card_contour_filters.pack(fill="x", pady=(0, 6))
+
+        # Match detection.merge_close_rects() clamp (0-18) so slider/entry reflect real range.
+        self._add_slider_in_frame(
+            self.card_contour_filters.content, "Merge Distance", "detection_merge_distance", 0, 18,
+            max(0, min(int(getattr(config, "detection_merge_distance", 12)), 18)),
+            self._on_detection_merge_distance_changed,
+        )
+        self._add_slider_in_frame(
+            self.card_contour_filters.content, "Min Contour Pts", "detection_min_contour_points", 3, 100,
+            int(getattr(config, "detection_min_contour_points", 5)),
+            self._on_detection_min_contour_points_changed,
+        )
+
+        filters_row = ctk.CTkFrame(self.card_contour_filters.content, fg_color="transparent")
+        filters_row.pack(fill="x", pady=(4, 0))
+
+        self.var_show_opencv_windows = tk.BooleanVar(value=bool(getattr(config, "show_opencv_windows", True)))
+        ctk.CTkSwitch(
+            filters_row,
+            text=t_hud("Show OpenCV Windows", "Show OpenCV Windows"),
+            variable=self.var_show_opencv_windows,
+            command=self._on_show_opencv_windows_changed,
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(side="left")
+        self._checkbox_vars["show_opencv_windows"] = self.var_show_opencv_windows
+
+        self.launch_hsv_btn = ctk.CTkButton(
+            filters_row,
+            text=t_hud("HUD_LAUNCH_HSV"),
+            command=self._toggle_inline_hsv_preview,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.20),
+            border_width=1,
+            border_color=COLOR_ACCENT,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(8, "bold"),
+            height=19,
+            width=self._hud_button_width(t_hud("HUD_LAUNCH_HSV"), size=8, padx=12),
+            corner_radius=3,
+        )
+        self.launch_hsv_btn.pack(side="right")
+
+        # 3. Inline OpenCV radar drawer (hidden until launched).
+        self._hsv_drawer = self._build_inline_hsv_drawer(col_left)
+        self._hsv_drawer.pack_forget()
+
+        # 4. Custom HSV calibration (right column)
+        self.card_hsv_tuning = ModernCard(
+            col_right,
+            "Custom HSV Calibration",
+            icon="\u25c9",
+            badge_text="Calibration",
+            accent_color=COLOR_ACCENT_2,
+        )
+        self.custom_hsv_container = self.card_hsv_tuning
+        self.custom_hsv_section = self.card_hsv_tuning.content
+        if current_color == "custom":
+            self.card_hsv_tuning.pack(fill="x", pady=(0, 6))
+
+        self._build_hsv_calibration(self.custom_hsv_section)
+        self._update_custom_hsv_visibility()
+        self._update_hsv_hud_readout()
+        self._update_engine_cards_visibility()
+        self._start_obs_udp_telemetry()
+        self._set_nav_active("Vision")
+
+    # --- Vision: OBS UDP Stream (xUDP plugin) card ----------------------------
+
+    def _build_obs_udp_stream_card(self, parent):
+        """AI-only card: UDP capture switch, endpoint, plugin state, telemetry.
+
+        Built on every Vision page build but only packed while the AI engine is
+        active (`_update_engine_cards_visibility`), so switching engines never
+        creates a second card and never touches the HSV column rules.
+        """
+        self.card_obs_udp_stream = ModernCard(
+            parent,
+            "OBS UDP Stream (xUDP Plugin)",
+            icon="\u25a3",
+            badge_text="xUDP",
+            accent_color=COLOR_ACCENT_2,
+        )
+
+        body = self.card_obs_udp_stream.content
+
+        self.var_ai_udp_stream = tk.BooleanVar(
+            value=bool(getattr(config, "ai_udp_stream_enabled", False))
+        )
+        ctk.CTkSwitch(
+            body,
+            text=t_hud("Use UDP Capture for AI Detection", "Use UDP Capture for AI Detection"),
+            variable=self.var_ai_udp_stream,
+            command=self._on_ai_udp_stream_toggled,
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(anchor="w", pady=(4, 2))
+
+        endpoint_row = ctk.CTkFrame(body, fg_color="transparent")
+        endpoint_row.pack(fill="x", pady=(2, 2))
+        ctk.CTkLabel(
+            endpoint_row,
+            text=t_hud("Target IP / Port", "Target IP / Port"),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_DIM,
+        ).pack(side="left")
+
+        self.obs_udp_port_entry = ctk.CTkEntry(
+            endpoint_row,
+            width=58,
+            height=22,
+            fg_color=COLOR_HUD_INPUT,
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, mono=True),
+            justify="center",
+        )
+        self.obs_udp_port_entry.pack(side="right")
+        self.obs_udp_port_entry.insert(0, str(getattr(config, "udp_port", "3110")))
+        self.obs_udp_port_entry.bind("<KeyRelease>", self._on_obs_udp_endpoint_changed)
+        self.obs_udp_port_entry.bind("<FocusOut>", self._on_obs_udp_endpoint_changed)
+
+        self.obs_udp_ip_entry = ctk.CTkEntry(
+            endpoint_row,
+            width=108,
+            height=22,
+            fg_color=COLOR_HUD_INPUT,
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, mono=True),
+            justify="center",
+        )
+        self.obs_udp_ip_entry.pack(side="right", padx=(0, 4))
+        self.obs_udp_ip_entry.insert(0, str(getattr(config, "udp_ip", "0.0.0.0")))
+        self.obs_udp_ip_entry.bind("<KeyRelease>", self._on_obs_udp_endpoint_changed)
+        self.obs_udp_ip_entry.bind("<FocusOut>", self._on_obs_udp_endpoint_changed)
+
+        self.var_ai_udp_bypass = tk.BooleanVar(
+            value=bool(getattr(config, "ai_udp_bypass_tiny_crop", True))
+        )
+        ctk.CTkSwitch(
+            body,
+            text=t_hud("Bypass Tiny UDP Crop in AI Mode", "Bypass Tiny UDP Crop in AI Mode"),
+            variable=self.var_ai_udp_bypass,
+            command=self._on_ai_udp_bypass_toggled,
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(anchor="w", pady=(2, 4))
+
+        buttons_row = ctk.CTkFrame(body, fg_color="transparent")
+        buttons_row.pack(fill="x", pady=(2, 2))
+
+        connect_text = t_hud("Apply / Connect UDP", "Apply / Connect UDP")
+        self.obs_udp_connect_btn = ctk.CTkButton(
+            buttons_row,
+            text=connect_text,
+            command=self._apply_ai_udp_stream,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.20),
+            border_width=1,
+            border_color=COLOR_ACCENT,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width(connect_text, size=8, padx=12),
+            corner_radius=3,
+        )
+        self.obs_udp_connect_btn.pack(side="left")
+
+        preset_text = t_hud("Copy AI Filter Preset", "Copy AI Filter Preset")
+        self.obs_udp_preset_btn = ctk.CTkButton(
+            buttons_row,
+            text=preset_text,
+            command=self._copy_ai_obs_preset,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT_2, COLOR_HUD_CARD, 0.20),
+            border_width=1,
+            border_color=COLOR_ACCENT_2,
+            text_color=COLOR_ACCENT_2,
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width(preset_text, size=8, padx=12),
+            corner_radius=3,
+        )
+        self.obs_udp_preset_btn.pack(side="right")
+
+        install_text = t_hud("Check / Install OBS Plugin", "Check / Install OBS Plugin")
+        self.obs_udp_install_btn = ctk.CTkButton(
+            body,
+            text=install_text,
+            command=self._check_or_install_obs_plugin,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_WARNING, COLOR_HUD_CARD, 0.20),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width(install_text, size=8, padx=12),
+            corner_radius=3,
+        )
+        self.obs_udp_install_btn.pack(anchor="w", pady=(2, 2))
+
+        self.obs_udp_plugin_label = ctk.CTkLabel(
+            body,
+            text=self._obs_udp_plugin_text(),
+            font=self._hud_font(8),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+            justify="left",
+            wraplength=280,
+        )
+        self.obs_udp_plugin_label.pack(fill="x", pady=(2, 0))
+
+        self.obs_udp_crop_label = ctk.CTkLabel(
+            body,
+            text=self._obs_udp_crop_text(),
+            font=self._hud_font(8),
+            text_color=COLOR_WARNING,
+            anchor="w",
+            justify="left",
+            wraplength=280,
+        )
+        self.obs_udp_crop_label.pack(fill="x", pady=(2, 0))
+
+        self.obs_udp_telemetry_label = ctk.CTkLabel(
+            body,
+            text="UDP: idle",
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_ACCENT_2,
+            anchor="w",
+            justify="left",
+            wraplength=280,
+        )
+        self.obs_udp_telemetry_label.pack(fill="x", pady=(2, 2))
+
+        # Packed here only when the page is built for the AI engine; the switch
+        # to/from Colorbot is handled by _update_engine_cards_visibility, which
+        # keys on pack() membership (not winfo_ismapped()), so a freshly built
+        # page hides it correctly before the window is ever mapped.
+        if getattr(config, "detection_engine", "colorbot") == "ai_detection":
+            anchor = getattr(self, "card_ai_settings", None)
+            if anchor is not None and str(anchor.winfo_manager()) == "pack":
+                try:
+                    self.card_obs_udp_stream.pack(fill="x", pady=(0, 6), after=anchor)
+                except Exception:
+                    self.card_obs_udp_stream.pack(fill="x", pady=(0, 6))
+            else:
+                self.card_obs_udp_stream.pack(fill="x", pady=(0, 6))
+
+        return self.card_obs_udp_stream
+
+    def _obs_udp_plugin_text(self, status=None):
+        """One-line plugin state for the card; never raises, never installs."""
+        if status is None:
+            try:
+                from src.utils.obs_udp_plugin import check_plugin_status
+
+                status = check_plugin_status()
+            except Exception as exc:
+                return "OBS plugin: status unavailable (%s)" % exc
+        if not isinstance(status, dict):
+            return "OBS plugin: status unavailable"
+        if status.get("installed"):
+            return "OBS plugin: installed (obs-color-correction.dll + TurboJPEG)"
+        if status.get("bundle_available"):
+            return "OBS plugin: NOT installed - installer found in the bundle"
+        missing = status.get("missing") or []
+        head = missing[0] if missing else "plugin files not found"
+        return "OBS plugin: NOT installed (%s)" % head
+
+    def _obs_udp_crop_text(self):
+        """Explain the crop decision in one line (bypass / active / disabled)."""
+        try:
+            from src.utils.obs_udp_plugin import udp_crop_decision
+
+            state = udp_crop_decision(config, mode=getattr(self.capture, "mode", "UDP"))
+        except Exception:
+            return "AI UDP crop: unknown"
+        reason = state.get("reason")
+        total = state.get("total_px", 0)
+        minimum = state.get("min_px", 0)
+        if reason == "tiny_crop":
+            return "AI UDP crop: bypassed (%dpx < %dpx model input)" % (total, minimum)
+        if reason == "crop_ok":
+            return "AI UDP crop: active at %dpx (>= %dpx model input)" % (total, minimum)
+        if reason == "option_off":
+            return "AI UDP crop: guard off - %dpx crop still applied" % total
+        if reason == "engine_colorbot":
+            return "AI UDP crop: not needed (Colorbot engine)"
+        return "AI UDP crop: disabled (udp_fov_enabled is off)"
+
+    def _on_ai_udp_stream_toggled(self):
+        """Drive the UDP capture for AI from the switch (on = connect, off = stop).
+
+        The switch used to be a dead flag: it persisted ``ai_udp_stream_enabled``
+        and nothing ever read it, so turning it off left the receiver bound and
+        turning it on connected nothing. It now performs the same action as the
+        Apply/Connect button, and turning it off disconnects UDP and returns to
+        the capture mode that was active before.
+        """
+        if self._runtime_settings_locked():
+            self.var_ai_udp_stream.set(bool(getattr(config, "ai_udp_stream_enabled", False)))
+            self._warn_runtime_settings_locked("capture")
+            return
+        enabled = bool(self.var_ai_udp_stream.get())
+        if enabled:
+            if self._apply_ai_udp_stream():
+                self._set_status_indicator("Status: UDP stream active for AI", COLOR_SUCCESS)
+                return
+            # Apply already reported the real error; keep the switch honest.
+            try:
+                self.var_ai_udp_stream.set(False)
+            except Exception:
+                pass
+            config.ai_udp_stream_enabled = False
+            self._save_ai_udp_config()
+            return
+        self._stop_ai_udp_stream()
+
+    def _save_ai_udp_config(self):
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+
+    def _stop_ai_udp_stream(self):
+        """Disconnect UDP and restore the capture mode used before the switch."""
+        config.ai_udp_stream_enabled = False
+        was_udp = str(getattr(self.capture, "mode", "")).upper() == "UDP"
+        previous = str(getattr(self, "_ai_udp_previous_mode", "") or "")
+        if previous not in _CAPTURE_MODES or previous.upper() == "UDP":
+            previous = str(getattr(config, "capture_mode", "") or "")
+        if previous not in _CAPTURE_MODES or previous.upper() == "UDP":
+            previous = "NDI"
+        if was_udp:
+            # `set_mode` disconnects the current backend itself (and releases the
+            # bound socket), so this is the single transition point.
+            try:
+                self.capture.set_mode(previous)
+            except Exception as exc:
+                log_print(f"[UI] AI UDP stop failed: {exc}")
+            config.capture_mode = previous
+            try:
+                self.capture_method_var.set(self._capture_display_mode(previous))
+            except Exception:
+                pass
+        self._save_ai_udp_config()
+        self._refresh_footer_udp()
+        if self.obs_udp_crop_label is not None:
+            try:
+                self.obs_udp_crop_label.configure(text=self._obs_udp_crop_text())
+            except Exception:
+                pass
+        self._set_status_indicator(
+            "Status: UDP stream stopped%s" % (" - back to %s" % previous if was_udp else ""),
+            COLOR_TEXT_DIM,
+        )
+
+    def _on_ai_udp_bypass_toggled(self):
+        """Toggle the tiny-crop guard (config only; the pipeline reads it live)."""
+        if self._runtime_settings_locked():
+            self.var_ai_udp_bypass.set(bool(getattr(config, "ai_udp_bypass_tiny_crop", True)))
+            self._warn_runtime_settings_locked("capture")
+            return
+        config.ai_udp_bypass_tiny_crop = bool(self.var_ai_udp_bypass.get())
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        if self.obs_udp_crop_label is not None:
+            try:
+                self.obs_udp_crop_label.configure(text=self._obs_udp_crop_text())
+            except Exception:
+                pass
+
+    def _on_obs_udp_endpoint_changed(self, event=None):
+        """Keep config.udp_ip/port and the footer HUD in sync from the card."""
+        if self._runtime_settings_locked():
+            self._warn_runtime_settings_locked("capture")
+            return
+        ip = str(getattr(config, "udp_ip", "0.0.0.0"))
+        port = str(getattr(config, "udp_port", "3110"))
+        entry = getattr(self, "obs_udp_ip_entry", None)
+        if entry is not None:
+            try:
+                if entry.winfo_exists():
+                    ip = entry.get().strip() or ip
+            except Exception:
+                pass
+        entry = getattr(self, "obs_udp_port_entry", None)
+        if entry is not None:
+            try:
+                if entry.winfo_exists():
+                    port = entry.get().strip() or port
+            except Exception:
+                pass
+        config.udp_ip = ip
+        config.udp_port = port
+        self.saved_udp_ip = ip
+        self.saved_udp_port = port
+        self._refresh_footer_udp()
+
+    def _sync_main_capture_udp_entries(self):
+        """Mirror the card endpoint into the Hardware tab entries when present."""
+        for attr, value in (
+            ("udp_ip_entry", str(getattr(config, "udp_ip", "0.0.0.0"))),
+            ("udp_port_entry", str(getattr(config, "udp_port", "3110"))),
+        ):
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            try:
+                if not widget.winfo_exists():
+                    continue
+                widget.delete(0, "end")
+                widget.insert(0, value)
+            except Exception:
+                pass
+
+    def _apply_ai_udp_stream(self):
+        """Validate the endpoint, bind the receiver and report the real error."""
+        if self._runtime_settings_locked():
+            self._warn_runtime_settings_locked("capture")
+            return False
+        try:
+            ip = self.obs_udp_ip_entry.get().strip() if self.obs_udp_ip_entry else ""
+            port_text = self.obs_udp_port_entry.get().strip() if self.obs_udp_port_entry else ""
+        except Exception:
+            ip, port_text = "", ""
+        ip = ip or str(getattr(config, "udp_ip", "0.0.0.0"))
+        port_text = port_text or str(getattr(config, "udp_port", "3110"))
+        try:
+            port = int(port_text)
+        except Exception:
+            port = 0
+        if not 1 <= port <= 65535:
+            self._set_status_indicator("Status: UDP port must be 1-65535", COLOR_DANGER)
+            return False
+
+        config.udp_ip = ip
+        config.udp_port = str(port)
+        config.ai_udp_stream_enabled = True
+        self.saved_udp_ip = ip
+        self.saved_udp_port = str(port)
+        if hasattr(self, "var_ai_udp_stream") and self.var_ai_udp_stream is not None:
+            try:
+                self.var_ai_udp_stream.set(True)
+            except Exception:
+                pass
+
+        # Remember what to go back to when the user switches UDP off, before
+        # set_mode() disconnects the old backend. Only real capture modes are
+        # accepted: a Mock/test double must never become a restore target.
+        previous_mode = str(getattr(self.capture, "mode", "") or "")
+        if previous_mode not in _CAPTURE_MODES:
+            previous_mode = str(getattr(config, "capture_mode", "") or "")
+        if previous_mode in _CAPTURE_MODES and previous_mode.upper() != "UDP":
+            self._ai_udp_previous_mode = previous_mode
+
+        success = False
+        error = None
+        try:
+            self.capture.set_mode("UDP")
+            result = self.capture.connect_udp(ip, port)
+            if isinstance(result, tuple) and len(result) == 2:
+                success, error = bool(result[0]), result[1]
+            else:
+                success, error = bool(result), None
+        except Exception as exc:
+            success, error = False, str(exc)
+
+        if success:
+            config.capture_mode = "UDP"
+            try:
+                self.capture_method_var.set(self._capture_display_mode("UDP"))
+            except Exception:
+                pass
+            self._sync_main_capture_udp_entries()
+            self._set_status_indicator("Status: UDP connected", COLOR_TEXT)
+            self._udp_packet_baseline = self._udp_packet_count()
+            self.after(1500, self._verify_udp_traffic)
+            self.after(500, self._update_udp_fov_sliders_after_connect)
+        else:
+            # `connect_udp` rolls its own mode back on a failed bind; also undo the
+            # `set_mode("UDP")` above so the service is not left disconnected in
+            # the old mode, and make the switch/intent agree with reality instead
+            # of leaving the receipt "UDP selected" while nothing is connected.
+            config.ai_udp_stream_enabled = False
+            self._save_ai_udp_config()
+            if hasattr(self, "var_ai_udp_stream") and self.var_ai_udp_stream is not None:
+                try:
+                    self.var_ai_udp_stream.set(False)
+                except Exception:
+                    pass
+            if previous_mode in _CAPTURE_MODES and previous_mode != "UDP":
+                try:
+                    self.capture.set_mode(previous_mode)
+                except Exception:
+                    pass
+            self._set_status_indicator(
+                "Status: UDP connect failed: %s" % (error or "unknown error"), COLOR_DANGER
+            )
+            log_print(f"[UI] AI UDP connect failed: {error}")
+        current_mode = str(getattr(self.capture, "mode", "")).upper()
+        if self.obs_udp_crop_label is not None:
+            try:
+                self.obs_udp_crop_label.configure(text=self._obs_udp_crop_text())
+            except Exception:
+                pass
+        self._refresh_footer_udp()
+        log_print(f"[UI] AI UDP stream apply: mode={current_mode} ok={success}")
+        return success
+
+    def _copy_ai_obs_preset(self, preset=None):
+        """Copy the OBS filter preset for the selected model to the clipboard."""
+        try:
+            from src.utils.obs_udp_plugin import (
+                build_ai_obs_filter_preset,
+                format_ai_obs_filter_preset,
+            )
+
+            if preset is None:
+                preset = build_ai_obs_filter_preset(
+                    getattr(config, "ai_model_path", ""),
+                    target_ip=getattr(config, "udp_ip", "0.0.0.0"),
+                    target_port=getattr(config, "udp_port", "3110"),
+                )
+            text = format_ai_obs_filter_preset(preset)
+        except Exception as exc:
+            self._set_status_indicator("Status: preset copy failed", COLOR_DANGER)
+            log_print(f"[UI] OBS preset build error: {exc}")
+            return ""
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update_idletasks()
+        except Exception:
+            pass
+        warnings = preset.get("warnings") or []
+        size = "%dx%d" % (preset.get("width", 0), preset.get("height", 0))
+        self._set_status_indicator(
+            "Status: OBS AI preset copied (%s)" % size, COLOR_SUCCESS
+        )
+        log_print(
+            "[UI] OBS AI filter preset copied: %s, %s FPS, quality %s%s"
+            % (size, preset.get("fps"), preset.get("jpeg_quality"),
+               ("; " + "; ".join(str(w) for w in warnings)) if warnings else "")
+        )
+        return text
+
+    def _check_or_install_obs_plugin(self):
+        """Check the plugin; run the bundled installer on a background thread."""
+        try:
+            from src.utils.obs_udp_plugin import check_plugin_status
+
+            status = check_plugin_status()
+            # The tick reuses this until the next check/install.
+            self._obs_udp_plugin_status_cache = status
+        except Exception as exc:
+            self._set_status_indicator("Status: OBS plugin check failed", COLOR_DANGER)
+            log_print(f"[UI] OBS plugin check error: {exc}")
+            return
+        if self.obs_udp_plugin_label is not None:
+            try:
+                self.obs_udp_plugin_label.configure(text=self._obs_udp_plugin_text(status))
+            except Exception:
+                pass
+        if status.get("installed"):
+            self._set_status_indicator("Status: OBS plugin already installed", COLOR_SUCCESS)
+            return
+        if not status.get("bundle_available"):
+            self._set_status_indicator("Status: OBS plugin bundle not found", COLOR_DANGER)
+            log_print("[UI] OBS plugin bundle missing: " + "; ".join(status.get("missing") or []))
+            return
+
+        self._set_status_indicator("Status: Installing OBS plugin (UAC may appear)", COLOR_WARNING)
+
+        def _install():
+            try:
+                from src.utils.obs_udp_plugin import run_plugin_installer, wait_for_install
+
+                ok, output = run_plugin_installer(status.get("plugin_root"), elevated=True)
+                if ok:
+                    # -Wait is only a hint: a dismissed UAC prompt also returns
+                    # 0. Confirm against the real install state before the UI
+                    # may say anything succeeded.
+                    confirmed = wait_for_install(status.get("plugin_root"), timeout=5.0)
+                    ok = bool(confirmed.get("installed"))
+                    if not ok:
+                        output = (output + " " if output else "") + (
+                            "installer launched but the plugin DLLs are not in place"
+                        )
+            except Exception as exc:
+                ok, output = False, str(exc)
+            try:
+                self.after(0, lambda: self._on_obs_plugin_install_done(ok, output))
+            except Exception:
+                pass  # window closed while the installer ran
+
+        threading.Thread(target=_install, daemon=True, name="ObsUdpPluginInstall").start()
+
+    def _on_obs_plugin_install_done(self, ok, output):
+        """UI-thread completion for the installer thread.
+
+        ``ok`` means "the plugin DLLs are now on disk", not "the launcher exited
+        0": ``Start-Process -Verb RunAs`` returns as soon as the elevated process
+        is created, so a zero exit code can also mean the user dismissed UAC. The
+        worker confirms through ``wait_for_install`` before this is called, which
+        is what keeps the status line and the plugin label from contradicting
+        each other.
+        """
+        self._obs_udp_plugin_status_cache = None
+        try:
+            from src.utils.obs_udp_plugin import check_plugin_status
+
+            status = check_plugin_status()
+            self._obs_udp_plugin_status_cache = status
+        except Exception:
+            status = None
+        installed = bool(status.get("installed")) if isinstance(status, dict) else False
+        if status is None:
+            label = "OBS plugin: state unconfirmed"
+        else:
+            label = self._obs_udp_plugin_text(status)
+        if self.obs_udp_plugin_label is not None:
+            try:
+                self.obs_udp_plugin_label.configure(text=label)
+            except Exception:
+                pass
+        if installed:
+            self._set_status_indicator("Status: OBS plugin installed", COLOR_SUCCESS)
+        elif ok:
+            # Confirmed by the worker's wait_for_install but the re-check just
+            # failed: never claim success the label cannot back up.
+            self._set_status_indicator(
+                "Status: Installer ran - plugin state unconfirmed", COLOR_WARNING
+            )
+        else:
+            self._set_status_indicator(
+                "Status: Plugin not installed yet (UAC cancelled or copy failed)", COLOR_WARNING
+            )
+        log_print(f"[UI] OBS plugin installer: ok={ok} :: {str(output or '').strip()[:400]}")
+
+    def _start_obs_udp_telemetry(self):
+        """Kick the ~0.75s telemetry refresh while the Vision tab is showing."""
+        self._stop_obs_udp_telemetry()
+        self._obs_udp_telemetry_job = self.after(750, self._refresh_obs_udp_telemetry)
+
+    def _stop_obs_udp_telemetry(self):
+        job = getattr(self, "_obs_udp_telemetry_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._obs_udp_telemetry_job = None
+
+    def _refresh_obs_udp_telemetry(self):
+        """One telemetry tick; reschedules only while the card is really visible."""
+        self._obs_udp_telemetry_job = None
+        if str(getattr(self, "_active_tab_name", "")) != "Vision":
+            return
+        card = getattr(self, "card_obs_udp_stream", None)
+        if card is None:
+            return
+        try:
+            if not card.winfo_exists() or not card.winfo_ismapped():
+                return
+        except Exception:
+            return
+        try:
+            from src.utils.obs_udp_plugin import (
+                build_udp_telemetry_snapshot,
+                check_plugin_status,
+            )
+
+            # The install state only changes when the user runs the installer,
+            # so it is cached per page build instead of stat-ing six paths every
+            # 750 ms tick.
+            if getattr(self, "_obs_udp_plugin_status_cache", None) is None:
+                self._obs_udp_plugin_status_cache = check_plugin_status()
+            snapshot = build_udp_telemetry_snapshot(
+                self.capture, config, plugin_status=self._obs_udp_plugin_status_cache
+            )
+        except Exception as exc:
+            snapshot = None
+            log_print(f"[UI] UDP telemetry error: {exc}")
+        if isinstance(snapshot, dict):
+            label = getattr(self, "obs_udp_telemetry_label", None)
+            if label is not None:
+                try:
+                    label.configure(text=snapshot.get("summary") or "UDP: idle")
+                except Exception:
+                    pass
+            crop_label = getattr(self, "obs_udp_crop_label", None)
+            if crop_label is not None:
+                try:
+                    crop_label.configure(text=self._obs_udp_crop_text())
+                except Exception:
+                    pass
+        try:
+            self._obs_udp_telemetry_job = self.after(750, self._refresh_obs_udp_telemetry)
+        except Exception:
+            self._obs_udp_telemetry_job = None
+
+    def _build_inline_hsv_drawer(self, parent):
+        """`Live OpenCV Mask Radar` drawer with two canvases and a real hook."""
+        drawer = ModernCard(parent, "Live OpenCV Mask Radar", accent_color=COLOR_ACCENT)
+        body = drawer.content
+
+        header = ctk.CTkFrame(body, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkLabel(
+            header, text="\u25cf", font=self._hud_font(9), text_color=COLOR_SUCCESS, width=10,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header,
+            text=t_hud("HUD_MASK_RADAR"),
+            font=self._hud_font(8, "bold", mono=True),
+            text_color=COLOR_HUD_TEXT,
+            anchor="w",
+        ).pack(side="left", padx=(2, 4))
+
+        self.hsv_close_btn = ctk.CTkButton(
+            header,
+            text="Close",
+            command=self._toggle_inline_hsv_preview,
+            fg_color="transparent",
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            text_color=COLOR_HUD_DIM,
+            font=self._hud_font(8),
+            width=self._hud_button_width("Close", size=8, padx=10, minimum=34),
+            height=16,
+            corner_radius=2,
+        )
+        self.hsv_close_btn.pack(side="right")
+
+        canvases = ctk.CTkFrame(body, fg_color="transparent")
+        canvases.pack(fill="x", pady=(0, 3))
+        canvases.grid_columnconfigure(0, weight=1, uniform="hsvcv")
+        canvases.grid_columnconfigure(1, weight=1, uniform="hsvcv")
+
+        raw_w, raw_h = self._inline_hsv_size
+        raw_cell = ctk.CTkFrame(canvases, fg_color=COLOR_HUD_INPUT, border_width=1,
+                                border_color=COLOR_HUD_BORDER, corner_radius=3)
+        raw_cell.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        ctk.CTkLabel(
+            raw_cell, text=t_hud("HUD_RAW_CAPTURE"), font=self._hud_font(7, mono=True),
+            text_color=COLOR_HUD_DIM,
+        ).pack(pady=(2, 1))
+        self.hsv_raw_canvas = tk.Canvas(
+            raw_cell, width=raw_w, height=raw_h, bg=COLOR_HUD_INPUT,
+            bd=0, highlightthickness=0,
+        )
+        self.hsv_raw_canvas.pack(padx=2, pady=(0, 3))
+
+        mask_cell = ctk.CTkFrame(canvases, fg_color=COLOR_HUD_INPUT, border_width=1,
+                                 border_color=COLOR_HUD_BORDER, corner_radius=3)
+        mask_cell.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        ctk.CTkLabel(
+            mask_cell, text=t_hud("HUD_HSV_MASK"), font=self._hud_font(7, mono=True),
+            text_color=COLOR_HUD_DIM,
+        ).pack(pady=(2, 1))
+        self.hsv_mask_canvas = tk.Canvas(
+            mask_cell, width=raw_w, height=raw_h, bg=COLOR_HUD_INPUT,
+            bd=0, highlightthickness=0,
+        )
+        self.hsv_mask_canvas.pack(padx=2, pady=(0, 3))
+
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(fill="x")
+        self.full_preview_btn = ctk.CTkButton(
+            actions,
+            text=t_hud("HUD_FULL_PREVIEW"),
+            command=self._open_hsv_preview,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=19,
+            width=self._hud_button_width(t_hud("HUD_FULL_PREVIEW"), size=8, padx=14),
+            corner_radius=3,
+        )
+        self.full_preview_btn.pack(side="left")
+
+        self._draw_hsv_placeholder()
+        return drawer
+
+    def _build_hsv_calibration(self, body):
+        """HSV range strip + `[h,s,v] -> [h,s,v]` readout + the six bound sliders."""
+        strip_row = ctk.CTkFrame(
+            body, fg_color=COLOR_HUD_SUB, border_width=1, border_color=COLOR_HUD_BORDER, corner_radius=3,
+        )
+        strip_row.pack(fill="x", pady=(0, 4))
+
+        ctk.CTkLabel(
+            strip_row, text=t_hud("HUD_RANGE"), font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_DIM,
+        ).pack(side="left", padx=(6, 4), pady=3)
+
+        self.hsv_gradient_canvas = tk.Canvas(
+            strip_row, width=140, height=12, bg=COLOR_HUD_INPUT,
+            bd=0, highlightthickness=1, highlightbackground=COLOR_HUD_BORDER,
+            highlightcolor=COLOR_HUD_BORDER,
+        )
+        self.hsv_gradient_canvas.pack(side="left", fill="x", expand=True, pady=3)
+
+        self.hsv_readout = ctk.CTkLabel(
+            strip_row,
+            text=self._hsv_readout_text(),
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_SUCCESS,
+            anchor="e",
+        )
+        self.hsv_readout.pack(side="right", padx=(4, 6), pady=3)
+
+        HudSectionTitle(body, t_hud("HUD_HSV_LOWER")).pack(anchor="w", padx=2, pady=(2, 0))
+        self._add_slider_in_frame(body, "Hue Min", "custom_hsv_min_h", 0, 179,
+                                  int(getattr(config, "custom_hsv_min_h", 0)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_min_h", v))
+        self._add_slider_in_frame(body, "Sat Min", "custom_hsv_min_s", 0, 255,
+                                  int(getattr(config, "custom_hsv_min_s", 0)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_min_s", v))
+        self._add_slider_in_frame(body, "Val Min", "custom_hsv_min_v", 0, 255,
+                                  int(getattr(config, "custom_hsv_min_v", 0)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_min_v", v))
+
+        HudSectionTitle(body, t_hud("HUD_HSV_UPPER")).pack(anchor="w", padx=2, pady=(5, 0))
+        self._add_slider_in_frame(body, "Hue Max", "custom_hsv_max_h", 0, 179,
+                                  int(getattr(config, "custom_hsv_max_h", 179)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_max_h", v))
+        self._add_slider_in_frame(body, "Sat Max", "custom_hsv_max_s", 0, 255,
+                                  int(getattr(config, "custom_hsv_max_s", 255)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_max_s", v))
+        self._add_slider_in_frame(body, "Val Max", "custom_hsv_max_v", 0, 255,
+                                  int(getattr(config, "custom_hsv_max_v", 255)),
+                                  lambda v: self._on_custom_hsv_changed("custom_hsv_max_v", v))
+
+    def _hsv_bounds(self):
+        return (
+            int(getattr(config, "custom_hsv_min_h", 0)),
+            int(getattr(config, "custom_hsv_min_s", 0)),
+            int(getattr(config, "custom_hsv_min_v", 0)),
+            int(getattr(config, "custom_hsv_max_h", 179)),
+            int(getattr(config, "custom_hsv_max_s", 255)),
+            int(getattr(config, "custom_hsv_max_v", 255)),
+        )
+
+    def _hsv_readout_text(self):
+        h_lo, s_lo, v_lo, h_hi, s_hi, v_hi = self._hsv_bounds()
+        return f"[{h_lo},{s_lo},{v_lo}] \u2192 [{h_hi},{s_hi},{v_hi}]"
+
+    def _hsv_color_for(self, h, s, v):
+        """HSV (OpenCV ranges) -> #RRGGBB for the calibration strip."""
+        hue = max(0, min(179, int(h))) * 2.0
+        sat = max(0, min(255, int(s))) / 255.0
+        val = max(0, min(255, int(v))) / 255.0
+        try:
+            import colorsys
+
+            r, g, b = colorsys.hsv_to_rgb(hue / 360.0, sat, val)
+            return "#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255))
+        except Exception:
+            return COLOR_HUD_INPUT
+
+    def _update_hsv_hud_readout(self):
+        """Repaint the gradient strip + readout from the live config bounds."""
+        readout = getattr(self, "hsv_readout", None)
+        if readout is not None:
+            try:
+                if readout.winfo_exists():
+                    readout.configure(text=self._hsv_readout_text())
+            except Exception:
+                pass
+
+        canvas = getattr(self, "hsv_gradient_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+            canvas.delete("all")
+            width = int(canvas.winfo_width() or 140)
+            height = int(canvas.winfo_height() or 12)
+            if width <= 2:
+                width, height = 140, 12
+            h_lo, s_lo, v_lo, h_hi, s_hi, v_hi = self._hsv_bounds()
+            segments = max(8, min(64, width // 3))
+            for index in range(segments):
+                ratio = index / float(max(1, segments - 1))
+                color = self._hsv_color_for(
+                    h_lo + (h_hi - h_lo) * ratio,
+                    s_lo + (s_hi - s_lo) * ratio,
+                    v_lo + (v_hi - v_lo) * ratio,
+                )
+                x0 = int(width * index / segments)
+                x1 = int(width * (index + 1) / segments) + 1
+                canvas.create_rectangle(x0, 0, x1, height, fill=color, outline=color)
+        except Exception:
+            pass
+
+    def _draw_hsv_placeholder(self, message=None):
+        """Grid + `NO SIGNAL` shown while capture has no frame (or in tests)."""
+        for canvas in (getattr(self, "hsv_raw_canvas", None), getattr(self, "hsv_mask_canvas", None)):
+            if canvas is None:
+                continue
+            try:
+                if not canvas.winfo_exists():
+                    continue
+                canvas.delete("all")
+                width = int(canvas.cget("width") or self._inline_hsv_size[0])
+                height = int(canvas.cget("height") or self._inline_hsv_size[1])
+                for x in range(0, width, 20):
+                    canvas.create_line(x, 0, x, height, fill="#131C2B")
+                for y in range(0, height, 20):
+                    canvas.create_line(0, y, width, y, fill="#131C2B")
+                canvas.create_text(
+                    width // 2, height // 2,
+                    text=str(message or t_hud("HUD_NO_SIGNAL")),
+                    fill=COLOR_HUD_MUTED, font=self._hud_font(8, "bold", mono=True),
+                )
+            except Exception:
+                pass
+
+    def _toggle_inline_hsv_preview(self):
+        drawer = getattr(self, "_hsv_drawer", None)
+        if drawer is None:
+            return None
+        try:
+            if not drawer.winfo_exists():
+                return None
+        except Exception:
+            return None
+        if drawer.winfo_ismapped():
+            drawer.pack_forget()
+            self._stop_inline_hsv_preview()
+            return False
+        drawer.pack(fill="x", pady=(0, 6))
+        self._refresh_inline_hsv_geometry()
+        self._start_inline_hsv_preview()
+        return True
+
+    def _refresh_inline_hsv_geometry(self):
+        """Grow the radar canvases in the Wide dock, keep them compact in Simple."""
+        want = (216, 140) if str(getattr(self, "_hud_mode", "simple")) == "wide" else (165, 118)
+        if want == getattr(self, "_inline_hsv_size", None):
+            return
+        self._inline_hsv_size = want
+        for canvas in (getattr(self, "hsv_raw_canvas", None), getattr(self, "hsv_mask_canvas", None)):
+            if canvas is None:
+                continue
+            try:
+                if canvas.winfo_exists():
+                    canvas.configure(width=want[0], height=want[1])
+            except Exception:
+                pass
+
+    def _start_inline_hsv_preview(self):
+        self._stop_inline_hsv_preview()
+        thread = threading.Thread(target=self._inline_hsv_worker, daemon=True, name="InlineHsvRadar")
+        stop_event = threading.Event()
+        self._hsv_thread = thread
+        self._hsv_stop_event = stop_event
+        thread.start()
+
+    def _stop_inline_hsv_preview(self):
+        stop_event = getattr(self, "_hsv_stop_event", None)
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:
+                pass
+        self._hsv_stop_event = None
+        self._hsv_thread = None
+        job_id = getattr(self, "_hsv_after_id", None)
+        if job_id is not None:
+            try:
+                self.after_cancel(job_id)
+            except Exception:
+                pass
+        self._hsv_after_id = None
+
+    def _inline_hsv_worker(self):
+        """Grab frames off the UI thread at <= 8 FPS and hand them back via after()."""
+        stop_event = getattr(self, "_hsv_stop_event", None)
+        while stop_event is not None and not stop_event.is_set():
+            frame = self._grab_inline_frame()
+            if stop_event.is_set():
+                break
+            try:
+                self.after(0, lambda f=frame: self._refresh_inline_hsv(f))
+            except Exception:
+                break
+            # Throttle to ~8 FPS; the flag keeps Close responsive.
+            if stop_event.wait(0.125):
+                break
+
+    def _grab_inline_frame(self):
+        frame = None
+        try:
+            frame = _grab_frame_bgr(self.capture)
+        except Exception:
+            frame = None
+        if not isinstance(frame, np.ndarray) or frame.size <= 0:
+            return None
+        return frame
+
+    def _refresh_inline_hsv(self, frame=None):
+        """UI-thread frame painter: raw capture + HSV mask (never raises)."""
+        raw_canvas = getattr(self, "hsv_raw_canvas", None)
+        mask_canvas = getattr(self, "hsv_mask_canvas", None)
+        if raw_canvas is None or mask_canvas is None:
+            return
+        try:
+            if not raw_canvas.winfo_exists() or not mask_canvas.winfo_exists():
+                return
+        except Exception:
+            return
+        if not isinstance(frame, np.ndarray) or frame.size <= 0:
+            self._draw_hsv_placeholder()
+            return
+
+        width, height = getattr(self, "_inline_hsv_size", (165, 118))
+        try:
+            h_lo, s_lo, v_lo, h_hi, s_hi, v_hi = self._hsv_bounds()
+            _filtered, mask = _apply_hsv_mask(frame, h_lo, h_hi, s_lo, s_hi, v_lo, v_hi)
+            raw_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            raw_img = Image.fromarray(raw_rgb).resize((width, height), Image.NEAREST)
+            mask_img = Image.fromarray(mask).resize((width, height), Image.NEAREST)
+            self._hsv_photo_raw = ImageTk.PhotoImage(raw_img)
+            self._hsv_photo_mask = ImageTk.PhotoImage(mask_img)
+
+            raw_canvas.delete("all")
+            raw_canvas.create_image(0, 0, anchor="nw", image=self._hsv_photo_raw)
+            raw_canvas.create_oval(
+                width // 2 - 18, height // 2 - 18, width // 2 + 18, height // 2 + 18,
+                outline=COLOR_ACCENT, width=1,
+            )
+
+            mask_canvas.delete("all")
+            mask_canvas.create_image(0, 0, anchor="nw", image=self._hsv_photo_mask)
+        except Exception:
+            self._draw_hsv_placeholder()
+
+    def _legacy_show_vision_tab(self):
+        """RETIRED: the old 1-column Vision body. HUD version: _show_vision_tab."""
+        return
+
         self._active_tab_name = "Vision"
         self._clear_content()
         self._add_title("Vision & Color Detection")
@@ -1854,30 +4156,55 @@ class ViewerApp(ctk.CTk):
     def _show_general_tab(self):
         self._active_tab_name = "Hardware"
         self._clear_content()
-        if self._legacy_ui_mode:
-            self._add_sub_nav_bar(
-                ["Hardware & Capture", "Profiles & Config", "Debug & Telemetry"],
-                "Hardware & Capture",
-                {
-                    "Hardware & Capture": self._show_general_tab,
-                    "Profiles & Config": self._show_config_tab,
-                    "Debug & Telemetry": self._show_debug_tab,
-                }
-            )
+        self._add_platform_sub_nav("hardware")
         self._add_title("Hardware & Capture Service")
         self._ignore_settings_events = True
-        col_left, col_right, _hw_cols = self._two_column_container(pady=(0, 10))
+        col_left, col_right, _hw_cols = self._two_column_container(pady=(0, 0))
 
-        # -- HARDWARE API (ModernCard) --
+        # -- HARDWARE API (HUD card) --
         self.card_mouse_api = ModernCard(
             col_left,
             "Hardware Device API",
-            icon="⚡",
+            icon="\u26a1",
             badge_text="Device",
             accent_color=COLOR_ACCENT
         )
-        self.card_mouse_api.pack(fill="x", pady=(0, 10))
+        self.card_mouse_api.pack(fill="x", pady=(0, 6))
         sec_hardware = self.card_mouse_api.content
+
+        action_row = ctk.CTkFrame(sec_hardware, fg_color="transparent")
+        action_row.pack(fill="x", pady=(0, 4))
+        self.test_move_btn = ctk.CTkButton(
+            action_row,
+            text=t_hud("HUD_TEST_MOVE"),
+            command=self._test_mouse_move,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_TEST_MOVE"), size=8, padx=14),
+            corner_radius=3,
+        )
+        self.test_move_btn.pack(side="left")
+        self.switch_4m_btn = ctk.CTkButton(
+            action_row,
+            text=t_hud("HUD_SWITCH_4M"),
+            command=self._switch_serial_to_4m,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_SWITCH_4M"), size=8, padx=14),
+            corner_radius=3,
+        )
+        self.switch_4m_btn.pack(side="left", padx=(4, 0))
+
         self.var_auto_connect_mouse_api = tk.BooleanVar(value=bool(getattr(config, "auto_connect_mouse_api", False)))
         current_mouse_api = getattr(config, "mouse_api", "Serial")
         current_mouse_api_norm = str(current_mouse_api).strip().lower()
@@ -2008,21 +4335,16 @@ class ViewerApp(ctk.CTk):
         )
         self.saved_auto_connect_mouse_api = bool(getattr(config, "auto_connect_mouse_api", self.saved_auto_connect_mouse_api))
 
-        self.mouse_hardware_frame = ctk.CTkFrame(
-            sec_hardware,
-            fg_color="transparent",
-            corner_radius=8,
-            border_width=1,
-            border_color=COLOR_BORDER,
-        )
-        self.mouse_hardware_frame.pack(fill="x", pady=(2, 8))
+        self.mouse_connection_card = SubCard(sec_hardware, accent_color=COLOR_ACCENT)
+        self.mouse_connection_card.pack(fill="x", pady=(2, 5))
+        self.mouse_hardware_frame = self.mouse_connection_card.content
         ctk.CTkLabel(
             self.mouse_hardware_frame,
-            text=t("Mouse Connection"),
-            font=("Segoe UI", 11, "bold"),
+            text=t_hud("HUD_MOUSE_CONNECTION"),
+            font=self._hud_font(8, "bold"),
             text_color=COLOR_ACCENT,
             anchor="w",
-        ).pack(fill="x", padx=12, pady=(10, 2))
+        ).pack(fill="x", padx=6, pady=(3, 1))
         self.mouse_api_option = self._add_hardware_option_row_in_frame(
             self.mouse_hardware_frame,
             "Input API",
@@ -2037,37 +4359,32 @@ class ViewerApp(ctk.CTk):
             self._on_auto_connect_mouse_api_changed,
         )
         self.mouse_content_frame = ctk.CTkFrame(self.mouse_hardware_frame, fg_color="transparent")
-        self.mouse_content_frame.pack(fill="x", padx=12, pady=(0, 10))
+        self.mouse_content_frame.pack(fill="x", padx=6, pady=(0, 5))
 
-        self.keyboard_hardware_frame = ctk.CTkFrame(
-            sec_hardware,
-            fg_color="transparent",
-            corner_radius=8,
-            border_width=1,
-            border_color=COLOR_BORDER,
-        )
-        self.keyboard_hardware_frame.pack(fill="x", pady=(0, 4))
+        self.keyboard_connection_card = SubCard(sec_hardware, accent_color=COLOR_ACCENT_2)
+        self.keyboard_connection_card.pack(fill="x", pady=(0, 2))
+        self.keyboard_hardware_frame = self.keyboard_connection_card.content
         ctk.CTkLabel(
             self.keyboard_hardware_frame,
-            text=t("Keyboard Connection"),
-            font=("Segoe UI", 11, "bold"),
-            text_color=COLOR_ACCENT,
+            text=t_hud("HUD_KEYBOARD_CONNECTION"),
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_ACCENT_2,
             anchor="w",
-        ).pack(fill="x", padx=12, pady=(10, 2))
+        ).pack(fill="x", padx=6, pady=(3, 1))
         self.var_keyboard_api_enabled = tk.BooleanVar(value=self.saved_keyboard_api_enabled)
         self.keyboard_enable_checkbox = ctk.CTkCheckBox(
             self.keyboard_hardware_frame,
             text=t("Enable Keyboard API"),
             variable=self.var_keyboard_api_enabled,
             command=self._on_keyboard_api_enabled_changed,
-            font=FONT_MAIN,
-            text_color=COLOR_TEXT,
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
             fg_color=COLOR_ACCENT,
             hover_color=COLOR_ACCENT_HOVER,
-            border_color=COLOR_HARDWARE_PANEL_BORDER,
-            checkmark_color=COLOR_TEXT,
+            border_color=COLOR_HUD_BORDER,
+            checkmark_color="#04140A",
         )
-        self.keyboard_enable_checkbox.pack(anchor="w", padx=12, pady=(0, 8))
+        self.keyboard_enable_checkbox.pack(anchor="w", padx=6, pady=(0, 4))
         self.keyboard_api_option = self._add_hardware_option_row_in_frame(
             self.keyboard_hardware_frame,
             "Input API",
@@ -2078,10 +4395,10 @@ class ViewerApp(ctk.CTk):
         self._add_hint_label(
             self.keyboard_hardware_frame,
             "Keyboard API is independent for keybind state and keyboard output. SendInput works without changing the active mouse backend.",
-            pady=(2, 8),
+            pady=(2, 4),
         )
         self.keyboard_content_frame = ctk.CTkFrame(self.keyboard_hardware_frame, fg_color="transparent")
-        self.keyboard_content_frame.pack(fill="x", padx=12, pady=(0, 10))
+        self.keyboard_content_frame.pack(fill="x", padx=6, pady=(0, 5))
 
         self._update_mouse_api_ui()
         self._update_keyboard_api_ui()
@@ -2089,11 +4406,11 @@ class ViewerApp(ctk.CTk):
         self.card_capture_service = ModernCard(
             col_right,
             "Capture Service",
-            icon="📷",
+            icon="\u25a3",
             badge_text="Video",
             accent_color=COLOR_ACCENT_2
         )
-        self.card_capture_service.pack(fill="x", pady=(0, 10))
+        self.card_capture_service.pack(fill="x", pady=(0, 6))
         sec_capture = self.card_capture_service.content
         self.capture_settings_frame = sec_capture
         self.capture_method_var.set(self._capture_display_mode(self.capture.mode))
@@ -2114,13 +4431,13 @@ class ViewerApp(ctk.CTk):
         # -- INTERFACE SETTINGS CARD (Col 0, under the device card) --
         self.card_interface = self._create_collapsible_card(
             col_left,
-            "Interface Settings",
-            icon="⚙",
+            "Interface Sensitivity",
+            icon="\u2699",
             badge_text="Global",
             accent_color=COLOR_ACCENT_2,
             initially_open=True,
         )
-        self.card_interface.pack(fill="x", pady=(0, 10))
+        self.card_interface.pack(fill="x", pady=(0, 6))
 
         self._add_slider_in_frame(
             self.card_interface.content,
@@ -2140,7 +4457,13 @@ class ViewerApp(ctk.CTk):
             padx=0,
         )
 
-        # -- MOUSE LOCK CARD (Col 1) --
+        # -- MOUSE LOCK + BUTTON MASK share one row of the right column --
+        self.hw_secondary_row = ctk.CTkFrame(col_right, fg_color="transparent")
+        self.hw_secondary_row.pack(fill="x", pady=(0, 0))
+        self.hw_secondary_row.grid_columnconfigure(0, weight=1, uniform="hwsec")
+        self.hw_secondary_row.grid_columnconfigure(1, weight=1, uniform="hwsec")
+
+        # -- MOUSE LOCK CARD --
         mouse_lock_tooltip_text = (
             "- Lock Main Aimbot X-Axis: Blocks physical mouse movement on X-axis when Main Aimbot is active. "
             "Only aimbot-controlled movements will be applied.\n\n"
@@ -2153,15 +4476,15 @@ class ViewerApp(ctk.CTk):
             "Note: The lock will automatically release when the aimbot button is released or aimbot stops moving."
         )
         self.card_mouse_lock = self._create_collapsible_card(
-            col_right,
+            self.hw_secondary_row,
             "Mouse Lock",
-            icon="🔒",
+            icon="\u25a4",
             badge_text="Axis",
             accent_color=COLOR_WARNING,
             initially_open=False,
             tooltip_text=mouse_lock_tooltip_text,
         )
-        self.card_mouse_lock.pack(fill="x", pady=(0, 10))
+        self.card_mouse_lock.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
         sec_mouse_lock = self.card_mouse_lock.content
 
         # Lock Main Aimbot X-Axis
@@ -2190,16 +4513,16 @@ class ViewerApp(ctk.CTk):
         self._add_switch_in_frame(sec_mouse_lock, "Lock Sec Aimbot Y-Axis", self.var_mouse_lock_sec_y, self._on_mouse_lock_sec_y_changed)
         self._checkbox_vars["mouse_lock_sec_y"] = self.var_mouse_lock_sec_y
 
-        # -- BUTTON MASK CARD (Col 1) --
+        # -- BUTTON MASK CARD --
         self.card_button_mask = self._create_collapsible_card(
-            col_right,
+            self.hw_secondary_row,
             "Button Mask",
-            icon="🖱",
+            icon="\u25a5",
             badge_text="Input",
             accent_color=COLOR_DANGER,
             initially_open=False,
         )
-        self.card_button_mask.pack(fill="x", pady=(0, 10))
+        self.card_button_mask.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
         sec_button_mask = self.card_button_mask.content
 
         if not hasattr(self, 'var_button_mask_enabled'):
@@ -2210,33 +4533,32 @@ class ViewerApp(ctk.CTk):
             text="Enable Button Mask",
             variable=self.var_button_mask_enabled,
             command=self._on_button_mask_enabled_changed,
-            fg_color=COLOR_SURFACE,
+            fg_color=COLOR_HUD_CARD,
             progress_color=COLOR_ACCENT,
-            button_color=COLOR_ACCENT,
-            button_hover_color=COLOR_ACCENT_HOVER,
-            text_color=COLOR_TEXT_DIM,
-            font=("Roboto", 11),
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(9, "bold"),
             width=80,
-            height=20
+            height=18
         )
-        master_switch.pack(fill="x", pady=(5, 10))
+        master_switch.pack(anchor="w", pady=(3, 4))
         self._checkbox_vars["button_mask_enabled"] = self.var_button_mask_enabled
         
         # Grid for individual buttons
         grid_frame = ctk.CTkFrame(sec_button_mask, fg_color="transparent")
         grid_frame.pack(fill="x", pady=(0, 5))
         
-        # Configure grid columns
+        # Configure 2-column grid so switches never clip inside compact HUD
         grid_frame.grid_columnconfigure(0, weight=1)
         grid_frame.grid_columnconfigure(1, weight=1)
-        grid_frame.grid_columnconfigure(2, weight=1)
         
         button_masks = [
             ("L-Click", "mask_left_button", 0, 0),
             ("R-Click", "mask_right_button", 0, 1),
-            ("M-Click", "mask_middle_button", 0, 2),
-            ("Side 4", "mask_side4_button", 1, 0),
-            ("Side 5", "mask_side5_button", 1, 1),
+            ("M-Click", "mask_middle_button", 1, 0),
+            ("Side 4", "mask_side4_button", 1, 1),
+            ("Side 5", "mask_side5_button", 2, 0),
         ]
         
         for label, key, row, col in button_masks:
@@ -2253,19 +4575,69 @@ class ViewerApp(ctk.CTk):
                 text=label,
                 variable=var,
                 command=lambda k=key, v=var: self._on_button_mask_changed(k, v),
-                fg_color=COLOR_SURFACE,
+                fg_color=COLOR_HUD_CARD,
                 progress_color=COLOR_ACCENT,
-                button_color=COLOR_ACCENT,
-                button_hover_color=COLOR_ACCENT_HOVER,
-                text_color=COLOR_TEXT_DIM,
-                font=("Roboto", 10),
-                height=18,
-                width=30, # Smaller switch width
-                switch_width=30,
-                switch_height=16
+                button_color="#FFFFFF",
+                button_hover_color="#E2E8F0",
+                text_color=COLOR_HUD_DIM,
+                font=self._hud_font(8),
+                height=16,
+                width=26,
+                switch_width=24,
+                switch_height=12
             )
-            btn_switch.grid(row=row, column=col, sticky="w", padx=5, pady=6)
+            btn_switch.grid(row=row, column=col, sticky="w", padx=3, pady=4)
             self._checkbox_vars[key] = var
+
+        self._refresh_active_profile_label()
+        self._set_nav_active("Hardware")
+
+    def _add_platform_sub_nav(self, active_key):
+        """3-tab Platform sub-nav shown on Hardware / Profiles / Telemetry."""
+        bar = ctk.CTkFrame(
+            self.content_frame, fg_color=COLOR_HUD_CARD, corner_radius=4,
+            border_width=1, border_color=COLOR_HUD_BORDER,
+        )
+        bar.pack(fill="x", pady=(0, 6))
+        entries = (
+            ("hardware", t_hud("HUD_PLAT_HARDWARE"), self._show_general_tab),
+            ("profiles", t_hud("HUD_PLAT_PROFILES"), self._show_config_tab),
+            ("telemetry", t_hud("HUD_PLAT_TELEMETRY"), self._show_debug_tab),
+        )
+        self.platform_sub_nav = {}
+        row = ctk.CTkFrame(bar, fg_color="transparent")
+        row.pack(fill="x", padx=2, pady=2)
+        for col in range(3):
+            row.grid_columnconfigure(col, weight=1, uniform="platnav")
+        for index, (key, label, command) in enumerate(entries):
+            is_active = key == active_key
+            button = ctk.CTkButton(
+                row,
+                text=str(label).upper(),
+                command=command,
+                height=19,
+                width=0,
+                fg_color=COLOR_ACCENT if is_active else "transparent",
+                hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.14),
+                text_color=readable_on(COLOR_ACCENT) if is_active else COLOR_HUD_DIM,
+                font=self._hud_font(8, "bold"),
+                corner_radius=3,
+                border_width=1 if is_active else 0,
+                border_color=COLOR_ACCENT,
+            )
+            button.grid(row=0, column=index, sticky="ew", padx=1)
+            self.platform_sub_nav[key] = button
+        return bar
+
+    def _refresh_active_profile_label(self):
+        label = getattr(self, "active_profile_label", None)
+        if label is None:
+            return
+        try:
+            if label.winfo_exists():
+                label.configure(text=self._active_profile_display())
+        except Exception:
+            pass
 
     def _update_mouse_api_ui(self):
         """鏍规摎閬告搰鐨勬粦榧?API 鏇存柊 Hardware API 鍗€濉娿€?"""
@@ -4511,6 +6883,7 @@ class ViewerApp(ctk.CTk):
             val = self.udp_ip_entry.get()
             self.saved_udp_ip = val
             config.udp_ip = val
+            self._refresh_footer_udp()
 
     def _on_udp_port_changed(self, event=None):
         """瀵︽檪淇濆瓨 UDP Port"""
@@ -4520,6 +6893,7 @@ class ViewerApp(ctk.CTk):
             val = self.udp_port_entry.get()
             self.saved_udp_port = val
             config.udp_port = val
+            self._refresh_footer_udp()
 
     def _refresh_teleport_streams(self, show_status=True):
         """Refresh OBS Teleport discovered streams list."""
@@ -5051,18 +7425,902 @@ class ViewerApp(ctk.CTk):
             except (ValueError, AttributeError):
                 self.capture_card_center_label.configure(text="Center: (0, 0)")
 
+    # --- Combat (Main / Sec) --------------------------------------------------
+
     def _show_aimbot_tab(self):
-        self._active_tab_name = "Main Aimbot"
+        self._active_aim_slot = "main"
+        self._build_combat_view("main")
+
+    def _show_sec_aimbot_tab(self):
+        self._active_aim_slot = "sec"
+        self._build_combat_view("sec")
+
+    def _combat_key(self, base, is_sec):
+        return f"{base}_sec" if is_sec else base
+
+    def _build_combat_view(self, slot):
+        """Render the Combat HUD for one weapon slot (`main` / `sec`).
+
+        Both slots share this builder: only the config key suffix and the enable /
+        anti-smoke callbacks differ, so nothing about the aim logic is duplicated.
+        """
+        is_sec = str(slot).strip().lower() == "sec"
+        self._active_tab_name = "Sec Aimbot" if is_sec else "Main Aimbot"
         self._clear_content()
-        self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot"],
-            "Main Aimbot",
-            {
-                "Main Aimbot": self._show_aimbot_tab,
-                "Sec Aimbot": self._show_sec_aimbot_tab,
-            }
+        self._add_title("Secondary Aimbot" if is_sec else "Main Aimbot")
+
+        current_mode = self._aim_mode_display_to_value(
+            getattr(config, "mode_sec" if is_sec else "mode", "Normal")
         )
-        self._add_title("Main Aimbot")
+        if is_sec:
+            config.mode_sec = current_mode
+        else:
+            config.mode = current_mode
+
+        # ── Unified top combat strip ─────────────────────────────────────────
+        self.combat_strip = ModernCard(self.content_frame, "Combat Strip", show_header=False)
+        self.combat_strip.pack(fill="x", pady=(0, 6))
+        strip = self.combat_strip.content
+
+        top_row = ctk.CTkFrame(strip, fg_color="transparent")
+        top_row.pack(fill="x", pady=(0, 3))
+
+        self.combat_slot_segment = ctk.CTkFrame(
+            top_row, fg_color=COLOR_HUD_INPUT, corner_radius=3,
+            border_width=1, border_color=COLOR_HUD_BORDER,
+        )
+        self.combat_slot_segment.pack(side="left")
+        self.slot_main_btn = self._make_slot_button(self.combat_slot_segment, "Main Aimbot", "main", is_sec=False)
+        self.slot_sec_btn = self._make_slot_button(self.combat_slot_segment, "Sec Aimbot", "sec", is_sec=True)
+
+        # Master switches sit on their own row so the segmented control keeps its
+        # natural width at 780px instead of squeezing the switches.
+        self.combat_switches = ctk.CTkFrame(strip, fg_color="transparent")
+        self.combat_switches.pack(fill="x", pady=(0, 3))
+
+        self.var_enableaim = tk.BooleanVar(value=bool(getattr(config, self._combat_key("enableaim", is_sec), False)))
+        self.enable_aimbot_switch = ctk.CTkSwitch(
+            self.combat_switches,
+            text=t_hud("HUD_ENABLE_AIMBOT"),
+            variable=self.var_enableaim,
+            command=self._on_enableaim_sec_changed if is_sec else self._on_enableaim_changed,
+            font=self._hud_font(9, "bold"),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        )
+        self.enable_aimbot_switch.pack(side="left", padx=(0, 10))
+        self._checkbox_vars[self._combat_key("enableaim", is_sec)] = self.var_enableaim
+        if is_sec:
+            # Legacy alias: the Sec callbacks read var_enableaim_sec.
+            self.var_enableaim_sec = self.var_enableaim
+
+        self.var_anti_smoke = tk.BooleanVar(
+            value=bool(getattr(config, self._combat_key("anti_smoke_enabled", is_sec), False))
+        )
+        self.anti_smoke_switch = ctk.CTkSwitch(
+            self.combat_switches,
+            text=t_hud("HUD_ENABLE_ANTISMOKE"),
+            variable=self.var_anti_smoke,
+            command=self._on_anti_smoke_sec_changed if is_sec else self._on_anti_smoke_changed,
+            font=self._hud_font(9, "bold"),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        )
+        self.anti_smoke_switch.pack(side="left")
+        self._checkbox_vars[self._combat_key("anti_smoke_enabled", is_sec)] = self.var_anti_smoke
+        if is_sec:
+            # Legacy alias: the Sec callback reads var_anti_smoke_sec.
+            self.var_anti_smoke_sec = self.var_anti_smoke
+
+        # Second strip row: slot badge + trajectory simulator. Splitting the strip
+        # keeps every control at its natural width inside the 780px Compact HUD.
+        strip_row = ctk.CTkFrame(strip, fg_color="transparent")
+        strip_row.pack(fill="x")
+
+        self.combat_status = ctk.CTkFrame(strip_row, fg_color="transparent")
+        self.combat_status.pack(side="left")
+
+        self.combat_slot_badge = HudBadge(
+            self.combat_status,
+            t_hud("HUD_SLOT_SECONDARY" if is_sec else "HUD_SLOT_PRIMARY"),
+            accent_color=COLOR_ACCENT,
+        )
+        self.combat_slot_badge.pack(side="left", padx=(0, 4))
+
+        self.simulate_path_btn = ctk.CTkButton(
+            self.combat_status,
+            text=t_hud("HUD_SIMULATE_PATH"),
+            command=self._show_windmouse_simulation,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_SIMULATE_PATH"), size=8, padx=14),
+            corner_radius=3,
+        )
+        self.simulate_path_btn.pack(side="right")
+
+        # ── Two-column high-density grid ─────────────────────────────────────
+        col_left, col_right, self._combat_cols = self._two_column_container(pady=(0, 0))
+
+        self.card_targeting = ModernCard(
+            col_left, "Targeting & FOV", icon="\u25ce", badge_text="Core",
+            accent_color=COLOR_ACCENT,
+        )
+        self.card_targeting.pack(fill="x", pady=(0, 6))
+        if is_sec:
+            self.card_targeting_sec = self.card_targeting
+        self._build_targeting_card(self.card_targeting, is_sec=is_sec)
+
+        self.card_windmouse = ModernCard(
+            col_right, f"{current_mode} Tuning", icon="\u25e9", badge_text="v1.2 Algo",
+            accent_color=COLOR_ACCENT_2,
+        )
+        self.card_windmouse.pack(fill="x", pady=(0, 6))
+        if is_sec:
+            self.card_windmouse_sec = self.card_windmouse
+        self._build_windmouse_card(self.card_windmouse, is_sec=is_sec, mode=current_mode)
+
+        self.card_speeds = ModernCard(
+            col_left, "Speeds & Recoil", icon="\u26a1", badge_text="Axis Tuning",
+            accent_color=COLOR_WARNING,
+        )
+        self.card_speeds.pack(fill="x", pady=(0, 6))
+        if is_sec:
+            self.card_speeds_sec = self.card_speeds
+        self._build_speeds_card(self.card_speeds, is_sec=is_sec)
+
+        self.card_humanization = ModernCard(
+            col_right, "Anti-Tremor & Timing", icon="\u26e8", badge_text="Anti-Cheat Safe",
+            accent_color=COLOR_ACCENT_2,
+        )
+        self.card_humanization.pack(fill="x", pady=(0, 6))
+        if is_sec:
+            self.card_humanization_sec = self.card_humanization
+        self._build_humanization_card(self.card_humanization, is_sec=is_sec)
+
+        self._set_nav_active(self._active_tab_name)
+
+    def _make_slot_button(self, parent, text, slot_name, is_sec):
+        active = (str(getattr(self, "_active_aim_slot", "main")) == slot_name)
+        button = ctk.CTkButton(
+            parent,
+            text=t_hud(text),
+            width=self._hud_button_width(text, size=9, padx=18),
+            height=20,
+            fg_color=COLOR_ACCENT if active else "transparent",
+            hover_color=COLOR_ACCENT_HOVER if active else mix(COLOR_ACCENT, COLOR_HUD_INPUT, 0.12),
+            text_color=readable_on(COLOR_ACCENT) if active else COLOR_HUD_DIM,
+            font=self._hud_font(9, "bold"),
+            corner_radius=2,
+            command=self._show_sec_aimbot_tab if is_sec else self._show_aimbot_tab,
+        )
+        button.pack(side="left", padx=1, pady=1)
+        return button
+
+    def _selector_tile(self, parent, label, build_control):
+        """One cell of the 2x2 Mode/Target/Trigger/Type grid (`#090d14`).
+
+        The caption sits above its control, so a long option (e.g. the
+        `PID Controller ( RISK )` mode) never gets clipped inside a half-width
+        column at 800px.
+        """
+        tile = ctk.CTkFrame(
+            parent,
+            fg_color="#090D14",
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3,
+        )
+        inner = ctk.CTkFrame(tile, fg_color="transparent")
+        inner.pack(fill="x", padx=5, pady=3)
+        ctk.CTkLabel(
+            inner,
+            text=str(t(label)).upper(),
+            font=self._hud_font(7),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+        ).pack(fill="x")
+        control = build_control(inner)
+        control.pack(fill="x", pady=(1, 0))
+        return tile, control
+
+    def _compact_option(self, parent, values, command, width=104):
+        # width=0 lets the option menu fill its tile instead of asserting a fixed
+        # pixel width that a long value would overflow.
+        return ctk.CTkOptionMenu(
+            parent,
+            values=values,
+            command=command,
+            width=0,
+            height=18,
+            fg_color=COLOR_HUD_INPUT,
+            button_color=COLOR_HUD_BORDER,
+            button_hover_color=COLOR_ACCENT,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            dropdown_fg_color=COLOR_HUD_CARD,
+            dropdown_hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            dropdown_text_color=COLOR_HUD_TEXT,
+            corner_radius=2,
+        )
+
+    def _compact_bind_button(self, parent, text, command, width=112):
+        return ctk.CTkButton(
+            parent,
+            text=str(text),
+            command=command,
+            width=0,
+            height=18,
+            fg_color=COLOR_HUD_INPUT,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_INPUT, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold", mono=True),
+            corner_radius=2,
+        )
+
+    def _build_targeting_card(self, card, is_sec):
+        body = card.content
+        grid = ctk.CTkFrame(body, fg_color="transparent")
+        grid.pack(fill="x", pady=(0, 2))
+        grid.grid_columnconfigure(0, weight=1, uniform="sel")
+        grid.grid_columnconfigure(1, weight=1, uniform="sel")
+
+        # Mode
+        tile_mode, self.mode_option = self._selector_tile(
+            grid, "Mode",
+            lambda parent: self._compact_option(
+                parent, AIM_MODE_OPTIONS,
+                self._on_mode_sec_selected if is_sec else self._on_mode_selected,
+            ),
+        )
+        tile_mode.grid(row=0, column=0, sticky="ew", padx=(0, 3), pady=(0, 3))
+        self._option_widgets["mode_sec" if is_sec else "mode"] = self.mode_option
+        current_mode = self._aim_mode_display_to_value(
+            getattr(config, "mode_sec" if is_sec else "mode", "Normal")
+        )
+        self.mode_option.set(self._aim_mode_value_to_display(current_mode))
+
+        # Target (bone)
+        tile_target, self.aim_type_option = self._selector_tile(
+            grid, "Target",
+            lambda parent: self._compact_option(
+                parent, ["head", "body", "nearest"],
+                self._on_aim_type_sec_selected if is_sec else self._on_aim_type_selected,
+                width=88,
+            ),
+        )
+        tile_target.grid(row=0, column=1, sticky="ew", padx=(3, 0), pady=(0, 3))
+        self._option_widgets["aim_type_sec" if is_sec else "aim_type"] = self.aim_type_option
+        self.aim_type_option.set(str(getattr(config, "aim_type_sec" if is_sec else "aim_type", "head")))
+        if is_sec:
+            self.aim_type_option_sec = self.aim_type_option
+
+        # Trigger (bind capture)
+        current_btn = self._ads_binding_to_display(
+            getattr(config, "selected_mouse_button_sec" if is_sec else "selected_mouse_button", 3)
+        )
+        tile_trigger, self.aim_key_bind_button = self._selector_tile(
+            grid, "Trigger",
+            lambda parent: self._compact_bind_button(
+                parent, current_btn, lambda: self._start_aim_key_capture(is_sec=is_sec),
+            ),
+        )
+        tile_trigger.grid(row=1, column=0, sticky="ew", padx=(0, 3))
+        if is_sec:
+            self.aim_key_bind_button_sec = self.aim_key_bind_button
+
+        # Activation type
+        activation_types = ["Hold to Enable", "Hold to Disable", "Toggle", "Press to Enable"]
+        activation_type_map = {
+            "Hold to Enable": "hold_enable",
+            "Hold to Disable": "hold_disable",
+            "Toggle": "toggle",
+            "Press to Enable": "use_enable",
+        }
+        tile_type, self.aimbot_activation_type_option = self._selector_tile(
+            grid, "Type",
+            lambda parent: self._compact_option(
+                parent, activation_types,
+                self._on_aimbot_activation_type_sec_selected if is_sec
+                else self._on_aimbot_activation_type_selected,
+                width=96,
+            ),
+        )
+        tile_type.grid(row=1, column=1, sticky="ew", padx=(3, 0))
+        self._option_widgets["aimbot_activation_type_sec" if is_sec else "aimbot_activation_type"] = (
+            self.aimbot_activation_type_option
+        )
+        current_activation_type = getattr(
+            config, "aimbot_activation_type_sec" if is_sec else "aimbot_activation_type", "hold_enable"
+        )
+        display = next(
+            (name for name, value in activation_type_map.items() if value == current_activation_type),
+            "Hold to Enable",
+        )
+        self.aimbot_activation_type_option.set(display)
+        if is_sec:
+            self.aimbot_activation_type_option_sec = self.aimbot_activation_type_option
+
+        # FOV size + offsets
+        self._add_slider_in_frame(
+            body, "FOV Size", self._combat_key("fovsize", is_sec), 1, 1000,
+            float(getattr(config, self._combat_key("fovsize", is_sec), 300)),
+            self._on_fovsize_sec_changed if is_sec else self._on_fovsize_changed,
+        )
+        self._add_slider_in_frame(
+            body, "X-Offset", self._combat_key("aim_offsetX", is_sec), -100, 100,
+            float(getattr(config, self._combat_key("aim_offsetX", is_sec), 0)),
+            self._on_aim_offsetX_sec_changed if is_sec else self._on_aim_offsetX_changed,
+        )
+        self._add_slider_in_frame(
+            body, "Y-Offset", self._combat_key("aim_offsetY", is_sec), -100, 100,
+            float(getattr(config, self._combat_key("aim_offsetY", is_sec), 0)),
+            self._on_aim_offsetY_sec_changed if is_sec else self._on_aim_offsetY_changed,
+        )
+
+        # ADS sub-card
+        ads_card = SubCard(body, accent_color=COLOR_ACCENT)
+        ads_card.pack(fill="x", pady=(4, 0))
+        ads_body = ads_card.content
+
+        ads_row = ctk.CTkFrame(ads_body, fg_color="transparent")
+        ads_row.pack(fill="x", padx=6, pady=(4, 2))
+
+        ads_enabled_key = "ads_fov_enabled_sec" if is_sec else "ads_fov_enabled"
+        var_ads = tk.BooleanVar(value=bool(getattr(config, ads_enabled_key, False)))
+        if is_sec:
+            self.var_ads_fov_enabled_sec = var_ads
+        else:
+            self.var_ads_fov_enabled = var_ads
+        self._checkbox_vars[ads_enabled_key] = var_ads
+
+        ctk.CTkSwitch(
+            ads_row,
+            text="ADS FOV",
+            variable=var_ads,
+            command=self._on_ads_fov_enabled_sec_changed if is_sec else self._on_ads_fov_enabled_changed,
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=26,
+            switch_width=24,
+            switch_height=12,
+            height=15,
+        ).pack(side="left")
+
+        current_ads_key = self._ads_binding_to_display(
+            getattr(config, "ads_key_sec" if is_sec else "ads_key", "Right Mouse Button")
+        )
+        self.ads_key_bind_button = self._compact_bind_button(
+            ads_row, current_ads_key, lambda: self._start_ads_key_capture(is_sec=is_sec), width=118,
+        )
+        self.ads_key_bind_button.pack(side="right", padx=(3, 0))
+        if is_sec:
+            self.ads_key_bind_button_sec = self.ads_key_bind_button
+
+        self.ads_key_type_option = self._compact_option(
+            ads_row,
+            list(ADS_KEY_TYPE_DISPLAY_TO_VALUE.keys()),
+            self._on_ads_key_type_sec_selected if is_sec else self._on_ads_key_type_selected,
+            width=74,
+        )
+        self.ads_key_type_option.pack(side="right", padx=(3, 0))
+        self._option_widgets["ads_key_type_sec" if is_sec else "ads_key_type"] = self.ads_key_type_option
+        current_ads_key_type = str(
+            getattr(config, "ads_key_type_sec" if is_sec else "ads_key_type", "hold")
+        ).strip().lower()
+        self.ads_key_type_option.set(ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(current_ads_key_type, "Hold"))
+        if is_sec:
+            self.ads_key_type_option_sec = self.ads_key_type_option
+
+        self._add_slider_in_frame(
+            ads_body,
+            "ADS FOV Size",
+            "ads_fovsize_sec" if is_sec else "ads_fovsize",
+            1, 1000,
+            float(getattr(
+                config,
+                "ads_fovsize_sec" if is_sec else "ads_fovsize",
+                getattr(config, "fovsize_sec" if is_sec else "fovsize", 150),
+            )),
+            self._on_ads_fovsize_sec_changed if is_sec else self._on_ads_fovsize_changed,
+        )
+
+        # Mode-specific parameter block (Bezier / PID / NCAF / Flick / Silent).
+        self._build_mode_parameters(body, is_sec=is_sec, mode=current_mode)
+
+    def _build_mode_parameters(self, body, is_sec, mode):
+        """Render the extra parameters the selected solver needs (kept per mode)."""
+        if mode in ("Normal", "WindMouse"):
+            return
+        section = SubCard(body, accent_color=COLOR_ACCENT_2)
+        section.pack(fill="x", pady=(4, 0))
+        HudSectionTitle(section.content, f"{mode} PARAMETERS").pack(anchor="w", padx=6, pady=(4, 0))
+        target = section.content
+
+        def slider(label, key, lo, hi, init, callback, is_float=False):
+            self._add_slider_in_frame(target, label, key, lo, hi, init, callback, is_float=is_float)
+
+        if mode == "Flick":
+            slider("Strength X", self._combat_key("flick_strength_x", is_sec), 0.01, 5.0,
+                   float(getattr(config, self._combat_key("flick_strength_x", is_sec), 5.0)),
+                   self._on_flick_strength_x_sec_changed if is_sec else self._on_flick_strength_x_changed,
+                   is_float=True)
+            slider("Strength Y", self._combat_key("flick_strength_y", is_sec), 0.01, 5.0,
+                   float(getattr(config, self._combat_key("flick_strength_y", is_sec), 5.0)),
+                   self._on_flick_strength_y_sec_changed if is_sec else self._on_flick_strength_y_changed,
+                   is_float=True)
+        elif mode == "Silent":
+            slider("Distance (Multiplier)", "silent_distance", 0.1, 10.0,
+                   float(getattr(config, "silent_distance", 1.0)),
+                   self._on_silent_distance_changed, is_float=True)
+            slider("Delay (ms)", "silent_delay", 0.001, 300.0,
+                   float(getattr(config, "silent_delay", 100.0)),
+                   self._on_silent_delay_changed, is_float=True)
+            slider("Move Delay (ms)", "silent_move_delay", 0.001, 300.0,
+                   float(getattr(config, "silent_move_delay", 500.0)),
+                   self._on_silent_move_delay_changed, is_float=True)
+            slider("Return Delay (ms)", "silent_return_delay", 0.001, 300.0,
+                   float(getattr(config, "silent_return_delay", 500.0)),
+                   self._on_silent_return_delay_changed, is_float=True)
+        elif mode == "Bezier":
+            slider("Segments", self._combat_key("bezier_segments", is_sec), 1, 30,
+                   float(getattr(config, self._combat_key("bezier_segments", is_sec), 8)),
+                   self._on_bezier_segments_sec_changed if is_sec else self._on_bezier_segments_changed)
+            slider("Ctrl X", self._combat_key("bezier_ctrl_x", is_sec), 0.0, 100.0,
+                   float(getattr(config, self._combat_key("bezier_ctrl_x", is_sec), 16.0)),
+                   self._on_bezier_ctrl_x_sec_changed if is_sec else self._on_bezier_ctrl_x_changed,
+                   is_float=True)
+            slider("Ctrl Y", self._combat_key("bezier_ctrl_y", is_sec), 0.0, 100.0,
+                   float(getattr(config, self._combat_key("bezier_ctrl_y", is_sec), 16.0)),
+                   self._on_bezier_ctrl_y_sec_changed if is_sec else self._on_bezier_ctrl_y_changed,
+                   is_float=True)
+            slider("Speed", self._combat_key("bezier_speed", is_sec), 0.1, 20.0,
+                   float(getattr(config, self._combat_key("bezier_speed", is_sec), 1.0)),
+                   self._on_bezier_speed_sec_changed if is_sec else self._on_bezier_speed_changed,
+                   is_float=True)
+            slider("Delay (ms)", self._combat_key("bezier_delay", is_sec), 0.1, 50.0,
+                   float(getattr(config, self._combat_key("bezier_delay", is_sec), 0.002)) * 1000,
+                   self._on_bezier_delay_sec_changed if is_sec else self._on_bezier_delay_changed,
+                   is_float=True)
+        elif mode == "PID":
+            slider("Kp Min", self._combat_key("pid_kp_min", is_sec), 0.0, 20.0,
+                   float(getattr(config, self._combat_key("pid_kp_min", is_sec),
+                                  getattr(config, self._combat_key("pid_kp", is_sec), 3.7))),
+                   self._on_pid_kp_min_sec_changed if is_sec else self._on_pid_kp_min_changed,
+                   is_float=True)
+            slider("Kp Max", self._combat_key("pid_kp_max", is_sec), 0.0, 20.0,
+                   float(getattr(config, self._combat_key("pid_kp_max", is_sec),
+                                  getattr(config, self._combat_key("pid_kp", is_sec), 3.7))),
+                   self._on_pid_kp_max_sec_changed if is_sec else self._on_pid_kp_max_changed,
+                   is_float=True)
+            slider("Ki", self._combat_key("pid_ki", is_sec), 0.0, 100.0,
+                   float(getattr(config, self._combat_key("pid_ki", is_sec), 24.0)),
+                   self._on_pid_ki_sec_changed if is_sec else self._on_pid_ki_changed,
+                   is_float=True)
+            slider("Kd", self._combat_key("pid_kd", is_sec), 0.0, 10.0,
+                   float(getattr(config, self._combat_key("pid_kd", is_sec), 0.11)),
+                   self._on_pid_kd_sec_changed if is_sec else self._on_pid_kd_changed,
+                   is_float=True)
+            slider("Max Output", self._combat_key("pid_max_output", is_sec), 1.0, 200.0,
+                   float(getattr(config, self._combat_key("pid_max_output", is_sec), 50.0)),
+                   self._on_pid_max_output_sec_changed if is_sec else self._on_pid_max_output_changed,
+                   is_float=True)
+        elif mode == "NCAF":
+            slider("Snap Radius", self._combat_key("ncaf_snap_radius", is_sec), 5, 500,
+                   float(getattr(config, self._combat_key("ncaf_snap_radius", is_sec), 150.0)),
+                   self._on_ncaf_snap_radius_sec_changed if is_sec else self._on_ncaf_snap_radius_changed,
+                   is_float=True)
+            slider("Near Radius", self._combat_key("ncaf_near_radius", is_sec), 5, 500,
+                   float(getattr(config, self._combat_key("ncaf_near_radius", is_sec), 50.0)),
+                   self._on_ncaf_near_radius_sec_changed if is_sec else self._on_ncaf_near_radius_changed,
+                   is_float=True)
+            slider("Alpha", self._combat_key("ncaf_alpha", is_sec), 0.01, 10.0,
+                   float(getattr(config, self._combat_key("ncaf_alpha", is_sec), 1.5)),
+                   self._on_ncaf_alpha_sec_changed if is_sec else self._on_ncaf_alpha_changed,
+                   is_float=True)
+            slider("Snap Boost", self._combat_key("ncaf_snap_boost", is_sec), 0.0, 1.0,
+                   float(getattr(config, self._combat_key("ncaf_snap_boost", is_sec), 0.3)),
+                   self._on_ncaf_snap_boost_sec_changed if is_sec else self._on_ncaf_snap_boost_changed,
+                   is_float=True)
+            slider("Max Step", self._combat_key("ncaf_max_step", is_sec), 1.0, 200.0,
+                   float(getattr(config, self._combat_key("ncaf_max_step", is_sec), 50.0)),
+                   self._on_ncaf_max_step_sec_changed if is_sec else self._on_ncaf_max_step_changed,
+                   is_float=True)
+
+    def _build_windmouse_card(self, card, is_sec, mode):
+        """WindMouse / Bezier tuning: the 9 HUD sliders, in reference order."""
+        body = card.content
+        suffix = "_sec" if is_sec else ""
+
+        # (label, config key, min, max, default, is_float, callback name)
+        # is_float=None means the config value is stored in seconds and shown in ms.
+        rows = (
+            ("Gravity", "wm_gravity", 0.1, 30.0, 4.5, True, "_on_wm_gravity"),
+            ("Wind", "wm_wind", 0.1, 20.0, 2.0, True, "_on_wm_wind"),
+            ("Max Step", "wm_max_step", 1, 100, 8.0, False, "_on_wm_max_step"),
+            ("Min Step", "wm_min_step", 0.1, 20, 0.8, True, "_on_wm_min_step"),
+            ("Min Delay (ms)", "wm_min_delay", 0.1, 50, 0.0025, None, "_on_wm_min_delay"),
+            ("Max Delay (ms)", "wm_max_delay", 0.1, 50, 0.0050, None, "_on_wm_max_delay"),
+            ("Dist Threshold", "wm_distance_threshold", 10, 200, 30.0, True,
+             "_on_wm_distance_threshold"),
+            ("Smoothing", "normalsmooth", 1, 30, 10, False, "_on_config_normal_smooth"),
+            ("FOV Smooth", "normalsmoothfov", 1, 30, 10, False, "_on_config_normal_smoothfov"),
+        )
+        for label, base_key, lo, hi, default, is_float, callback_name in rows:
+            key = f"{base_key}{suffix}"
+            raw = float(getattr(config, key, default))
+            callback = getattr(self, f"{callback_name}{suffix}_changed")
+            if is_float is None:
+                # stored in seconds -> displayed in ms
+                self._add_slider_in_frame(body, label, key, lo, hi, raw * 1000.0, callback, is_float=True)
+            else:
+                self._add_slider_in_frame(
+                    body, label, key, lo, hi, raw, callback, is_float=bool(is_float)
+                )
+        self._build_windmouse_budget_sliders(body)
+
+    def _build_windmouse_budget_sliders(self, parent):
+        """Expose the shared per-frame WindMouse budget / anti-overshoot sliders."""
+        for label, key, lo, hi, default, callback in (
+            ("Frame Gain", "wm_frame_gain", 0.05, 1.0, 0.50, self._on_wm_frame_gain_changed),
+            ("Max Px/Frame", "wm_frame_max_step_px", 0.5, 30.0, 8.0, self._on_wm_frame_max_step_px_changed),
+            ("Settle Radius", "wm_settle_radius_px", 0.0, 6.0, 2.2, self._on_wm_settle_radius_px_changed),
+        ):
+            self._add_slider_in_frame(
+                parent, label, key, lo, hi,
+                float(getattr(config, key, default)),
+                callback, is_float=True,
+            )
+
+    def _build_speeds_card(self, card, is_sec):
+        body = card.content
+        suffix = "_sec" if is_sec else ""
+        self._add_slider_in_frame(
+            body, "X-Speed", f"normal_x_speed{suffix}", 0.1, 2000,
+            float(getattr(config, f"normal_x_speed{suffix}", 100)),
+            self._on_normal_x_speed_sec_changed if is_sec else self._on_normal_x_speed_changed,
+        )
+        self._add_slider_in_frame(
+            body, "Y-Speed", f"normal_y_speed{suffix}", 0.1, 2000,
+            float(getattr(config, f"normal_y_speed{suffix}", 70)),
+            self._on_normal_y_speed_sec_changed if is_sec else self._on_normal_y_speed_changed,
+        )
+
+        recoil = SubCard(body, accent_color=COLOR_WARNING)
+        recoil.pack(fill="x", pady=(4, 4))
+        recoil_row = ctk.CTkFrame(recoil.content, fg_color="transparent")
+        recoil_row.pack(fill="x", padx=6, pady=4)
+        text_col = ctk.CTkFrame(recoil_row, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            text_col,
+            text="RECOIL IMMUNITY (Y-DECOUPLE)",
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_HUD_TEXT,
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            text_col,
+            text="Chống giật bay đầu khi sấy liên thanh",
+            font=self._hud_font(8),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+        ).pack(fill="x")
+        self.var_recoil_immunity = tk.BooleanVar(value=bool(getattr(config, "recoil_immunity", True)))
+        ctk.CTkSwitch(
+            recoil_row,
+            text="",
+            variable=self.var_recoil_immunity,
+            command=lambda: setattr(config, "recoil_immunity", bool(self.var_recoil_immunity.get())),
+            progress_color=COLOR_WARNING,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(side="right")
+        self._checkbox_vars["recoil_immunity"] = self.var_recoil_immunity
+
+        entry_row = ctk.CTkFrame(body, fg_color="transparent")
+        entry_row.pack(fill="x", pady=(2, 0))
+        entry_row.grid_columnconfigure(0, weight=1, uniform="senses")
+        entry_row.grid_columnconfigure(1, weight=1, uniform="senses")
+
+        sens_cell = ctk.CTkFrame(
+            entry_row, fg_color="#090D14", border_width=1, border_color=COLOR_HUD_BORDER, corner_radius=3,
+        )
+        sens_cell.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        sens_inner = ctk.CTkFrame(sens_cell, fg_color="transparent")
+        sens_inner.pack(fill="x", padx=5, pady=3)
+        ctk.CTkLabel(
+            sens_inner, text="In-game Sens", font=self._hud_font(8), text_color=COLOR_HUD_DIM,
+        ).pack(side="left")
+        self.sens_entry = ctk.CTkEntry(
+            sens_inner, width=54, height=19, fg_color=COLOR_HUD_INPUT,
+            border_width=1, border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT, font=self._hud_font(8, "bold", mono=True), justify="center",
+            corner_radius=2,
+        )
+        self.sens_entry.insert(0, str(getattr(config, "in_game_sens", 0.235)))
+        self.sens_entry.pack(side="right")
+        if is_sec:
+            self.sens_entry_sec = self.sens_entry
+
+        def _commit_sens(event=None):
+            try:
+                setattr(config, "in_game_sens", float(self.sens_entry.get().strip()))
+            except Exception:
+                pass
+            self._log_config(f"In-game sens: {getattr(config, 'in_game_sens', 0.235)}")
+
+        self.sens_entry.bind("<FocusOut>", _commit_sens)
+        self.sens_entry.bind("<Return>", _commit_sens)
+
+        dpi_cell = ctk.CTkFrame(
+            entry_row, fg_color="#090D14", border_width=1, border_color=COLOR_HUD_BORDER, corner_radius=3,
+        )
+        dpi_cell.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        dpi_inner = ctk.CTkFrame(dpi_cell, fg_color="transparent")
+        dpi_inner.pack(fill="x", padx=5, pady=3)
+        ctk.CTkLabel(
+            dpi_inner, text="Mouse DPI", font=self._hud_font(8), text_color=COLOR_HUD_DIM,
+        ).pack(side="left")
+        self.dpi_entry = ctk.CTkEntry(
+            dpi_inner, width=54, height=19, fg_color=COLOR_HUD_INPUT,
+            border_width=1, border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT, font=self._hud_font(8, "bold", mono=True), justify="center",
+            corner_radius=2,
+        )
+        self.dpi_entry.insert(0, str(int(getattr(config, "mouse_dpi", 800))))
+        self.dpi_entry.pack(side="right")
+
+        def _commit_dpi(event=None):
+            try:
+                setattr(config, "mouse_dpi", float(self.dpi_entry.get().strip()))
+            except Exception:
+                pass
+
+        self.dpi_entry.bind("<FocusOut>", _commit_dpi)
+        self.dpi_entry.bind("<Return>", _commit_dpi)
+
+    def _build_humanization_card(self, card, is_sec):
+        body = card.content
+        suffix = "_sec" if is_sec else ""
+        self._add_slider_in_frame(
+            body, "Deadband", f"anti_tremor_deadband{suffix}", 0.0, 10.0,
+            float(getattr(config, f"anti_tremor_deadband{suffix}", 1.5)),
+            lambda v, k=f"anti_tremor_deadband{suffix}": setattr(config, k, float(v)),
+            is_float=True,
+        )
+        self._add_slider_in_frame(
+            body, "React Min (s)", f"smooth_reaction_min{suffix}", 0.0, 0.5,
+            float(getattr(config, f"smooth_reaction_min{suffix}", 0.08)),
+            lambda v, k=f"smooth_reaction_min{suffix}": setattr(config, k, float(v)),
+            is_float=True,
+        )
+        self._add_slider_in_frame(
+            body, "React Max (s)", f"smooth_reaction_max{suffix}", 0.0, 0.5,
+            float(getattr(config, f"smooth_reaction_max{suffix}", 0.20)),
+            lambda v, k=f"smooth_reaction_max{suffix}": setattr(config, k, float(v)),
+            is_float=True,
+        )
+
+        audio = SubCard(body, accent_color=COLOR_ACCENT_2)
+        audio.pack(fill="x", pady=(4, 0))
+        audio_row = ctk.CTkFrame(audio.content, fg_color="transparent")
+        audio_row.pack(fill="x", padx=6, pady=4)
+        audio_text = ctk.CTkFrame(audio_row, fg_color="transparent")
+        audio_text.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            audio_text,
+            text="AUDIO FEEDBACK (UDP 4455)",
+            font=self._hud_font(8, "bold"),
+            text_color=COLOR_HUD_TEXT,
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            audio_text,
+            text="Phát tiếng bíp tai nghe OBS khi bật/tắt",
+            font=self._hud_font(8),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+        ).pack(fill="x")
+        self.var_audio_feedback = tk.BooleanVar(value=bool(getattr(config, "audio_feedback_enabled", True)))
+        ctk.CTkSwitch(
+            audio_row,
+            text="",
+            variable=self.var_audio_feedback,
+            command=lambda: setattr(config, "audio_feedback_enabled", bool(self.var_audio_feedback.get())),
+            progress_color=COLOR_ACCENT_2,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(side="right")
+        self._checkbox_vars["audio_feedback_enabled"] = self.var_audio_feedback
+
+    # --- WindMouse trajectory simulation -------------------------------------
+
+    def _simulate_windmouse_path(self, start, end, gravity, wind, max_step, min_step,
+                                 steps=34, seed=None):
+        """Pure WindMouse trajectory used by the Simulate Path dialog.
+
+        Each step pulls the cursor toward the target (gravity), adds WindMouse-style
+        wind noise and clamps the step length between min_step and max_step. The
+        result is deterministic for a given `seed`, so Re-Roll can be tested.
+        """
+        rng = random.Random(seed)
+        x, y = float(start[0]), float(start[1])
+        tx, ty = float(end[0]), float(end[1])
+        path = [(x, y)]
+
+        # WindMouse keeps a velocity term; start at rest.
+        vx = vy = 0.0
+        distance = math.hypot(tx - x, ty - y)
+        for _ in range(max(1, int(steps))):
+            dx, dy = tx - x, ty - y
+            distance = math.hypot(dx, dy)
+            if distance <= 0.5:
+                break
+            ux, uy = dx / distance, dy / distance
+            force = max(0.05, float(gravity))
+            vx += ux * force + (rng.random() - 0.5) * 2.0 * float(wind)
+            vy += uy * force + (rng.random() - 0.5) * 2.0 * float(wind)
+            speed = math.hypot(vx, vy) or 1e-6
+            # Step length grows with the remaining distance, then gets clamped.
+            desired = min(float(max_step), max(float(min_step), distance * 0.45))
+            step = min(float(max_step), max(float(min_step), min(desired, speed)))
+            vx = (vx / speed) * step
+            vy = (vy / speed) * step
+            x += vx
+            y += vy
+            path.append((x, y))
+        # No forced jump to the exact target: every segment respects max_step, which
+        # is what the clamp test checks and what the trajectory preview should show.
+        return path
+
+    def _open_hud_modal(self, title, width=440, height=300):
+        """Create the modal card used by the HUD dialogs; returns its body frame."""
+        existing = getattr(self, "_hud_modal", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+            except Exception:
+                pass
+
+        modal = ctk.CTkToplevel(self)
+        modal.title(str(title))
+        modal.configure(fg_color=COLOR_HUD_MAIN)
+        modal.transient(self)
+        modal.resizable(False, False)
+        try:
+            modal.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        card = ModernCard(modal, title, accent_color=COLOR_ACCENT)
+        card.pack(fill="both", expand=True, padx=8, pady=8)
+        modal.bind("<Escape>", lambda _e: modal.destroy())
+
+        try:
+            self.update_idletasks()
+            x = self.winfo_x() + max(0, (self.winfo_width() - width) // 2)
+            y = self.winfo_y() + max(0, (self.winfo_height() - height) // 3)
+            modal.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
+        except Exception:
+            pass
+
+        self._hud_modal = modal
+        return modal, card.content
+
+    def _show_windmouse_simulation(self):
+        is_sec = str(getattr(self, "_active_aim_slot", "main")).strip().lower() == "sec"
+        suffix = "_sec" if is_sec else ""
+        gravity = float(getattr(config, f"wm_gravity{suffix}", 9.0))
+        wind = float(getattr(config, f"wm_wind{suffix}", 3.0))
+        max_step = float(getattr(config, f"wm_max_step{suffix}", 15.0))
+        min_step = float(getattr(config, f"wm_min_step{suffix}", 2.0))
+
+        modal, body = self._open_hud_modal(
+            f"WindMouse v1.2 Trajectory ({'SEC' if is_sec else 'MAIN'})", width=440, height=300,
+        )
+
+        header = ctk.CTkFrame(body, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(
+            header,
+            text=f"Gravity: {gravity:.2f}  |  Wind: {wind:.2f}  |  Step: {max_step:.0f}",
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_DIM,
+            anchor="w",
+        ).pack(side="left")
+
+        canvas_w, canvas_h = 400, 170
+        canvas = tk.Canvas(
+            body, width=canvas_w, height=canvas_h, bg=COLOR_HUD_INPUT,
+            bd=0, highlightthickness=1,
+            highlightbackground=COLOR_HUD_BORDER, highlightcolor=COLOR_HUD_BORDER,
+        )
+        canvas.pack(fill="x", pady=(2, 0))
+
+        start = (35, 135)
+        end = (355, 38)
+
+        def _render(seed=None):
+            canvas.delete("all")
+            canvas.create_line(
+                start[0], start[1], end[0], end[1],
+                fill=mix(COLOR_HUD_DIM, COLOR_HUD_INPUT, 0.25), dash=(4, 4),
+            )
+            path = self._simulate_windmouse_path(
+                start, end, gravity, wind, max_step, min_step, seed=seed,
+            )
+            coords = []
+            for px, py in path:
+                coords.extend((px, py))
+            if len(coords) >= 4:
+                canvas.create_line(*coords, fill=COLOR_ACCENT, width=2, smooth=True)
+            canvas.create_oval(start[0] - 3, start[1] - 3, start[0] + 3, start[1] + 3,
+                               fill=COLOR_HUD_PING, outline="")
+            canvas.create_oval(end[0] - 4, end[1] - 4, end[0] + 4, end[1] + 4,
+                               fill=COLOR_DANGER, outline="")
+
+        reroll = ctk.CTkButton(
+            header,
+            text=t_hud("HUD_REROLL"),
+            command=lambda: _render(random.randint(1, 10_000)),
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_REROLL"), size=8, padx=12),
+            corner_radius=3,
+        )
+        reroll.pack(side="right")
+        self.windmouse_canvas = canvas
+        self.windmouse_reroll_btn = reroll
+
+        _render(int(time.time()) % 100000)
+        return modal
+
+    def _legacy_show_aimbot_tab(self):
+        """RETIRED: the pre-HUD Main Aimbot body. HUD version: _build_combat_view."""
+        return
+
+        self._active_tab_name = "Main Aimbot"
 
         # Master Control Switches Row
         master_row = ctk.CTkFrame(self.content_frame, fg_color="#141822", corner_radius=8, border_width=1, border_color="#232B3B")
@@ -5207,6 +8465,7 @@ class ViewerApp(ctk.CTk):
             self._add_slider_in_frame(self.card_windmouse.content, "FOV Smooth", "normalsmoothfov", 1, 30,
                                       float(getattr(config, "normalsmoothfov", 10)),
                                       self._on_config_normal_smoothfov_changed)
+            self._build_windmouse_budget_sliders(self.card_windmouse.content)
         elif current_mode == "Flick":
             self._add_subtitle_in_frame(self.card_windmouse.content, "FLICK PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse.content, "Strength X", "flick_strength_x", 0.01, 5.0,
@@ -5340,18 +8599,11 @@ class ViewerApp(ctk.CTk):
             accent_color=COLOR_ACCENT_2
         ).pack(fill="x", pady=(4, 0))
 
-    def _show_sec_aimbot_tab(self):
+    def _legacy_show_sec_aimbot_tab(self):
+        """RETIRED: the pre-HUD Sec Aimbot body. HUD version: _build_combat_view."""
+        return
+
         self._active_tab_name = "Sec Aimbot"
-        self._clear_content()
-        self._add_sub_nav_bar(
-            ["Main Aimbot", "Sec Aimbot"],
-            "Sec Aimbot",
-            {
-                "Main Aimbot": self._show_aimbot_tab,
-                "Sec Aimbot": self._show_sec_aimbot_tab,
-            }
-        )
-        self._add_title("Secondary Aimbot")
 
         # Master Control Switches Row
         master_row = ctk.CTkFrame(self.content_frame, fg_color="#141822", corner_radius=8, border_width=1, border_color="#232B3B")
@@ -5496,6 +8748,7 @@ class ViewerApp(ctk.CTk):
             self._add_slider_in_frame(self.card_windmouse_sec.content, "FOV Smooth", "normalsmoothfov_sec", 1, 30,
                                       float(getattr(config, "normalsmoothfov_sec", 20)),
                                       self._on_config_normal_smoothfov_sec_changed)
+            self._build_windmouse_budget_sliders(self.card_windmouse_sec.content)
         elif current_mode_sec == "Flick":
             self._add_subtitle_in_frame(self.card_windmouse_sec.content, "FLICK PARAMETERS")
             self._add_slider_in_frame(self.card_windmouse_sec.content, "Strength X", "flick_strength_x_sec", 0.01, 5.0,
@@ -5904,110 +9157,224 @@ class ViewerApp(ctk.CTk):
     def _show_config_tab(self):
         self._active_tab_name = "Profiles"
         self._clear_content()
-        self._add_sub_nav_bar(
-            ["Hardware & Capture", "Profiles & Config", "Debug & Telemetry"],
-            "Profiles & Config",
-            {
-                "Hardware & Capture": self._show_general_tab,
-                "Profiles & Config": self._show_config_tab,
-                "Debug & Telemetry": self._show_debug_tab,
-            }
-        )
+        self._add_platform_sub_nav("profiles")
         self._add_title("Configuration Profiles")
 
         os.makedirs("configs", exist_ok=True)
-        col_left, col_right, _prof_cols = self._two_column_container(pady=(0, 10))
+        col_left, col_right, _prof_cols = self._two_column_container(pady=(0, 0))
 
         self.card_profile_manager = ModernCard(
             col_left,
             "Profile Management",
-            icon="📁",
+            icon="\u25a4",
             badge_text="Presets",
             accent_color=COLOR_ACCENT
         )
-        self.card_profile_manager.pack(fill="x", pady=(0, 10))
+        self.card_profile_manager.pack(fill="x", pady=(0, 6))
 
-        self.config_option = self._add_option_menu([], self._on_config_selected, parent=self.card_profile_manager.content)
-        self.config_option.pack(fill="x", pady=(4, 10))
+        self.config_option = self._add_option_menu(
+            [], self._on_config_selected, parent=self.card_profile_manager.content
+        )
+        self.config_option.configure(height=22, font=self._hud_font(9, "bold", mono=True))
+        self.config_option.pack(fill="x", pady=(2, 5))
 
-        # Six action buttons no longer fit one row inside a half-width column, so lay
-        # them out as a 3x2 grid that shares the available width.
+        # Inline "new profile" row: NEW reveals it, Add commits through _do_save().
+        self._new_profile_row = ctk.CTkFrame(self.card_profile_manager.content, fg_color="transparent")
+        self._new_profile_name_var = tk.StringVar(value="")
+        self._new_profile_entry = ctk.CTkEntry(
+            self._new_profile_row,
+            textvariable=self._new_profile_name_var,
+            height=20,
+            fg_color=COLOR_HUD_INPUT,
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(9, mono=True),
+            placeholder_text=t_hud("HUD_PROFILE_NAME"),
+            corner_radius=3,
+        )
+        self._new_profile_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._new_profile_add_btn = ctk.CTkButton(
+            self._new_profile_row,
+            text=t_hud("HUD_ADD"),
+            command=self._confirm_new_profile_inline,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            text_color=readable_on(COLOR_ACCENT),
+            font=self._hud_font(8, "bold"),
+            height=20,
+            width=self._hud_button_width(t_hud("HUD_ADD"), size=8, padx=14, minimum=34),
+            corner_radius=3,
+        )
+        self._new_profile_add_btn.pack(side="left")
+
+        # Six action buttons share a 3x2 grid inside the half-width column.
         btn_frame = ctk.CTkFrame(self.card_profile_manager.content, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, 10))
+        btn_frame.pack(fill="x", pady=(0, 2))
         for col in range(3):
             btn_frame.grid_columnconfigure(col, weight=1, uniform="profbtn")
+        self.profile_action_buttons = {}
         profile_actions = [
-            ("SAVE", self._save_config),
-            ("LOAD", self._load_selected_config),
-            ("DEL", self._delete_selected_config),
-            ("NEW", self._save_new_config),
-            ("EXPORT", self._export_selected_config),
-            ("IMPORT", self._import_config_file),
+            ("SAVE", t_hud("HUD_SAVE"), self._save_config),
+            ("LOAD", t_hud("HUD_LOAD"), self._load_selected_config),
+            ("DEL", t_hud("HUD_DEL"), self._delete_selected_config),
+            ("NEW", t_hud("HUD_NEW"), self._toggle_new_profile_row),
+            ("EXPORT", t_hud("HUD_EXPORT"), self._export_selected_config),
+            ("IMPORT", t_hud("HUD_IMPORT"), self._import_config_file),
         ]
-        for idx, (label, handler) in enumerate(profile_actions):
-            button = self._add_text_button(btn_frame, label, handler)
-            button.configure(width=0)
-            button.grid(row=idx // 3, column=idx % 3, sticky="ew", padx=3, pady=3)
+        for idx, (key, label, handler) in enumerate(profile_actions):
+            button = ctk.CTkButton(
+                btn_frame,
+                text=label,
+                command=handler,
+                width=0,
+                height=22,
+                fg_color=COLOR_HUD_CARD,
+                hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+                border_width=1,
+                border_color=COLOR_HUD_BORDER,
+                text_color=COLOR_HUD_TEXT,
+                font=self._hud_font(8, "bold"),
+                corner_radius=3,
+            )
+            button.grid(row=idx // 3, column=idx % 3, sticky="ew", padx=2, pady=2)
+            self.profile_action_buttons[key] = button
 
         self.card_profile_activity = ModernCard(
             col_right,
             "Activity Log",
-            icon="🧾",
+            icon="\u25a5",
             badge_text="Log",
             accent_color=COLOR_WARNING
         )
-        self.card_profile_activity.pack(fill="both", expand=True, pady=(0, 10))
+        self.card_profile_activity.pack(fill="both", expand=True, pady=(0, 6))
 
         self.config_log = ctk.CTkTextbox(
             self.card_profile_activity.content,
-            height=240,
-            fg_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT_DIM,
-            font=("Consolas", 10),
-            corner_radius=4
+            height=220,
+            fg_color=COLOR_HUD_INPUT,
+            text_color=COLOR_HUD_DIM,
+            font=self._hud_font(8, mono=True),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3
         )
-        self.config_log.pack(fill="both", expand=True, pady=(4, 6))
+        self.config_log.pack(fill="both", expand=True, pady=(2, 2))
 
         self._refresh_config_list()
+        self._refresh_active_profile_label()
+        self._set_nav_active("Profiles")
         self.after(100, self._maybe_prompt_clipboard_config_import)
 
+    def _toggle_new_profile_row(self):
+        row = getattr(self, "_new_profile_row", None)
+        if row is None:
+            return
+        if row.winfo_ismapped():
+            row.pack_forget()
+            return
+        row.pack(fill="x", pady=(0, 4))
+        try:
+            self._new_profile_entry.focus_set()
+        except Exception:
+            pass
+
+    def _confirm_new_profile_inline(self):
+        raw = ""
+        try:
+            raw = str(self._new_profile_name_var.get()).strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            return
+        self._do_save(raw)
+        self._new_profile_name_var.set("")
+        row = getattr(self, "_new_profile_row", None)
+        if row is not None and row.winfo_ismapped():
+            row.pack_forget()
+
     def _show_debug_tab(self):
-        """Debug & Telemetry tab"""
+        """Debug & Telemetry HUD: live input readouts, waveform and real logs."""
         self._active_tab_name = "Telemetry"
         self._clear_content()
-        self._add_sub_nav_bar(
-            ["Hardware & Capture", "Profiles & Config", "Debug & Telemetry"],
-            "Debug & Telemetry",
-            {
-                "Hardware & Capture": self._show_general_tab,
-                "Profiles & Config": self._show_config_tab,
-                "Debug & Telemetry": self._show_debug_tab,
-            }
-        )
+        self._add_platform_sub_nav("telemetry")
         self._add_title("Debug & Telemetry")
-        col_left, col_right, _tel_cols = self._two_column_container(pady=(0, 10))
+        col_left, col_right, _tel_cols = self._two_column_container(pady=(0, 0))
 
         # 1. Mouse Input Telemetry Card
         self.card_mouse_monitor = ModernCard(
             col_left,
             "Mouse Input Telemetry",
-            icon="⚡",
+            icon="\u26a1",
             badge_text="Hardware",
             accent_color=COLOR_ACCENT_2
         )
-        self.card_mouse_monitor.pack(fill="x", pady=(0, 10))
+        self.card_mouse_monitor.pack(fill="x", pady=(0, 6))
+
+        monitor_header = ctk.CTkFrame(self.card_mouse_monitor.content, fg_color="transparent")
+        monitor_header.pack(fill="x", pady=(0, 3))
 
         if not hasattr(self, 'debug_mouse_input_var'):
             self.debug_mouse_input_var = tk.BooleanVar(value=False)
-        debug_switch = self._add_switch_in_frame(
-            self.card_mouse_monitor.content,
-            "Enable Mouse Input Debug",
-            self.debug_mouse_input_var,
-            self._on_debug_mouse_input_changed
+        ctk.CTkSwitch(
+            monitor_header,
+            text=t_hud("HUD_LIVE_DEBUG"),
+            variable=self.debug_mouse_input_var,
+            command=self._on_debug_mouse_input_changed,
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            progress_color=COLOR_ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#E2E8F0",
+            fg_color=COLOR_HUD_CARD,
+            width=28,
+            switch_width=26,
+            switch_height=13,
+            height=16,
+        ).pack(side="right")
+        self._checkbox_vars["debug_mouse_input"] = self.debug_mouse_input_var
+
+        readouts = ctk.CTkFrame(self.card_mouse_monitor.content, fg_color="transparent")
+        readouts.pack(fill="x", pady=(0, 3))
+        for col in range(3):
+            readouts.grid_columnconfigure(col, weight=1, uniform="tele")
+
+        def _readout_cell(column, caption, value, color):
+            cell = ctk.CTkFrame(
+                readouts, fg_color=COLOR_HUD_INPUT, border_width=1,
+                border_color=COLOR_HUD_BORDER, corner_radius=3,
+            )
+            cell.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 3, 0))
+            ctk.CTkLabel(
+                cell, text=str(caption).upper(), font=self._hud_font(7),
+                text_color=COLOR_HUD_DIM,
+            ).pack(pady=(2, 0))
+            label = ctk.CTkLabel(
+                cell, text=value, font=self._hud_font(9, "bold", mono=True), text_color=color,
+            )
+            label.pack(pady=(0, 2))
+            return label
+
+        self.tele_dxdy = _readout_cell(0, t_hud("HUD_DELTA"), "+0, +0 px", COLOR_ACCENT)
+        self.tele_baud = _readout_cell(1, t_hud("HUD_BAUDRATE"), self._telemetry_baudrate(), COLOR_HUD_PING)
+        self.tele_step = _readout_cell(2, t_hud("HUD_STEP_TICK"), self._telemetry_step_text(), COLOR_WARNING)
+
+        self.telemetry_canvas = tk.Canvas(
+            self.card_mouse_monitor.content, height=96, bg=COLOR_HUD_INPUT,
+            bd=0, highlightthickness=1,
+            highlightbackground=COLOR_HUD_BORDER, highlightcolor=COLOR_HUD_BORDER,
+        )
+        self.telemetry_canvas.pack(fill="x", pady=(2, 3))
+
+        # Button State sub-card keeps the full five-button monitor + Reset.
+        states_card = SubCard(self.card_mouse_monitor.content, accent_color=COLOR_ACCENT_2)
+        states_card.pack(fill="x", pady=(2, 0))
+        HudSectionTitle(states_card.content, t_hud("HUD_BUTTON_STATES")).pack(
+            anchor="w", padx=6, pady=(3, 1)
         )
 
-        self.debug_mouse_frame = ctk.CTkFrame(self.card_mouse_monitor.content, fg_color=COLOR_SURFACE, corner_radius=6)
-        self.debug_mouse_frame.pack(fill="x", pady=10)
+        self.debug_mouse_frame = ctk.CTkFrame(states_card.content, fg_color="transparent")
+        self.debug_mouse_frame.pack(fill="x", padx=4, pady=(0, 4))
 
         self.debug_button_widgets = {}
         # Last rendered (color, count-text) per button, so the 50ms loop only
@@ -6023,48 +9390,49 @@ class ViewerApp(ctk.CTk):
 
         for idx, name in button_names.items():
             btn_frame = ctk.CTkFrame(self.debug_mouse_frame, fg_color="transparent")
-            btn_frame.pack(fill="x", padx=10, pady=5)
+            btn_frame.pack(fill="x", pady=1)
 
             name_label = ctk.CTkLabel(
                 btn_frame,
                 text=name,
-                font=FONT_MAIN,
-                text_color=COLOR_TEXT,
-                width=120,
+                font=self._hud_font(8),
+                text_color=COLOR_HUD_TEXT,
+                width=74,
                 anchor="w"
             )
-            name_label.pack(side="left", padx=5)
+            name_label.pack(side="left")
 
             state_indicator = ctk.CTkLabel(
                 btn_frame,
-                text="●",
-                font=("Arial", 16),
+                text="\u25cf",
+                font=("Arial", 11),
                 text_color="#CF6679",
-                width=30
+                width=14
             )
-            state_indicator.pack(side="left", padx=5)
+            state_indicator.pack(side="left", padx=(2, 2))
 
             count_label = ctk.CTkLabel(
                 btn_frame,
                 text="Count: 0",
-                font=FONT_MAIN,
-                text_color=COLOR_TEXT_DIM,
+                font=self._hud_font(8, mono=True),
+                text_color=COLOR_HUD_DIM,
                 anchor="w"
             )
-            count_label.pack(side="left", padx=5, fill="x", expand=True)
+            count_label.pack(side="left", fill="x", expand=True)
 
             reset_btn = ctk.CTkButton(
                 btn_frame,
                 text="Reset",
-                width=60,
-                height=25,
-                fg_color=COLOR_BORDER,
-                hover_color=COLOR_SURFACE,
-                text_color=COLOR_TEXT,
-                font=("Roboto", 9),
+                width=44,
+                height=16,
+                fg_color=COLOR_HUD_CARD,
+                hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+                text_color=COLOR_HUD_DIM,
+                font=self._hud_font(7, "bold"),
+                corner_radius=2,
                 command=lambda i=idx: self._reset_button_count(i)
             )
-            reset_btn.pack(side="right", padx=5)
+            reset_btn.pack(side="right")
 
             self.debug_button_widgets[idx] = {
                 "state_indicator": state_indicator,
@@ -6078,63 +9446,217 @@ class ViewerApp(ctk.CTk):
                 pass
 
         reset_all_frame = ctk.CTkFrame(self.debug_mouse_frame, fg_color="transparent")
-        reset_all_frame.pack(fill="x", padx=10, pady=5)
+        reset_all_frame.pack(fill="x", pady=(2, 0))
 
         reset_all_btn = ctk.CTkButton(
             reset_all_frame,
             text="Reset All Counts",
-            width=120,
-            height=30,
-            fg_color=COLOR_BORDER,
-            hover_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT,
-            font=FONT_MAIN,
+            width=110,
+            height=18,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(7, "bold"),
+            corner_radius=2,
             command=self._reset_all_button_counts
         )
-        reset_all_btn.pack(side="right", padx=5)
+        reset_all_btn.pack(side="right")
 
+        # The button-state list and waveform follow the Live Debug switch.
         if self.debug_mouse_input_var.get():
-            self.debug_mouse_frame.pack(fill="x", pady=10)
             self.mouse_input_monitor.enable()
-        else:
-            self.debug_mouse_frame.pack_forget()
 
         # 2. System Logs Card
         self.card_system_logs = ModernCard(
             col_right,
-            "System Logs & Diagnostics",
-            icon="📜",
+            "System Logs",
+            icon="\u25a5",
             badge_text="Telemetry",
             accent_color=COLOR_WARNING
         )
-        self.card_system_logs.pack(fill="both", expand=True, pady=(0, 10))
+        self.card_system_logs.pack(fill="both", expand=True, pady=(0, 6))
 
         control_frame = ctk.CTkFrame(self.card_system_logs.content, fg_color="transparent")
-        control_frame.pack(fill="x", pady=(0, 8))
+        control_frame.pack(fill="x", pady=(0, 4))
 
-        clear_btn = self._add_text_button(control_frame, "Clear Log", self._clear_debug_log)
-        clear_btn.pack(side="left", padx=(0, 10))
+        clear_btn = ctk.CTkButton(
+            control_frame,
+            text=t_hud("HUD_CLEAR_LOG"),
+            command=self._clear_debug_log,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_CLEAR_LOG"), size=8, padx=12),
+            corner_radius=3,
+        )
+        clear_btn.pack(side="left", padx=(0, 4))
+        self.clear_log_btn = clear_btn
 
-        webmenu_btn = self._add_text_button(control_frame, "Open WebMenu", self._open_webmenu)
-        webmenu_btn.pack(side="left", padx=(0, 10))
+        webmenu_btn = ctk.CTkButton(
+            control_frame,
+            text=t_hud("HUD_OPEN_WEBMENU"),
+            command=self._open_webmenu,
+            fg_color=COLOR_HUD_CARD,
+            hover_color=mix(COLOR_ACCENT, COLOR_HUD_CARD, 0.18),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT,
+            font=self._hud_font(8, "bold"),
+            height=18,
+            width=self._hud_button_width(t_hud("HUD_OPEN_WEBMENU"), size=8, padx=12),
+            corner_radius=3,
+        )
+        webmenu_btn.pack(side="left")
+        self.open_webmenu_btn = webmenu_btn
 
         self.debug_log_count_label = ctk.CTkLabel(
             control_frame,
-            text="Log Count: 0",
-            font=FONT_MAIN,
-            text_color=COLOR_TEXT_DIM
+            text=f"{t_hud('HUD_SYSTEM_LOGS')} (0)",
+            font=self._hud_font(8, mono=True),
+            text_color=COLOR_HUD_MUTED
         )
-        self.debug_log_count_label.pack(side="left", padx=10)
+        self.debug_log_count_label.pack(side="right")
 
         self.debug_log_textbox = ctk.CTkTextbox(
             self.card_system_logs.content,
-            height=350,
-            fg_color=COLOR_SURFACE,
-            text_color=COLOR_TEXT,
-            font=("Consolas", 10),
-            corner_radius=0
+            height=250,
+            fg_color=COLOR_HUD_INPUT,
+            text_color=COLOR_HUD_TEXT,
+            font=self._hud_font(8, mono=True),
+            border_width=1,
+            border_color=COLOR_HUD_BORDER,
+            corner_radius=3
         )
         self.debug_log_textbox.pack(fill="both", expand=True)
+        # Level colors for INFO / WARN / ERROR lines.
+        try:
+            self.debug_log_textbox.tag_config("ERROR", foreground=COLOR_DANGER)
+            self.debug_log_textbox.tag_config("WARN", foreground=COLOR_WARNING)
+            self.debug_log_textbox.tag_config("INFO", foreground=COLOR_HUD_TEXT)
+        except Exception:
+            pass
+
+        self._set_nav_active("Telemetry")
+        self._update_telemetry_hud()
+
+    def _telemetry_baudrate(self):
+        """Report the baud rate the selected mouse backend will actually use."""
+        mode = self._normalize_mouse_api_name(getattr(config, "mouse_api", "Serial"))
+        if mode == "Serial":
+            if bool(getattr(config, "serial_auto_switch_4m", False)):
+                return "4,000,000"
+            return "115,200"
+        if mode == "Arduino":
+            try:
+                return f"{int(getattr(config, 'arduino_baud', 115200)):,}"
+            except Exception:
+                return "115,200"
+        if mode == "MakV2":
+            return f"{int(getattr(config, 'makv2_baud', 4000000) or 0):,}"
+        if mode == "MakcuController":
+            return f"{int(getattr(config, 'makcu_controller_baud', 115200) or 0):,}"
+        if mode == "MakxdMakAPI":
+            return f"{int(getattr(config, 'makxd_mak_baud', 115200) or 0):,}"
+        if mode == "MakAPI":
+            baud = int(getattr(config, "mak_api_baud", 0) or 0)
+            return f"{baud:,}" if baud else "auto"
+        return "N/A"
+
+    def _telemetry_step_text(self):
+        try:
+            delay_ms = float(getattr(config, "wm_min_delay", 0.001)) * 1000.0
+        except Exception:
+            delay_ms = 0.0
+        return f"{delay_ms:.2f} ms"
+
+    def _update_telemetry_hud(self):
+        """Refresh dX/dY, baud and the waveform from real MOVE log entries."""
+        self._telemetry_job_id = None
+        # Existing contract: the HUD only re-arms itself while its tab is open
+        # and its canvas still exists. The try/except only protects one refresh
+        # from killing the loop while it is meant to be running.
+        if str(getattr(self, "_active_tab_name", "")) != "Telemetry":
+            return
+        canvas = getattr(self, "telemetry_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except Exception:
+            return
+
+        try:
+            dx, dy = 0.0, 0.0
+            deltas = []
+            try:
+                for entry in get_recent_logs(400):
+                    if str(entry.get("type", "")).upper() != "MOVE":
+                        continue
+                    deltas.append(float(entry.get("dx", 0.0) or 0.0))
+                    dy = float(entry.get("dy", 0.0) or 0.0)
+                    dx = float(entry.get("dx", 0.0) or 0.0)
+            except Exception:
+                deltas = []
+
+            if deltas:
+                graph = deltas[-40:]
+                if len(graph) < 40:
+                    graph = [0.0] * (40 - len(graph)) + graph
+            else:
+                graph = [0.0] * 40
+            self._telemetry_history = graph
+
+            dx_label = getattr(self, "tele_dxdy", None)
+            if dx_label is not None:
+                try:
+                    dx_label.configure(text=f"{dx:+.0f}, {dy:+.0f} px")
+                except Exception:
+                    pass
+            baud_label = getattr(self, "tele_baud", None)
+            if baud_label is not None:
+                try:
+                    baud_label.configure(text=self._telemetry_baudrate())
+                except Exception:
+                    pass
+            step_label = getattr(self, "tele_step", None)
+            if step_label is not None:
+                try:
+                    step_label.configure(text=self._telemetry_step_text())
+                except Exception:
+                    pass
+
+            self._draw_telemetry_waveform(canvas, graph)
+        except Exception as e:
+            try:
+                log_print(f"[UI] Telemetry HUD error: {e}")
+            except Exception:
+                pass
+
+        self._telemetry_job_id = self._schedule_periodic(120, self._update_telemetry_hud)
+
+    def _draw_telemetry_waveform(self, canvas, values):
+        try:
+            canvas.delete("all")
+            width = int(canvas.winfo_width() or 320)
+            height = int(canvas.winfo_height() or 96)
+            if width <= 2:
+                width, height = 320, 96
+            canvas.create_line(0, height // 2, width, height // 2, fill="#162030")
+            peak = max(1.0, max(abs(v) for v in values)) if values else 1.0
+            coords = []
+            for index, value in enumerate(values):
+                x = (index / float(max(1, len(values) - 1))) * width
+                y = height / 2 - (value / peak) * (height / 2 - 4)
+                coords.extend((x, y))
+            if len(coords) >= 4:
+                canvas.create_line(*coords, fill=COLOR_ACCENT, width=2, smooth=True)
+        except Exception:
+            pass
 
     def _open_webmenu(self):
         ensure_running = getattr(self, "_ensure_webmenu_running", None)
@@ -6166,17 +9688,8 @@ class ViewerApp(ctk.CTk):
     # --- 妤电啊绲勪欢妲嬪缓鍣?---
 
     def _add_title(self, text):
-        """Set the page heading in the title bar instead of stacking a second title
-        into the scroll body (the header already carries the page name)."""
-        page_subtitles = {
-            "Main Aimbot": "Aim behaviour, tracking quality and humanization",
-            "Secondary Aimbot": "Second aim profile with its own trigger and tuning",
-            "Vision & Color Detection": "Target color, HSV calibration and contour filtering",
-            "Hardware & Capture Service": "Device API, input backend and capture source",
-            "Configuration Profiles": "Config presets, import / export and clipboard sync",
-            "Debug & Telemetry": "Live capture health, input events and logs",
-        }
-        self._set_page_header(text, page_subtitles.get(text, ""))
+        """Set the HUD header heading (the workspace no longer stacks a title)."""
+        self._set_page_header(text)
 
     def _add_subtitle(self, text):
         ctk.CTkLabel(self.content_frame, text=heading(text), font=("Roboto", 10, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", pady=(6, 2))
@@ -6378,7 +9891,60 @@ class ViewerApp(ctk.CTk):
         else:
             return content, container
 
-    def _add_slider_in_frame(self, parent, text, key, min_val, max_val, init_val, command, is_float=False):
+    def _add_slider_in_frame(self, parent, text, key, min_val, max_val, init_val, command, is_float=False,
+                             label_width=112):
+        """Add a compact 3-column HUD parameter row: label | track | numeric box."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=0)
+
+        row.grid_columnconfigure(0, minsize=label_width)
+        row.grid_columnconfigure(1, weight=1, minsize=54)
+        row.grid_columnconfigure(2, minsize=54)
+
+        ctk.CTkLabel(
+            row,
+            text=t(text),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_TEXT,
+            anchor="w",
+            justify="left",
+            wraplength=label_width,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6), pady=1)
+
+        val_str = f"{float(init_val):.2f}" if is_float else f"{int(round(float(init_val)))}"
+        val_entry = ctk.CTkEntry(
+            row, width=54, height=19, fg_color=COLOR_HUD_INPUT,
+            border_width=1, border_color=COLOR_HUD_BORDER,
+            text_color=COLOR_ACCENT, font=self._hud_font(9, "bold", mono=True), justify="center",
+            corner_radius=3,
+        )
+        val_entry.insert(0, val_str)
+        val_entry.grid(row=0, column=2, sticky="e")
+
+        slider = ctk.CTkSlider(
+            row, from_=min_val, to=max_val,
+            number_of_steps=(
+                max(1, int(round((max_val - min_val) * (100 if (max_val - min_val) <= 2.0 else 10))))
+                if is_float else max(1, int(max_val - min_val))
+            ),
+            fg_color=COLOR_HUD_INPUT, progress_color=COLOR_ACCENT,
+            button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+            height=11, button_length=9, button_corner_radius=2,
+            command=lambda v: self._on_slider_changed(v, val_entry, key, command, is_float, slider, min_val, max_val)
+        )
+        slider.set(float(init_val))
+        slider.grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=1)
+
+        val_entry.bind("<Return>", lambda e: self._on_entry_changed(val_entry, slider, key, command, is_float, min_val, max_val))
+        val_entry.bind("<FocusOut>", lambda e: self._on_entry_changed(val_entry, slider, key, command, is_float, min_val, max_val))
+
+        self._register_slider(key, slider, val_entry, min_val, max_val, is_float)
+        return row
+
+    def _removed_legacy_slider_row(self, parent, text, key, min_val, max_val, init_val, command, is_float=False):
+        """Dead code retired with the old dashboard slider; kept as a tombstone only."""
+        return
+
         """鍦ㄦ寚瀹?parent frame 涓坊鍔?slider锛堣垏 _add_slider 閭忚集涓€鑷达級"""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.pack(fill="x", pady=2)
@@ -6414,10 +9980,15 @@ class ViewerApp(ctk.CTk):
     def _add_option_row_in_frame(self, parent, label_text, values, command):
         """鍦ㄦ寚瀹?parent frame 涓坊鍔?OptionMenu锛堣垏 _add_option_row 閭忚集涓€鑷达級"""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", pady=5)
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_columnconfigure(1, weight=0)
-        ctk.CTkLabel(frame, text=t(label_text), font=FONT_MAIN, text_color=COLOR_TEXT).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        frame.pack(fill="x", pady=3)
+        frame.grid_columnconfigure(0, weight=0)
+        frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            frame,
+            text=t(label_text),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_DIM,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
         menu = self._add_option_menu(values, command, parent=frame)
         menu.grid(row=0, column=1, sticky="e")
         return menu
@@ -6425,11 +9996,16 @@ class ViewerApp(ctk.CTk):
     def _add_hardware_option_row_in_frame(self, parent, label_text, values, command):
         """Hardware API row with stronger accent / 強化 Hardware API row 視覺層次"""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", pady=5)
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_columnconfigure(1, weight=0)
-        ctk.CTkLabel(frame, text=t(label_text), font=FONT_MAIN, text_color=COLOR_TEXT).grid(
-            row=0, column=0, sticky="w", padx=(0, 10)
+        frame.pack(fill="x", pady=3)
+        frame.grid_columnconfigure(0, weight=0)
+        frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            frame,
+            text=t(label_text),
+            font=self._hud_font(9),
+            text_color=COLOR_HUD_DIM,
+        ).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
         )
         menu = self._add_hardware_option_menu(values, command, parent=frame)
         menu.grid(row=0, column=1, sticky="e")
@@ -6818,17 +10394,17 @@ class ViewerApp(ctk.CTk):
             target_parent,
             values=values,
             command=command,
-            fg_color=COLOR_SURFACE,
+            fg_color=COLOR_HUD_INPUT,
             button_color=COLOR_BORDER,
             button_hover_color=COLOR_ACCENT,
             text_color=COLOR_TEXT,
-            font=FONT_MAIN,
+            font=self._hud_font(9),
             dropdown_fg_color=COLOR_SURFACE,
             dropdown_hover_color=COLOR_NAV_HOVER_BG,
             dropdown_text_color=COLOR_TEXT,
-            corner_radius=8,
-            height=28,
-            width=180
+            corner_radius=4,
+            height=24,
+            width=145
         )
 
     def _add_option_row(self, label_text, values, command):
@@ -6889,13 +10465,13 @@ class ViewerApp(ctk.CTk):
             button_color=COLOR_HARDWARE_INPUT_BORDER,
             button_hover_color=COLOR_HARDWARE_INPUT_HOVER,
             text_color=COLOR_HARDWARE_BUTTON_TEXT,
-            font=FONT_MAIN,
+            font=self._hud_font(9),
             dropdown_fg_color=COLOR_HARDWARE_DROPDOWN_BG,
             dropdown_hover_color=COLOR_HARDWARE_BUTTON_HOVER,
             dropdown_text_color=COLOR_HARDWARE_BUTTON_TEXT,
-            corner_radius=8,
-            height=28,
-            width=180,
+            corner_radius=4,
+            height=24,
+            width=145,
         )
 
     def _create_hardware_entry(self, parent, width=170):
@@ -7367,6 +10943,7 @@ class ViewerApp(ctk.CTk):
                 button.configure(text=str(text))
         except Exception:
             pass
+        self._refresh_footer_hotkey()
 
     def _cancel_binding_capture(self):
         ctx = getattr(self, "_binding_capture_ctx", None)
@@ -7765,10 +11342,11 @@ class ViewerApp(ctk.CTk):
             
             # 閲嶆柊椤ず鐣跺墠闋侀潰浠ユ洿鏂?UI 鍏冪礌
             # 閫欐渻纰轰繚鎵€鏈?slider銆乧heckbox銆乷ption menu 閮介’绀烘纰虹殑鍊?
-            if self._legacy_ui_mode:
-                self._handle_nav_click("General", self._show_general_tab)
-            else:
-                self._handle_nav_click("Combat", self._show_aimbot_tab)
+            # Rebuild the page the user is actually looking at instead of
+            # navigating: a hard-coded page here destroyed whatever had been
+            # opened during the first 200 ms (e.g. the Vision OBS UDP card) and
+            # replaced it with Combat.
+            self._refresh_current_page()
             
             log_print("[UI] Configuration loaded")
         except Exception as e:
@@ -8521,6 +12099,8 @@ class ViewerApp(ctk.CTk):
                 json.dump(data, f, indent=4, ensure_ascii=False)
             self._refresh_config_list()
             self.config_option.set(normalized_name)
+            self._active_config_name = str(normalized_name)
+            self._refresh_active_profile_label()
             self._log_config(f"Saved: {normalized_name}")
         except Exception as e:
             self._log_config(f"Save error: {e}")
@@ -8653,8 +12233,12 @@ class ViewerApp(ctk.CTk):
             self.config_option.set(current)
         else:
             self.config_option.set(display_names[0])
+        self._active_config_name = str(self.config_option.get() or "")
+        self._refresh_active_profile_label()
 
     def _on_config_selected(self, val):
+        self._active_config_name = self._normalize_config_display_name(val)
+        self._refresh_active_profile_label()
         self._log_config(f"Selected config: {self._normalize_config_display_name(val)}")
 
     def _log_config(self, msg):
@@ -8739,11 +12323,18 @@ class ViewerApp(ctk.CTk):
         self._refresh_capture_entry_card()
 
     def _process_source_updates(self):
-        if self.capture.mode == "NDI":
-            updates = self.capture.ndi.get_pending_source_updates()
-            for names in updates:
-                self._apply_sources_to_ui(names)
-        self.after(100, self._process_source_updates)
+        try:
+            if self.capture.mode == "NDI":
+                updates = self.capture.ndi.get_pending_source_updates()
+                for names in updates:
+                    self._apply_sources_to_ui(names)
+        except Exception as e:
+            try:
+                log_print(f"[UI] Source update error: {e}")
+            except Exception:
+                pass
+        finally:
+            self._schedule_periodic(100, self._process_source_updates)
 
     def _refresh_sources(self):
         if self.capture.mode == "NDI":
@@ -9235,17 +12826,19 @@ class ViewerApp(ctk.CTk):
     def _toggle_hardware_info_details(self):
         self._hardware_info_expanded = not bool(getattr(self, "_hardware_info_expanded", False))
 
-        if hasattr(self, "hardware_details_toggle") and self.hardware_details_toggle.winfo_exists():
-            self.hardware_details_toggle.configure(
+        toggle = getattr(self, "hardware_details_toggle", None)
+        if toggle is not None and toggle.winfo_exists():
+            toggle.configure(
                 text=f"{t('Hardware Info')} {'▼' if self._hardware_info_expanded else '▶'}"
             )
 
-        if hasattr(self, "hardware_details_label") and self.hardware_details_label.winfo_exists():
+        label = getattr(self, "hardware_details_label", None)
+        if label is not None and label.winfo_exists():
             if self._hardware_info_expanded:
-                self.hardware_details_label.pack(fill="x", pady=(2, 0))
+                label.pack(fill="x", pady=(2, 0))
                 self._update_hardware_status_ui()
             else:
-                self.hardware_details_label.pack_forget()
+                label.pack_forget()
 
     def _build_hardware_details_text(self, mode: str, connected: bool) -> str:
         auto_connect = bool(getattr(config, "auto_connect_mouse_api", False))
@@ -9453,45 +13046,52 @@ class ViewerApp(ctk.CTk):
 
         if (
             getattr(self, "_hardware_info_expanded", False)
-            and hasattr(self, "hardware_details_label")
+            and getattr(self, "hardware_details_label", None) is not None
             and self.hardware_details_label.winfo_exists()
         ):
             self.hardware_details_label.configure(text=self._build_hardware_details_text(mode, connected))
 
     def _update_connection_status_loop(self):
-        if not getattr(self, "_runtime_busy", False):
-            is_conn = self.capture.is_connected()
-            current_mode = self.capture.mode
-            hw_ok = False
-            try:
-                from src.utils import mouse as mouse_backend
-
-                hw_ok = bool(getattr(mouse_backend, "is_connected", False))
-            except Exception:
+        try:
+            if not getattr(self, "_runtime_busy", False):
+                is_conn = self.capture.is_connected()
+                current_mode = self.capture.mode
                 hw_ok = False
-            if hasattr(self, "pill_hardware") and self.pill_hardware.winfo_exists():
-                hw_name = getattr(config, "mouse_api", "Serial")
-                self.pill_hardware.update_value(f"{hw_name}", dot_color="#10B981" if hw_ok else "#F43F5E")
-            starved = self._udp_stream_starved()
-            if starved:
-                port = str(getattr(config, "udp_port", "")).strip()
-                self._set_status_indicator(f"Status: UDP bound, no data on port {port}", COLOR_DANGER)
-            elif getattr(self, "_runtime_active", False):
-                if hw_ok and is_conn:
-                    self._set_status_indicator(t("Status: Running ({mode})", mode=current_mode), COLOR_SUCCESS)
-                elif hw_ok:
-                    self._set_status_indicator(t("Status: Running (capture down)"), COLOR_WARNING)
+                try:
+                    from src.utils import mouse as mouse_backend
+
+                    hw_ok = bool(getattr(mouse_backend, "is_connected", False))
+                except Exception:
+                    hw_ok = False
+                if hasattr(self, "pill_hardware") and self.pill_hardware.winfo_exists():
+                    hw_name = getattr(config, "mouse_api", "Serial")
+                    self.pill_hardware.update_value(f"{hw_name}", dot_color=COLOR_SUCCESS if hw_ok else COLOR_DANGER)
+                starved = self._udp_stream_starved()
+                if starved:
+                    port = str(getattr(config, "udp_port", "")).strip()
+                    self._set_status_indicator(f"Status: UDP bound, no data on port {port}", COLOR_DANGER)
+                elif getattr(self, "_runtime_active", False):
+                    if hw_ok and is_conn:
+                        self._set_status_indicator(t("Status: Running ({mode})", mode=current_mode), COLOR_SUCCESS)
+                    elif hw_ok:
+                        self._set_status_indicator(t("Status: Running (capture down)"), COLOR_WARNING)
+                    elif is_conn:
+                        self._set_status_indicator(t("Status: Running (hardware down)"), COLOR_WARNING)
+                    else:
+                        self._set_status_indicator(t("Status: Runtime dropped"), COLOR_DANGER)
                 elif is_conn:
-                    self._set_status_indicator(t("Status: Running (hardware down)"), COLOR_WARNING)
+                    self._set_status_indicator(t("Status: Online ({mode})", mode=current_mode), COLOR_TEXT)
                 else:
-                    self._set_status_indicator(t("Status: Runtime dropped"), COLOR_DANGER)
-            elif is_conn:
-                self._set_status_indicator(t("Status: Online ({mode})", mode=current_mode), COLOR_TEXT)
-            else:
-                self._set_status_indicator(t("Status: Offline"), COLOR_TEXT_DIM)
-        self._update_hardware_status_ui()
-        self._refresh_capture_entry_card()
-        self.after(500, self._update_connection_status_loop)
+                    self._set_status_indicator(t("Status: Offline"), COLOR_TEXT_DIM)
+            self._update_hardware_status_ui()
+            self._refresh_capture_entry_card()
+        except Exception as e:
+            try:
+                log_print(f"[UI] Connection status loop error: {e}")
+            except Exception:
+                pass
+        finally:
+            self._schedule_periodic(500, self._update_connection_status_loop)
 
     def _update_performance_stats(self):
         """鏇存柊鎬ц兘绲辫▓淇℃伅锛團PS 鍜屽欢閬诧級"""
@@ -9521,9 +13121,9 @@ class ViewerApp(ctk.CTk):
                     total_delay = receive_delay + decode_delay + processing_delay
                     self.total_delay_label.configure(text=f"Delay: {total_delay:.1f} ms")
                     if hasattr(self, "pill_fps") and self.pill_fps.winfo_exists():
-                        self.pill_fps.update_value(f"{current_fps:.0f} FPS", dot_color="#10B981" if current_fps > 30 else "#F59E0B")
+                        self.pill_fps.update_value(f"{current_fps:.0f}", dot_color=COLOR_SUCCESS if current_fps > 30 else COLOR_WARNING)
                     if hasattr(self, "pill_delay") and self.pill_delay.winfo_exists():
-                        self.pill_delay.update_value(f"{total_delay:.1f} ms", dot_color="#06B6D4" if total_delay < 3.0 else "#F59E0B")
+                        self.pill_delay.update_value(f"{total_delay:.1f} ms", dot_color=COLOR_HUD_PING if total_delay < 3.0 else COLOR_WARNING)
             elif self.capture.mode == "Teleport" and self.capture.is_connected():
                 receiver = None
                 if getattr(self.capture, "teleport_manager", None):
@@ -9615,11 +13215,61 @@ class ViewerApp(ctk.CTk):
         "_update_performance_stats",
         "_update_mouse_input_debug",
         "_update_debug_log",
+        "_blink_footer_state",
+        "_update_telemetry_hud",
+        "_inline_hsv_worker",
         # One-shot timers the app arms itself; they fire late enough to outlive
         # a quick teardown in tests.
         "_ensure_taskbar_icon",
         "_maybe_prompt_clipboard_config_import",
+        "_verify_udp_traffic",
+        "_update_udp_fov_sliders_after_connect",
+        "_update_ndi_fov_sliders_after_connect",
     )
+
+    # CustomTkinter's app-level loops reschedule themselves on this Tk root
+    # forever (`...update`, `...check_dpi_scaling`). They are matched by suffix
+    # rather than substring: a plain "update" substring would also hit unrelated
+    # callbacks such as `_update_capture_ui`.
+    _PERIODIC_JOB_SUFFIXES = ("update", "check_dpi_scaling")
+
+    def _cancel_orphan_after_jobs(self):
+        """Cancel timers whose Python callback no longer exists.
+
+        Tk keeps an `after` id even after the object that armed it was destroyed
+        and its Tcl command deleted, so the timer later fires as ``invalid
+        command name "<id>..."``. A job whose callback command is still
+        registered is live and must be left alone (the app's periodic loops and
+        CTk's own trackers); anything else can only ever raise, so dropping it
+        is safe and stops the noise once a page is rebuilt.
+        """
+        try:
+            ids = self.tk.splitlist(self.tk.call("after", "info"))
+        except Exception:
+            return
+        for job_id in ids:
+            try:
+                script = self.tk.call("after", "info", job_id)
+            except Exception:
+                continue
+            if isinstance(script, (list, tuple)):
+                script = " ".join(str(part) for part in script)
+            tokens = str(script).split()
+            if not tokens:
+                continue
+            command = tokens[0].strip('"')
+            if not command:
+                continue
+            try:
+                alive = bool(self.tk.call("info", "commands", command))
+            except Exception:
+                continue
+            if alive:
+                continue
+            try:
+                self.after_cancel(job_id)
+            except Exception:
+                pass
 
     def destroy(self):
         """Cancel our own pending timers, then tear the window down.
@@ -9629,6 +13279,8 @@ class ViewerApp(ctk.CTk):
         which then makes the teardown raise "can't delete Tcl command".
         """
         self._closing = True
+        self._stop_inline_hsv_preview()
+        self._stop_obs_udp_telemetry()
         try:
             for job_id in self.tk.splitlist(self.tk.call("after", "info")):
                 try:
@@ -9637,17 +13289,23 @@ class ViewerApp(ctk.CTk):
                     continue
                 if isinstance(script, (list, tuple)):
                     script = " ".join(str(part) for part in script)
-                if any(name in str(script) for name in self._PERIODIC_JOBS):
+                script = str(script)
+                if any(name in script for name in self._PERIODIC_JOBS) or any(
+                    script.rstrip().endswith(suffix)
+                    for suffix in self._PERIODIC_JOB_SUFFIXES
+                ):
                     try:
                         self.after_cancel(job_id)
                     except Exception:
                         pass
         except Exception:
             pass
+        self._cancel_orphan_after_jobs()
         super().destroy()
 
     def _on_close(self):
         self._closing = True
+        self._stop_inline_hsv_preview()
         # 淇濆瓨鐣跺墠閰嶇疆
         try:
             config.save_to_file()
@@ -9730,14 +13388,19 @@ class ViewerApp(ctk.CTk):
     
     def _on_fovsize_changed(self, val): 
         config.fovsize = val
-        self.tracker.fovsize = val
+        if hasattr(self, "tracker"):
+            self.tracker.fovsize = val
         self._refresh_pid_preview_if_pid_mode(is_sec=False)
     
     def _on_aim_offsetX_changed(self, val):
         config.aim_offsetX = val
-    
+        if hasattr(self, "tracker"):
+            self.tracker.aim_offsetX = val
+
     def _on_aim_offsetY_changed(self, val):
         config.aim_offsetY = val
+        if hasattr(self, "tracker"):
+            self.tracker.aim_offsetY = val
     
     def _on_aim_type_selected(self, val):
         config.aim_type = val
@@ -9964,27 +13627,585 @@ class ViewerApp(ctk.CTk):
         self.tracker.model, self.tracker.class_names = reload_model()
         # 鏇存柊 Custom HSV 鍗€濉婄殑鍙鎬?
         self._update_custom_hsv_visibility()
-    
+        # The AI guard verifies this same colour: keep its swatch/hex honest no
+        # matter which card the colour was changed from.
+        self._update_enemy_outline_preview()
+
+    def _get_available_ai_models(self):
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+        files = []
+        if os.path.isdir(models_dir):
+            for f in os.listdir(models_dir):
+                if f.lower().endswith(".onnx"):
+                    files.append(f"models/{f}")
+        if not files:
+            files = ["models/valorant_detector.onnx"]
+        return files
+
+    def _get_ai_status_text(self):
+        try:
+            from src.utils.ai_detection import get_ai_detector
+            detector = get_ai_detector()
+            if detector and detector.is_ready():
+                return "Status: Ready (DirectML GPU Active)"
+        except Exception:
+            pass
+        curr_model = getattr(config, "ai_model_path", "models/valorant_detector.onnx")
+        if not os.path.isfile(curr_model):
+            return "Status: Put .onnx into models/ folder"
+        return "Status: Model Idle / Ready"
+
+    def _reload_ai_model(self):
+        try:
+            from src.utils.ai_detection import get_ai_detector
+            detector = get_ai_detector(force_reload=True)
+            if hasattr(self, "ai_status_label") and self.ai_status_label is not None:
+                self.ai_status_label.configure(text=self._get_ai_status_text())
+            self._refresh_teammate_status_label()
+            log_print(f"[UI] AI Model reloaded: ready={detector.is_ready() if detector else False}")
+        except Exception as e:
+            log_print(f"[UI] Error reloading AI model: {e}")
+
+    def _refresh_teammate_status_label(self):
+        """Repaint the model-capability label if the Vision card is present."""
+        label = getattr(self, "ai_teammate_status_label", None)
+        if label is None:
+            return
+        try:
+            if label.winfo_exists():
+                label.configure(text=self._get_teammate_capability_text())
+        except Exception:
+            pass
+
+    def _on_detection_engine_selected(self, val):
+        if "AI Detection" in str(val):
+            config.detection_engine = "ai_detection"
+            config.ai_detection_enabled = True
+        else:
+            config.detection_engine = "colorbot"
+            config.ai_detection_enabled = False
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        self._update_engine_cards_visibility()
+        log_print(f"[UI] Detection Engine set to: {config.detection_engine.upper()}")
+
+    def _on_engine_hotkey_selected(self, val):
+        key = "" if str(val).strip().lower() == "none" else str(val).strip()
+        config.ai_toggle_key = key
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        log_print(f"[UI] Engine toggle hotkey set to: {val}")
+
+    def _on_ai_model_selected(self, val):
+        config.ai_model_path = str(val).strip()
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        self._reload_ai_model()
+
+    def _on_ai_device_selected(self, val):
+        dev = "dml" if "DirectML" in str(val) else "cpu"
+        config.ai_device = dev
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        self._reload_ai_model()
+
+    # --- Vision: AI anti-teammate guard ------------------------------------
+
+    AI_ENEMY_FILTER_LABELS = {
+        "auto": "Auto (No Teammate Class)",
+        "on": "Always On",
+        "off": "Off",
+    }
+
+    def _ai_enemy_filter_display(self, value):
+        """Config value -> dropdown label (unknown values fall back to auto)."""
+        key = str(value or "auto").strip().lower()
+        return self.AI_ENEMY_FILTER_LABELS.get(key, self.AI_ENEMY_FILTER_LABELS["auto"])
+
+    def _ai_enemy_filter_value(self, display):
+        """Dropdown label -> config value (reverse of ``_ai_enemy_filter_display``)."""
+        text = str(display or "").strip().lower()
+        for value, label in self.AI_ENEMY_FILTER_LABELS.items():
+            if text == label.lower():
+                return value
+        if text in self.AI_ENEMY_FILTER_LABELS:
+            return text
+        return "auto"
+
+    def _get_teammate_capability_text(self):
+        """Describe the selected model's class list plus the guard's live effect.
+
+        The label lives in a ~330px-wide card column, so the guard effect is put
+        on its own line: one long wrapped line would grow the card by four or
+        five rows and push the Vision column split test around.
+        """
+        summary = "Class list unavailable (model not loaded)"
+        has_native_teammate = None
+        try:
+            from src.utils.ai_detection import get_ai_detector
+
+            detector = get_ai_detector()
+            summarise = getattr(detector, "teammate_capability_summary", None)
+            if callable(summarise):
+                text = summarise()
+                # A mock/None answer must not be printed as a class list.
+                if isinstance(text, str) and text.strip():
+                    summary = text
+            supports_fn = getattr(detector, "supports_teammate_class", None)
+            if callable(supports_fn):
+                res = supports_fn()
+                if isinstance(res, bool):
+                    has_native_teammate = res
+        except Exception:
+            pass
+
+        mode = str(getattr(config, "ai_enemy_outline_filter", "auto")).strip().lower()
+        if mode not in ("auto", "on", "off"):
+            mode = "auto"
+        band_error = self._enemy_outline_band_error()
+        if mode == "off":
+            effect = "Off: no outline verification"
+        elif band_error:
+            # An unusable band is the one state where the guard silently fails
+            # open even in "Always On": say so here, next to the colour selector,
+            # instead of letting the user believe team-mates are being filtered.
+            effect = (
+                f"Enemy Outline Color unusable ({band_error}): "
+                "guard verifies nothing"
+            )
+        elif mode == "on":
+            effect = "Always On: guard runs for every model"
+        elif summary.startswith("Class list unavailable"):
+            # No model, no class list: never guess "player-only" or "native" from
+            # the file name. The guard is the only safe statement left.
+            effect = "Enemy Outline Guard required (class list unknown)"
+        elif has_native_teammate:
+            effect = "Auto: guard idle for this model"
+        else:
+            effect = "Auto: guard runs for player-only models"
+        return f"{summary}\n{effect}"
+
+    def _enemy_outline_band_error(self):
+        """Empty string when the selected colour resolves, else a short reason.
+
+        ``enemy_outline_hsv_range`` refuses unknown colours and reversed custom
+        bands; both make the guard fail open, so the card must not claim the
+        guard is protecting the user in those states. The reason is kept short
+        because it lands in a wrapped label inside a narrow card column.
+        """
+        try:
+            from src.utils.detection import enemy_outline_hsv_range
+
+            enemy_outline_hsv_range()
+            return ""
+        except Exception as exc:
+            text = str(exc)
+            if "Reversed" in text:
+                return "MIN > MAX"
+            if "Unknown color" in text:
+                return "colour not recognised"
+            return "invalid band"
+
+    def _enemy_outline_color_hex(self):
+        """Hex of the colour the guard actually verifies, derived from its HSV band.
+
+        No hard-coded palette: the swatch must match the pixels the filter
+        accepts, otherwise it certifies the wrong colour in exactly the case
+        (custom HSV) where the user needs the feedback most.
+        """
+        try:
+            from src.utils.detection import enemy_outline_hsv_range
+
+            hsv_min, hsv_max = enemy_outline_hsv_range()
+            mid = np.array(
+                [
+                    (int(hsv_min[0]) + int(hsv_max[0])) // 2,
+                    (int(hsv_min[1]) + int(hsv_max[1])) // 2,
+                    (int(hsv_min[2]) + int(hsv_max[2])) // 2,
+                ],
+                dtype=np.uint8,
+            )
+            bgr = cv2.cvtColor(mid.reshape(1, 1, 3), cv2.COLOR_HSV2BGR)[0, 0]
+            return "#{:02X}{:02X}{:02X}".format(int(bgr[2]), int(bgr[1]), int(bgr[0]))
+        except Exception:
+            return "#808080"
+
+    def _update_enemy_outline_preview(self):
+        """Repaint the swatch/hex/option after the colour changed anywhere."""
+        current = str(getattr(config, "color", "purple")).strip().lower()
+        hexed = self._enemy_outline_color_hex()
+        swatch = getattr(self, "enemy_outline_swatch", None)
+        if swatch is not None:
+            try:
+                if swatch.winfo_exists():
+                    swatch.configure(fg_color=hexed)
+            except Exception:
+                pass
+        hex_label = getattr(self, "enemy_outline_hex_label", None)
+        if hex_label is not None:
+            try:
+                if hex_label.winfo_exists():
+                    hex_label.configure(text=hexed)
+            except Exception:
+                pass
+        option = getattr(self, "enemy_outline_color_option", None)
+        if option is not None:
+            try:
+                if option.winfo_exists() and str(option.get()) != current:
+                    option.set(current)
+            except Exception:
+                pass
+
+    def _on_ai_enemy_filter_selected(self, val):
+        config.ai_enemy_outline_filter = self._ai_enemy_filter_value(val)
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        # One painter for the capability label: the sync path uses the same
+        # helper, so the two can never describe the guard differently.
+        self._refresh_teammate_status_label()
+        log_print(f"[UI] Anti-teammate filter set to: {config.ai_enemy_outline_filter}")
+
+    def _on_enemy_outline_color_selected(self, val):
+        # Reuse the one colour path the app already has: it writes config.color,
+        # reloads the HSV model, refreshes the Custom HSV card visibility and
+        # repaints the swatch/hex via _update_enemy_outline_preview().
+        self._on_color_selected(str(val).strip().lower())
+
+    def _sync_engine_ui_from_config(self):
+        """Mirror ``config`` into the engine widgets; called after the F5 hotkey.
+
+        ``main.py`` schedules this with ``after(0, ...)`` after the in-game toggle
+        flips ``detection_engine``, so it must be safe from an idle callback: it
+        never writes config, never builds widgets and tolerates a page that is
+        not the Vision tab (where the engine widgets do not exist).
+
+        Returns ``True`` when at least one widget was updated.
+        """
+        engine = str(getattr(config, "detection_engine", "colorbot")).strip().lower()
+        if engine not in ("colorbot", "ai_detection"):
+            engine = "ai_detection" if bool(getattr(config, "ai_detection_enabled", False)) else "colorbot"
+        display = "AI Detection (DirectML ONNX)" if engine == "ai_detection" else "Colorbot (HSV)"
+        synced = False
+
+        def _alive(widget):
+            try:
+                return widget is not None and bool(widget.winfo_exists())
+            except Exception:
+                return False
+
+        option = getattr(self, "engine_option", None)
+        if _alive(option):
+            try:
+                if str(option.get()) != display:
+                    option.set(display)
+                synced = True
+            except Exception:
+                pass
+
+        model = str(getattr(config, "ai_model_path", "") or "")
+        model_option = getattr(self, "ai_model_option", None)
+        if _alive(model_option) and model:
+            try:
+                values = self._get_available_ai_models()
+                model_option.configure(values=values)
+                if model not in values:
+                    values = list(values) + [model]
+                    model_option.configure(values=values)
+                if str(model_option.get()) != model:
+                    model_option.set(model)
+                synced = True
+            except Exception:
+                pass
+
+        device = "DirectML (GPU)" if str(getattr(config, "ai_device", "dml")).lower() == "dml" else "CPU"
+        device_option = getattr(self, "ai_device_option", None)
+        if _alive(device_option):
+            try:
+                if str(device_option.get()) != device:
+                    device_option.set(device)
+                synced = True
+            except Exception:
+                pass
+
+        status = getattr(self, "ai_status_label", None)
+        if _alive(status):
+            try:
+                status.configure(text=self._get_ai_status_text())
+                synced = True
+            except Exception:
+                pass
+
+        # Anti-teammate guard: dropdown label and model-capability text are pure
+        # displays here. A sync must never write config, so a hotkey toggle of
+        # the engine cannot silently change the guard mode.
+        filter_option = getattr(self, "ai_enemy_filter_option", None)
+        if _alive(filter_option):
+            try:
+                wanted = self._ai_enemy_filter_display(
+                    getattr(config, "ai_enemy_outline_filter", "auto")
+                )
+                if str(filter_option.get()) != wanted:
+                    filter_option.set(wanted)
+                synced = True
+            except Exception:
+                pass
+
+        teammate_label = getattr(self, "ai_teammate_status_label", None)
+        if _alive(teammate_label):
+            # Same painter the dropdown handler uses; it only reads config.
+            self._refresh_teammate_status_label()
+            synced = True
+
+        outline_option = getattr(self, "enemy_outline_color_option", None)
+        outline_swatch = getattr(self, "enemy_outline_swatch", None)
+        outline_label = getattr(self, "enemy_outline_hex_label", None)
+        if _alive(outline_option) or _alive(outline_swatch) or _alive(outline_label):
+            # Same painter the colour handler uses: option, swatch and hex are
+            # derived from the live HSV band, so a sync cannot drift from a
+            # user-driven colour change. It reads config only; it never writes.
+            self._update_enemy_outline_preview()
+            synced = True
+
+        var_stream = getattr(self, "var_ai_udp_stream", None)
+        if var_stream is not None:
+            try:
+                # The switch mirrors the last explicit request; a failed Apply or
+                # a switch-off writes the same key back to False, so the two can
+                # never disagree.
+                wanted = bool(getattr(config, "ai_udp_stream_enabled", False))
+                if bool(var_stream.get()) != wanted:
+                    var_stream.set(wanted)
+                synced = True
+            except Exception:
+                pass
+        var_bypass = getattr(self, "var_ai_udp_bypass", None)
+        if var_bypass is not None:
+            try:
+                wanted = bool(getattr(config, "ai_udp_bypass_tiny_crop", True))
+                if bool(var_bypass.get()) != wanted:
+                    var_bypass.set(wanted)
+                synced = True
+            except Exception:
+                pass
+
+        for attr, value in (
+            ("obs_udp_ip_entry", str(getattr(config, "udp_ip", "0.0.0.0"))),
+            ("obs_udp_port_entry", str(getattr(config, "udp_port", "3110"))),
+        ):
+            widget = getattr(self, attr, None)
+            if not _alive(widget):
+                continue
+            try:
+                if str(widget.get()) != value:
+                    widget.delete(0, "end")
+                    widget.insert(0, value)
+                synced = True
+            except Exception:
+                pass
+
+        crop_label = getattr(self, "obs_udp_crop_label", None)
+        if _alive(crop_label):
+            try:
+                crop_label.configure(text=self._obs_udp_crop_text())
+                synced = True
+            except Exception:
+                pass
+        plugin_label = getattr(self, "obs_udp_plugin_label", None)
+        if _alive(plugin_label):
+            try:
+                plugin_label.configure(text=self._obs_udp_plugin_text())
+                synced = True
+            except Exception:
+                pass
+
+        try:
+            self._update_engine_cards_visibility()
+        except Exception:
+            pass
+        # Repaint the live telemetry once so the card never keeps the values of
+        # the state it had before the hotkey toggle. When the card is mapped the
+        # tick also reschedules itself; when the page is still laying out, the
+        # loop is simply re-armed and its own visibility check does the rest.
+        telemetry_label = getattr(self, "obs_udp_telemetry_label", None)
+        card_obs = getattr(self, "card_obs_udp_stream", None)
+        card_packed = False
+        card_mapped = False
+        if card_obs is not None:
+            try:
+                card_packed = str(card_obs.winfo_manager()) == "pack"
+                card_mapped = bool(card_obs.winfo_ismapped())
+            except Exception:
+                card_packed = card_mapped = False
+        if _alive(telemetry_label) and card_packed:
+            try:
+                self._stop_obs_udp_telemetry()
+                if card_mapped:
+                    self._refresh_obs_udp_telemetry()
+                else:
+                    self._start_obs_udp_telemetry()
+                synced = True
+            except Exception:
+                pass
+        self._refresh_footer_udp()
+        return synced
+
+    def _update_engine_cards_visibility(self):
+        is_ai = (getattr(config, "detection_engine", "colorbot") == "ai_detection")
+        
+        if hasattr(self, "card_ai_settings") and self.card_ai_settings is not None:
+            try:
+                if is_ai:
+                    if not self.card_ai_settings.winfo_ismapped():
+                        self.card_ai_settings.pack(fill="x", pady=(0, 6))
+                else:
+                    if self.card_ai_settings.winfo_ismapped():
+                        self.card_ai_settings.pack_forget()
+            except Exception:
+                pass
+
+        if hasattr(self, "card_color_preset") and self.card_color_preset is not None:
+            try:
+                if not is_ai:
+                    if not self.card_color_preset.winfo_ismapped():
+                        self.card_color_preset.pack(fill="x", pady=(0, 6))
+                else:
+                    if self.card_color_preset.winfo_ismapped():
+                        self.card_color_preset.pack_forget()
+            except Exception:
+                pass
+
+        if hasattr(self, "card_contour_filters") and self.card_contour_filters is not None:
+            try:
+                if not is_ai:
+                    if not self.card_contour_filters.winfo_ismapped():
+                        self.card_contour_filters.pack(fill="x", pady=(0, 6))
+                else:
+                    if self.card_contour_filters.winfo_ismapped():
+                        self.card_contour_filters.pack_forget()
+            except Exception:
+                pass
+
+        # The OBS UDP Stream card is AI-only. `winfo_manager()` (not
+        # `winfo_ismapped()`) is the right "is packed" test here: on a freshly
+        # built page nothing is mapped yet, and a pack() on an already-packed
+        # widget would silently re-append it at the bottom of the column.
+        # `_order_vision_cards()` fixes that ordering right after this block.
+        card_obs = getattr(self, "card_obs_udp_stream", None)
+        if card_obs is not None:
+            try:
+                if is_ai:
+                    if str(card_obs.winfo_manager()) != "pack":
+                        card_obs.pack(fill="x", pady=(0, 6))
+                elif str(card_obs.winfo_manager()) == "pack":
+                    card_obs.pack_forget()
+            except Exception:
+                pass
+
+        # The telemetry loop stops itself as soon as the card is not visible, so
+        # switching to AI has to (re)arm it here rather than in the tab builder
+        # only. Guarded by `is not None` so an in-flight job is never reset.
+        if is_ai and getattr(self, "_obs_udp_telemetry_job", None) is None:
+            try:
+                if str(getattr(self, "_active_tab_name", "")) == "Vision":
+                    self._start_obs_udp_telemetry()
+            except Exception:
+                pass
+
+        # The right column follows exactly one rule (the colour rule), whatever
+        # the engine is: `_update_custom_hsv_visibility` opens it and shows the
+        # Custom HSV card when the user selected the custom colour, and collapses
+        # it when that card hides. The AI branch used to force both the hide and
+        # the collapse, which contradicted the layout contract
+        # (tests/test_redesign_layout.py:189-211) and left the Vision page
+        # lopsided under the shipped `detection_engine: "ai_detection"` +
+        # `color: "custom"` config.
+        self._update_custom_hsv_visibility()
+        self._order_vision_cards()
+
+    def _order_vision_cards(self):
+        """Re-assert the Vision card order after an engine switch.
+
+        ``pack()`` on a widget that was just made visible appends it *after*
+        every sibling, so switching engines on an already-mapped page used to
+        drop the AI card (or the colour cards) at the bottom of the column. This
+        only re-orders packed cards; it never packs or unpacks anything, so the
+        show/hide rules above stay the single source of truth.
+        """
+        order = (
+            "card_detection_engine",
+            "card_ai_settings",
+            "card_obs_udp_stream",
+            "card_color_preset",
+            "card_contour_filters",
+        )
+        packed = []
+        for attr in order:
+            card = getattr(self, attr, None)
+            if card is None:
+                continue
+            try:
+                if str(card.winfo_manager()) == "pack":
+                    packed.append(card)
+            except Exception:
+                continue
+        for index in range(1, len(packed)):
+            card = packed[index]
+            previous = packed[index - 1]
+            if getattr(previous, "master", None) is not card.master:
+                continue
+            try:
+                slaves = card.master.pack_slaves()
+                if slaves.index(card) == slaves.index(previous) + 1:
+                    continue  # already in order: no relayout needed
+                card.pack(fill="x", pady=(0, 6), after=previous)
+            except ValueError:
+                # One of the two is not in this master's pack list after all.
+                continue
+            except Exception:
+                pass
+
     def _update_custom_hsv_visibility(self):
-        """Show or hide Custom HSV section based on selected color."""
+        """Show or hide the Custom HSV calibration card based on selected color.
+
+        The rule is engine-independent on purpose: the calibration card and the
+        width of the column it owns follow the selected colour only. Letting the
+        engine collapse the column as well made the Vision split depend on the
+        active engine and broke the layout contract for the shipped
+        ``detection_engine: "ai_detection"`` + ``color: "custom"`` combination.
+        """
         current_color = getattr(config, "color", "yellow")
         is_custom = current_color == "custom"
 
-        if hasattr(self, 'custom_hsv_container'):
-            if is_custom:
-                if not self.custom_hsv_container.winfo_ismapped():
-                    self.custom_hsv_container.pack(fill="x", pady=(5, 0))
-            else:
-                if self.custom_hsv_container.winfo_ismapped():
-                    self.custom_hsv_container.pack_forget()
+        container = getattr(self, "custom_hsv_container", None)
+        if container is not None:
+            try:
+                if is_custom:
+                    if not container.winfo_ismapped():
+                        container.pack(fill="x", pady=(0, 6))
+                else:
+                    if container.winfo_ismapped():
+                        container.pack_forget()
+            except Exception:
+                pass
         # When the HSV card is hidden the right column must give its width back,
         # otherwise half the Vision page stays empty.
         self._set_second_column_active(getattr(self, "_vision_cols", None), is_custom)
 
     def _on_custom_hsv_changed(self, key, val):
-        """Custom HSV 鍊兼敼璁婃檪鐨勫洖瑾?"""
+        """Custom HSV value changed: write config, repaint the HUD readout."""
         setattr(config, key, int(val))
-        # 濡傛灉鐣跺墠閬告搰鐨勬槸 custom锛屽鏅傞噸鏂拌級鍏ユā鍨?
+        self._update_hsv_hud_readout()
+        # 濡傛灉鐣跺墠閬告搰鐨勬槸 custom锛屽鏅傞噸鏂拌級鍏ユā鍨?
         if getattr(config, "color", "yellow") == "custom":
             from src.utils.detection import reload_model
             if hasattr(self, 'tracker'):
@@ -10065,6 +14286,7 @@ class ViewerApp(ctk.CTk):
         for key, default in keys:
             val = int(getattr(config, key, default))
             self._set_slider_value(key, val)
+        self._update_hsv_hud_readout()
 
     def _on_detection_merge_distance_changed(self, val):
         """Detection Merge Distance 改變時的回調"""
@@ -10103,19 +14325,23 @@ class ViewerApp(ctk.CTk):
     # Sec Aimbot Callbacks
     def _on_normal_x_speed_sec_changed(self, val): 
         config.normal_x_speed_sec = val
-        self.tracker.normal_x_speed_sec = val
-    
+        if hasattr(self, "tracker"):
+            self.tracker.normal_x_speed_sec = val
+
     def _on_normal_y_speed_sec_changed(self, val): 
         config.normal_y_speed_sec = val
-        self.tracker.normal_y_speed_sec = val
+        if hasattr(self, "tracker"):
+            self.tracker.normal_y_speed_sec = val
     
     def _on_config_normal_smooth_sec_changed(self, val): 
         config.normalsmooth_sec = val
-        self.tracker.normalsmooth_sec = val
-    
+        if hasattr(self, "tracker"):
+            self.tracker.normalsmooth_sec = val
+
     def _on_config_normal_smoothfov_sec_changed(self, val): 
         config.normalsmoothfov_sec = val
-        self.tracker.normalsmoothfov_sec = val
+        if hasattr(self, "tracker"):
+            self.tracker.normalsmoothfov_sec = val
 
     def _on_flick_strength_x_sec_changed(self, val):
         config.flick_strength_x_sec = float(val)
@@ -10125,14 +14351,19 @@ class ViewerApp(ctk.CTk):
 
     def _on_fovsize_sec_changed(self, val): 
         config.fovsize_sec = val
-        self.tracker.fovsize_sec = val
+        if hasattr(self, "tracker"):
+            self.tracker.fovsize_sec = val
         self._refresh_pid_preview_if_pid_mode(is_sec=True)
     
     def _on_aim_offsetX_sec_changed(self, val):
         config.aim_offsetX_sec = val
-    
+        if hasattr(self, "tracker"):
+            self.tracker.aim_offsetX_sec = val
+
     def _on_aim_offsetY_sec_changed(self, val):
         config.aim_offsetY_sec = val
+        if hasattr(self, "tracker"):
+            self.tracker.aim_offsetY_sec = val
     
     def _on_aim_type_sec_selected(self, val):
         config.aim_type_sec = val
@@ -10250,6 +14481,15 @@ class ViewerApp(ctk.CTk):
     
     def _on_wm_distance_threshold_changed(self, val):
         config.wm_distance_threshold = val
+
+    def _on_wm_frame_gain_changed(self, val):
+        config.wm_frame_gain = max(0.05, min(1.0, float(val)))
+
+    def _on_wm_frame_max_step_px_changed(self, val):
+        config.wm_frame_max_step_px = max(0.5, min(30.0, float(val)))
+
+    def _on_wm_settle_radius_px_changed(self, val):
+        config.wm_settle_radius_px = max(0.0, min(6.0, float(val)))
     
     # === WindMouse Callbacks (Sec) ===
     def _on_wm_gravity_sec_changed(self, val):
@@ -10500,24 +14740,21 @@ class ViewerApp(ctk.CTk):
     
     # Mouse Input Debug Callbacks
     def _on_debug_mouse_input_changed(self):
-        """婊戦紶杓稿叆瑾胯│闁嬮棞鏀硅畩"""
-        enabled = self.debug_mouse_input_var.get()
+        """Live Debug switch: sample the real mouse only while it is on."""
+        enabled = bool(self.debug_mouse_input_var.get())
         if enabled:
             self.mouse_input_monitor.enable()
-            # Show debug area
-            if hasattr(self, 'debug_mouse_frame'):
-                try:
-                    self.debug_mouse_frame.pack(fill="x", pady=10)
-                except Exception:
-                    pass
         else:
             self.mouse_input_monitor.disable()
-            # Hide debug area
-            if hasattr(self, 'debug_mouse_frame'):
-                try:
-                    self.debug_mouse_frame.pack_forget()
-                except Exception:
-                    pass
+        # The button list stays visible in the HUD sub-card; only the sampling stops,
+        # so the counts keep their last real value instead of the panel vanishing.
+        frame = getattr(self, "debug_mouse_frame", None)
+        if frame is not None:
+            try:
+                if frame.winfo_exists() and not frame.winfo_ismapped():
+                    frame.pack(fill="x", padx=4, pady=(0, 4))
+            except Exception:
+                pass
     
     def _update_mouse_input_debug(self):
         """瀹氭湡鏇存柊婊戦紶杓稿叆瑾胯│椤ず"""
@@ -10594,12 +14831,13 @@ class ViewerApp(ctk.CTk):
                     if hasattr(self, 'debug_log_count_label'):
                         try:
                             self.debug_log_count_label.configure(
-                                text=f"Log Count: {get_log_count()}"
+                                text=f"{t_hud('HUD_SYSTEM_LOGS')} ({get_log_count()})"
                             )
                         except Exception:
                             pass
 
                     import datetime
+                    levels = []
                     parts = []
                     for log in logs:
                         timestamp = datetime.datetime.fromtimestamp(
@@ -10607,6 +14845,7 @@ class ViewerApp(ctk.CTk):
                         ).strftime("%H:%M:%S.%f")[:-3]
                         log_type = log["type"]
                         source = log.get("source", "Unknown")
+                        level = str(log.get("level", "") or "").strip().upper()
 
                         if log_type == "MOVE":
                             dx = log.get("dx", 0)
@@ -10615,17 +14854,26 @@ class ViewerApp(ctk.CTk):
                                 f"[{timestamp}] {log_type:8s} [{source:15s}] "
                                 f"dx={dx:8.2f}, dy={dy:8.2f}\n"
                             )
+                            levels.append("INFO")
                         else:
                             message = str(log.get("message", ""))
                             if message:
                                 parts.append(f"[{timestamp}] {log_type:8s} [{source:15s}] {message}\n")
                             else:
                                 parts.append(f"[{timestamp}] {log_type:8s} [{source:15s}]\n")
+                            if level in ("ERROR", "WARN", "WARNING", "INFO", "DEBUG"):
+                                levels.append("WARN" if level == "WARNING" else level)
+                            elif log_type in ("ERROR", "WARN", "WARNING", "INFO"):
+                                levels.append("WARN" if log_type == "WARNING" else log_type)
+                            else:
+                                levels.append("INFO")
                     log_text = "".join(parts)
 
                     try:
                         box.delete("1.0", "end")
-                        box.insert("1.0", log_text)
+                        for index, line in enumerate(parts):
+                            tag = levels[index] if index < len(levels) else "INFO"
+                            box.insert("end", line, tag)
                         box.see("end")
                     except Exception:
                         # Widget might be destroyed
@@ -10641,7 +14889,7 @@ class ViewerApp(ctk.CTk):
         self.after(100, self._update_debug_log)
     
     def _clear_debug_log(self):
-        """娓呯┖ Debug 鏃ヨ獙"""
+        """Clear the debug log buffer and the visible HUD textbox."""
         clear_logs()
         if hasattr(self, 'debug_log_textbox'):
             try:
@@ -10650,9 +14898,10 @@ class ViewerApp(ctk.CTk):
                 pass
         if hasattr(self, 'debug_log_count_label'):
             try:
-                self.debug_log_count_label.configure(text="Log Count: 0")
+                self.debug_log_count_label.configure(text=f"{t_hud('HUD_SYSTEM_LOGS')} (0)")
             except Exception:
                 pass
+        self._debug_log_version_seen = get_log_version()
     
     def _on_aimbot_button_sec_selected(self, val):
         for k, name in BUTTONS.items():

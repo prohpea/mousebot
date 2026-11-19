@@ -29,6 +29,18 @@ FRAGMENT_MAX_COUNT = 1000
 FRAGMENT_TIMEOUT_MS_DEFAULT = 8.0
 RCVBUF_MB_DEFAULT = 8
 
+# A partial JPEG cannot survive this long: MJPEG frames are sent back to back,
+# so a start marker older than a second belongs to a datagram lost while the
+# sender kept going. Left in place, its timestamp would be glued to the next
+# complete frame and every latency/measurement downstream would be wrong.
+MJPEG_BUFFER_MAX_AGE_S = 1.0
+
+# Socket rebind backoff after a hard socket error while the stream is supposed
+# to be live (Windows WSAECONNRESET on a socket that was never connected is the
+# everyday case). Capped so a port squatted by another instance is retried
+# forever without burning a core.
+SOCKET_REBIND_DELAYS = (0.1, 0.2, 0.5, 1.0)
+
 # The config object is resolved once: the fragment path runs per datagram, and a
 # fresh ``import`` on every packet is measurable at 100+ fragments per frame.
 _CONFIG = None
@@ -541,32 +553,114 @@ class OBS_UDP_Receiver:
         self.is_receiving = True
         self._maybe_raise_thread_priority()
         logger.info("Started UDP receive loop")
-        
+
+        # Transient errors are not evidence of a broken socket: Windows reports
+        # WSAECONNRESET (ConnectionResetError) for a datagram the peer's ICMP
+        # port-unreachable raced, and a non-blocking socket raises
+        # BlockingIOError on an empty queue. Treating those as fatal killed the
+        # receiver while ``is_connected`` stayed True, so the UI looked healthy
+        # on a permanently black frame.
+        transient_errors = (ConnectionResetError, BlockingIOError, InterruptedError)
+        rebind_attempt = 0
+
         while not self.stop_event.is_set() and self.is_connected:
+            if self.socket is None:
+                # A previous rebind failed (port still held): keep retrying with
+                # backoff instead of dereferencing a dead socket.
+                delay = SOCKET_REBIND_DELAYS[
+                    min(rebind_attempt, len(SOCKET_REBIND_DELAYS) - 1)
+                ]
+                rebind_attempt += 1
+                self._recover_socket(delay)
+                continue
+
             try:
                 # Receive UDP packet
                 data, addr = self.socket.recvfrom(65536)  # Max UDP packet size
                 receive_time = time.perf_counter()
                 self.packet_count += 1
                 self.last_packet_time = receive_time
-                
+
                 # Process MJPEG data
                 self._process_mjpeg_data(data, receive_time)
-                
+                rebind_attempt = 0
+
             except socket.timeout:
                 continue
+            except transient_errors as e:
+                logger.debug(f"Transient UDP receive error (ignored): {e}")
+                continue
             except OSError as e:
-                if self.is_connected:
-                    logger.error(f"Socket error in receive loop: {e}")
-                break
+                if not self.is_connected or self.stop_event.is_set():
+                    break
+                logger.error(f"Socket error in receive loop: {e}; rebinding socket")
+                delay = SOCKET_REBIND_DELAYS[
+                    min(rebind_attempt, len(SOCKET_REBIND_DELAYS) - 1)
+                ]
+                rebind_attempt += 1
+                self._recover_socket(delay)
             except Exception as e:
-                if self.is_connected:
-                    logger.error(f"Error in receive loop: {e}", exc_info=True)
-                break
-        
+                if not self.is_connected or self.stop_event.is_set():
+                    break
+                logger.error(f"Error in receive loop: {e}", exc_info=True)
+                time.sleep(0.01)
+
         self.is_receiving = False
         logger.info("UDP receive loop ended")
-    
+
+    def _recover_socket(self, delay: float = 0.0):
+        """Close, recreate, reconfigure and rebind the UDP socket.
+
+        A hard ``OSError`` on the receive socket leaves it unusable, but the
+        receiver is still logically connected. Reporting it as connected while
+        the socket is dead is the worst of both worlds, so the socket is rebuilt
+        in place and the partial stream state discarded. A failed rebind (port
+        held by another instance) is retried with backoff instead of flipping
+        ``is_connected`` to False: the UI then shows "bound, no data" thanks to
+        ``_udp_stream_starved()`` rather than pretending to be healthy.
+        """
+        if delay > 0:
+            deadline = time.perf_counter() + delay
+            while time.perf_counter() < deadline:
+                if self.stop_event.is_set():
+                    return
+                time.sleep(min(0.05, max(0.0, deadline - time.perf_counter())))
+
+        old_socket = self.socket
+        self.socket = None
+        try:
+            if old_socket is not None:
+                old_socket.close()
+        except Exception:
+            pass
+
+        if self.stop_event.is_set() or not self.is_connected:
+            return
+
+        bind_addr = self._bind_addr or (self.bind_ip or "0.0.0.0", self.port)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                self._configure_socket(sock)
+                sock.settimeout(1.0)
+                sock.bind(bind_addr)
+            except Exception:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                raise
+            self.socket = sock
+            self._bind_addr = bind_addr
+            self._reset_stream_state()
+            logger.info(f"UDP socket rebound on {bind_addr[0]}:{bind_addr[1]}")
+        except Exception as e:
+            # Keep is_connected True: the stream is meant to be live, and the
+            # caller retries with a longer backoff on the next OSError/timeout
+            # iteration. Lost packets are already visible as starvation.
+            self.socket = None
+            logger.error(f"UDP socket rebind failed on {bind_addr}: {e}")
+
     def _decode_worker_loop(self):
         """Ultra-low-latency dedicated frame decoder loop (Single-slot, Zero backlog)"""
         self._maybe_raise_thread_priority()
@@ -697,6 +791,17 @@ class OBS_UDP_Receiver:
                 return
 
             with self.buffer_lock:
+                # Drop a half-received JPEG that can no longer complete: its
+                # start-marker timestamp would otherwise be attached to the next
+                # complete frame, and the latency numbers derived from it would
+                # describe a frame that never existed.
+                if (
+                    self._frame_start_time is not None
+                    and (receive_time - self._frame_start_time) > MJPEG_BUFFER_MAX_AGE_S
+                ):
+                    self.mjpeg_buffer.clear()
+                    self._frame_start_time = None
+
                 self.mjpeg_buffer.extend(data)
                 
                 # Record frame start timestamp when start marker arrives

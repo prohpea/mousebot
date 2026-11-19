@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -322,6 +323,74 @@ class TestFrameMetadata(unittest.TestCase):
         frame, seq = self.receiver.wait_for_new_frame(None, 0.0)
         self.assertIsNone(frame)
         self.assertEqual(seq, 0)
+
+
+class TestTelemetrySnapshotFromLiveReceiver(unittest.TestCase):
+    """The snapshot must read the real receiver API, not a parallel shim."""
+
+    def _service_with(self, receiver):
+        service = MagicMock()
+        service.mode = "UDP"
+        service.is_connected.return_value = True
+        service.udp_manager.get_receiver.return_value = receiver
+        service._ip = "0.0.0.0"
+        service._port = PORT_BASE + 9
+        return service
+
+    def test_telemetry_snapshot_from_live_receiver(self):
+        from src.utils.obs_udp_plugin import build_udp_telemetry_snapshot
+
+        receiver = OBS_UDP_Receiver(ip="127.0.0.1", port=PORT_BASE + 9, target_fps=144)
+        try:
+            # Publish a frame without ever opening a socket.
+            frame = np.zeros((320, 320, 3), np.uint8)
+            receiver._update_frame(frame, t_published=200.004, t_frame_start=200.000)
+            receiver.current_fps = 143.0
+            receiver.decoding_fps = 142.0
+
+            with _ConfigSandbox(
+                detection_engine="ai_detection",
+                ai_model_path="models/my_yolo_model.onnx",
+                udp_fov_enabled=True,
+                udp_fov=108,
+                ai_udp_bypass_tiny_crop=True,
+            ):
+                snapshot = build_udp_telemetry_snapshot(
+                    self._service_with(receiver),
+                    plugin_status={"installed": True, "missing": []},
+                )
+        finally:
+            receiver.disconnect()
+
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["resolution"], "320x320")
+        self.assertEqual((snapshot["width"], snapshot["height"]), (320, 320))
+        self.assertAlmostEqual(snapshot["fps"], 143.0, places=1)
+        self.assertAlmostEqual(snapshot["decode_fps"], 142.0, places=1)
+        # 4 ms publish latency comes from the receiver's own metadata.
+        self.assertAlmostEqual(snapshot["receive_ms"], 4.0, places=2)
+        self.assertEqual(snapshot["fragment_drops"], 0)
+        codes = {w["code"] for w in snapshot["warnings"]}
+        self.assertIn("tiny_crop_bypassed", codes)
+
+    def test_telemetry_flags_fragment_drops(self):
+        from src.utils.obs_udp_plugin import build_udp_telemetry_snapshot
+
+        receiver = OBS_UDP_Receiver(ip="127.0.0.1", port=PORT_BASE + 10, target_fps=144)
+        try:
+            receiver._update_frame(np.zeros((320, 320, 3), np.uint8))
+            receiver.fragment_drops = 7
+            with _ConfigSandbox(detection_engine="ai_detection", udp_fov_enabled=False):
+                snapshot = build_udp_telemetry_snapshot(
+                    self._service_with(receiver),
+                    plugin_status={"installed": True, "missing": []},
+                )
+        finally:
+            receiver.disconnect()
+
+        self.assertEqual(snapshot["fragment_drops"], 7)
+        codes = {w["code"] for w in snapshot["warnings"]}
+        self.assertIn("fragment_drops", codes)
 
 
 if __name__ == "__main__":

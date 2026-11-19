@@ -8,7 +8,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src import ui_components
-from src.ui import THEME_PRESETS
+from src import ui as ui_module
+from src.ui import THEME_PRESETS, _apply_theme_preset
 from src.utils.config import config
 
 
@@ -21,6 +22,16 @@ THEME_TOKEN_KEYS = {
     "COLOR_BADGE_BG",
 }
 EXPECTED_THEME_KEY_COUNT = 23
+
+# Every COLOR_* a preset ships; these must reach the widget palette.
+COLOR_TOKEN_KEYS = tuple(
+    key for key in THEME_PRESETS["nord"] if key.startswith("COLOR_")
+)
+# Shell chrome projected from the theme (202 call sites in src/ui.py).
+HUD_CHROME_KEYS = (
+    "HEADER", "NAV", "MAIN", "CARD", "SUB", "INPUT",
+    "BORDER", "BADGE", "TEXT", "DIM", "MUTED",
+)
 
 
 def _relative_luminance(hex_color):
@@ -114,6 +125,78 @@ class TestThemePresets(unittest.TestCase):
                 1.5,
                 f"Theme '{theme_name}' card/bg contrast is {ratio:.2f}:1, below 1.5:1",
             )
+
+    def test_theme_selection_reaches_widgets(self):
+        """Every preset must survive the accent/variant overlays and reach widgets.
+
+        Regression: the Dark/Midnight overlays used to be fixed navy constants, so
+        15 of 20 COLOR_* tokens and all 11 COLOR_HUD_* chrome colors were identical
+        across all seven themes -- picking a theme changed almost nothing.
+        """
+        saved = dict(ui_components._TOKENS)
+        self.addCleanup(lambda: ui_components._TOKENS.update(saved))
+
+        def snapshot(theme_name, accent, variant):
+            _apply_theme_preset(theme_name, accent=accent, variant=variant)
+            return (
+                {k: ui_components.get_token(k) for k in COLOR_TOKEN_KEYS},
+                {k: getattr(ui_module, f"COLOR_HUD_{k}") for k in HUD_CHROME_KEYS},
+            )
+
+        for variant in ("dark", "midnight"):
+            widgets = {}
+            chrome = {}
+            for theme_name in THEME_PRESETS:
+                widgets[theme_name], chrome[theme_name] = snapshot(
+                    theme_name, "emerald", variant)
+            varying = [
+                k for k in COLOR_TOKEN_KEYS
+                if len({widgets[n][k] for n in THEME_PRESETS}) > 1
+            ]
+            self.assertGreaterEqual(
+                len(varying), 10,
+                f"[{variant}] only {len(varying)}/{len(COLOR_TOKEN_KEYS)} COLOR_* "
+                "tokens vary between themes; a theme change would repaint almost nothing",
+            )
+            varying_hud = [
+                k for k in HUD_CHROME_KEYS
+                if len({chrome[n][k] for n in THEME_PRESETS}) > 1
+            ]
+            self.assertEqual(
+                len(varying_hud), len(HUD_CHROME_KEYS),
+                f"[{variant}] HUD chrome pinned for {sorted(set(HUD_CHROME_KEYS) - set(varying_hud))}",
+            )
+
+    def test_variants_keep_contrast(self):
+        """Dark and Midnight must both stay legible on every preset."""
+        saved = dict(ui_components._TOKENS)
+        self.addCleanup(lambda: ui_components._TOKENS.update(saved))
+        for variant in ("dark", "midnight"):
+            for theme_name in THEME_PRESETS:
+                _apply_theme_preset(theme_name, accent="emerald", variant=variant)
+                card = ui_components.get_token("COLOR_CARD")
+                bg = ui_components.get_token("COLOR_BG")
+                text = ui_components.get_token("COLOR_TEXT")
+                ratio = _contrast_ratio(card, bg)
+                self.assertGreaterEqual(
+                    ratio, 1.5,
+                    f"[{variant}] '{theme_name}' card/bg is {ratio:.2f}:1, below 1.5:1",
+                )
+                self.assertGreaterEqual(
+                    _contrast_ratio(text, card), 7.0,
+                    f"[{variant}] '{theme_name}' text/card is below 7:1",
+                )
+
+    def test_presets_remain_immutable(self):
+        """Applying accents/variants must never mutate the shipped presets."""
+        saved = dict(ui_components._TOKENS)
+        self.addCleanup(lambda: ui_components._TOKENS.update(saved))
+        before = {n: dict(t) for n, t in THEME_PRESETS.items()}
+        for variant in ("dark", "midnight"):
+            for accent in ("emerald", "cyan", "amber", "crimson"):
+                for theme_name in THEME_PRESETS:
+                    _apply_theme_preset(theme_name, accent=accent, variant=variant)
+        self.assertEqual(before, {n: dict(t) for n, t in THEME_PRESETS.items()})
 
     def test_customtkinter_json_themes(self):
         themes_dir = os.path.join(PROJECT_ROOT, "themes")

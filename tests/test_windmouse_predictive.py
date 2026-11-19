@@ -316,8 +316,10 @@ class WindMouseProfileCase(unittest.TestCase):
 
     # -- helpers -----------------------------------------------------
     def counts_per_pixel(self):
-        ndx, ndy = normal_mod.calculate_movement(1.0, 1.0, 0.235, 1100)
-        return ndx * 100, ndy * 70
+        # Delegate to the production helper instead of restating its speed
+        # factors here: a copied 100/70 silently desyncs the simulation from
+        # the aim code as soon as the configured speeds change.
+        return normal_mod._wm_counts_per_pixel(MockTracker(), is_sec=False)
 
     def run_frames(self, tracker, err_x, err_y, frames, target_velocity=(0.0, 0.0), reset_clock=True):
         """Closed loop: aim at the current error, apply the emitted move, restock.

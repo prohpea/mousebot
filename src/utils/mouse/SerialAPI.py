@@ -20,6 +20,26 @@ BAUD_RATES = [4_000_000, 2_000_000, 115_200]
 BAUD_CHANGE_COMMAND = bytearray([0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 0x3D, 0x00])
 _listener_stop_event = threading.Event()
 
+# A serial write with no timeout blocks the calling thread until the USB TX
+# endpoint drains. A stalled endpoint (device unplugged mid-frame, hub resume,
+# driver hiccup) therefore froze the caller *while holding makcu_lock*, which
+# stalls the 200 Hz move queue and the tracking loop behind it. 250 ms is long
+# enough for a 4 Mbaud command and short enough that a dead port costs one
+# dropped frame instead of the whole session.
+_SERIAL_WRITE_TIMEOUT = 0.25
+_SERIAL_OPEN_TIMEOUT = 0.1
+_SERIAL_PROBE_TIMEOUT = 0.3
+
+# Reconnect backoff: start fast (the everyday case is a one-off USB glitch) and
+# cap at 5 s so a device that stays away does not burn a core.
+_RECONNECT_DELAYS = (0.5, 1.0, 2.0, 3.0, 5.0)
+
+_recovery_lock = threading.Lock()
+_recovery_thread = None
+# Port settings of the last successful connect()/switch_to_4m(); the recovery
+# thread re-opens exactly this port instead of rescanning COM ports.
+_last_port_config = None
+
 # Index mapping: 0=L, 1=R, 2=M, 3=S4, 4=S5
 _LOCK_CMD_BY_IDX = {
     0: "lock_ml",
@@ -70,6 +90,186 @@ def find_com_ports():
                 found.append((port.device, name))
                 break
     return found
+
+
+def _open_serial(port_name, baud, timeout=_SERIAL_OPEN_TIMEOUT):
+    """Open a port with flow control off and a bounded write timeout.
+
+    Hardware flow control (dsrdtr/rtscts) is unsafe here: the MAKCU does not
+    drive CTS, so enabling it makes writes block forever. xonxoff would let a
+    0x11/0x13 byte inside a binary handshake pause the stream. ``write_timeout``
+    is what turns a stalled TX endpoint into a dropped command instead of a
+    permanently blocked caller.
+    """
+    return serial.Serial(
+        port_name,
+        baud,
+        timeout=timeout,
+        write_timeout=_SERIAL_WRITE_TIMEOUT,
+        dsrdtr=False,
+        rtscts=False,
+        xonxoff=False,
+    )
+
+
+def _remember_port_config(port_name, baud, manual=False):
+    global _last_port_config
+    try:
+        _last_port_config = (str(port_name), int(baud), bool(manual))
+    except Exception:
+        pass
+
+
+def _serialize_command(cmd) -> bytes:
+    if isinstance(cmd, (bytes, bytearray)):
+        return bytes(cmd)
+    return f"{cmd}\r".encode("ascii", "ignore")
+
+
+def _write_command(ser, payload: bytes) -> bool:
+    """Write one encoded command; never raise.
+
+    Returns False on any transport error so hot-path callers can keep the
+    tracking loop alive. The caller is responsible for reporting the loss
+    (see ``_notify_transport_lost``) *after* releasing ``makcu_lock``.
+    """
+    try:
+        ser.write(payload)
+        return True
+    except Exception:
+        return False
+
+
+def _sync_public_connection_state():
+    """Mirror ``state.is_connected`` into ``mouse.is_connected``.
+
+    The UI and every ``is_connected`` guard read the package-level flag, so a
+    backend that updates only ``state`` keeps painting a green dot on a dead
+    port. Imported lazily: ``src.utils.mouse`` imports this module.
+    """
+    try:
+        from src.utils import mouse as mouse_package
+
+        mouse_package._sync_public_state()
+    except Exception:
+        pass
+
+
+def _notify_transport_lost(reason: str):
+    """Handle a dead serial transport: mark disconnected, then recover.
+
+    Must be called WITHOUT ``makcu_lock`` held: ``_safe_close_port`` may block
+    inside the driver and ``_release_stale_state`` re-acquires the lock.
+    """
+    if _listener_stop_event.is_set():
+        return
+    if not state.is_connected and state.makcu is None:
+        return
+
+    log_print(f"[WARN] Serial transport lost ({reason}); scheduling reconnect.")
+    state.set_connected(False, "Serial")
+    _sync_public_connection_state()
+
+    with state.makcu_lock:
+        port = state.makcu
+        state.makcu = None
+    if port is not None:
+        try:
+            if getattr(port, "is_open", True):
+                port.close()
+        except Exception:
+            pass
+
+    _start_recovery_thread()
+
+
+def _start_recovery_thread():
+    """Start the single daemon reconnect thread (no-op when one is running)."""
+    global _recovery_thread
+    if _listener_stop_event.is_set():
+        return
+    with _recovery_lock:
+        if _recovery_thread is not None and _recovery_thread.is_alive():
+            return
+        if _last_port_config is None:
+            return
+        _recovery_thread = threading.Thread(
+            target=_recovery_loop, name="SerialRecovery", daemon=True
+        )
+        _recovery_thread.start()
+
+
+def _wait_or_stop(delay: float) -> bool:
+    """Sleep ``delay`` in small slices; True if a stop was requested."""
+    deadline = time.perf_counter() + max(0.0, float(delay))
+    while time.perf_counter() < deadline:
+        if _listener_stop_event.is_set():
+            return True
+        time.sleep(min(0.05, max(0.0, deadline - time.perf_counter())))
+    return _listener_stop_event.is_set()
+
+
+def _recovery_loop():
+    """Re-open the remembered port until it answers or shutdown starts."""
+    global _recovery_thread
+
+    attempt = 0
+    try:
+        while not _listener_stop_event.is_set():
+            config = _last_port_config
+            if config is None:
+                return
+            if state.is_connected:
+                return
+            if state.active_backend != "Serial":
+                log_print("[WARN] Serial recovery stopped: backend is no longer Serial.")
+                return
+
+            port_name, baud, manual = config
+            delay = _RECONNECT_DELAYS[min(attempt, len(_RECONNECT_DELAYS) - 1)]
+            if attempt > 0:
+                log_print(f"[INFO] Serial reconnect attempt {attempt} in {delay:.1f}s ...")
+                if _wait_or_stop(delay):
+                    return
+            attempt += 1
+
+            ser = None
+            try:
+                ser = _open_serial(port_name, baud)
+                if not km_version_ok(ser):
+                    raise serial.SerialException("device did not answer km.version()")
+                # Re-check right before installing: disconnect() may have run
+                # while the (slow) probe was in flight, and installing the port
+                # and listener afterwards would silently undo it.
+                if _listener_stop_event.is_set():
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+                    return
+                with state.makcu_lock:
+                    ser.write(b"km.buttons(1)\r")
+                    ser.flush()
+                    state.makcu = ser
+                _release_stale_state(ser)
+                state.mask_applied_idx = None
+                state.set_connected(True, "Serial")
+                _sync_public_connection_state()
+                _remember_port_config(port_name, baud, manual)
+                _start_listener_thread()
+                log_print(f"[INFO] Serial reconnected on {port_name} @ {baud}.")
+                return
+            except Exception as e:
+                log_print(f"[WARN] Serial reconnect failed on {port_name} @ {baud}: {e}")
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+    finally:
+        with _recovery_lock:
+            if _recovery_thread is threading.current_thread():
+                _recovery_thread = None
 
 
 def km_version_ok(ser):
@@ -155,10 +355,14 @@ def _listener_loop():
 
             prefix = _feed_listener_chunk(chunk, prefix)
 
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             if _listener_stop_event.is_set() or not state.is_connected:
                 break
             log_print(f"[ERROR] Serial listener exception: {e}")
+            # Leave this thread, but never leave the app claiming to be
+            # connected with every button dead: the recovery path either has a
+            # reconnect thread running or shutdown already started.
+            _notify_transport_lost(f"listener: {e}")
             break
         except Exception as e:
             if _listener_stop_event.is_set() or not state.is_connected or state.makcu is None:
@@ -191,7 +395,7 @@ def connect(port: str = None):
                 if dev_name in ("MAKCU", "MANUAL"):
                     label = "MANUAL" if dev_name == "MANUAL" else "MAKCU"
                     log_print(f"[INFO] Probing {label} {port_name} @ {baud} with km.version()...")
-                    ser = serial.Serial(port_name, baud, timeout=0.3)
+                    ser = _open_serial(port_name, baud, timeout=_SERIAL_PROBE_TIMEOUT)
                     time.sleep(0.1)
                     if not km_version_ok(ser):
                         ser.close()
@@ -200,16 +404,16 @@ def connect(port: str = None):
                     log_print(f"[INFO] {label} responded at {baud}, using it.")
                     ser.close()
                     time.sleep(0.1)
-                    state.makcu = serial.Serial(port_name, baud, timeout=0.1)
+                    state.makcu = _open_serial(port_name, baud)
                 else:
                     log_print(f"[INFO] Trying {dev_name} {port_name} @ {baud} ...")
-                    ser = serial.Serial(port_name, baud, timeout=0.1)
+                    ser = _open_serial(port_name, baud)
                     with state.makcu_lock:
                         ser.write(b"km.buttons(1)\r")
                         ser.flush()
                     ser.close()
                     time.sleep(0.1)
-                    state.makcu = serial.Serial(port_name, baud, timeout=0.1)
+                    state.makcu = _open_serial(port_name, baud)
 
                 with state.makcu_lock:
                     state.makcu.write(b"km.buttons(1)\r")
@@ -218,6 +422,8 @@ def connect(port: str = None):
                 _release_stale_state(state.makcu)
 
                 state.set_connected(True, "Serial")
+                _sync_public_connection_state()
+                _remember_port_config(port_name, baud, manual=bool(selected_port))
                 _start_listener_thread()
                 log_print(f"[INFO] Connected to {dev_name} on {port_name} at {baud} baud.")
                 return True
@@ -253,8 +459,11 @@ def disconnect():
     # physical mouse until a replug or an explicit release.
     if state.makcu is not None:
         _release_stale_state(state.makcu)
+    # Set the stop event before closing: it also blocks any pending or future
+    # recovery attempt, so a manual disconnect can never race a reconnect.
     _listener_stop_event.set()
     state.set_connected(False, "Serial")
+    _sync_public_connection_state()
     _safe_close_port()
     _stop_listener_thread()
     state.mask_applied_idx = None
@@ -269,9 +478,18 @@ def is_button_pressed(idx: int) -> bool:
 def _send_cmd_no_wait(cmd: str):
     if not state.is_connected or state.active_backend != "Serial" or state.makcu is None:
         return
+    payload = _serialize_command(f"km.{cmd}")
+    lost = False
     with state.makcu_lock:
-        state.makcu.write(f"km.{cmd}\r".encode("ascii", "ignore"))
-        state.makcu.flush()
+        ser = state.makcu
+        if ser is None:
+            return
+        # No flush() here: at 4 Mbaud the write is already in the driver FIFO and
+        # draining it under makcu_lock every command is pure contention with the
+        # listener thread. Resynchronisation only needs flush at init/handshake.
+        lost = not _write_command(ser, payload)
+    if lost:
+        _notify_transport_lost("write failed (cmd_no_wait)")
 
 
 _last_release_time = 0.0
@@ -282,28 +500,40 @@ def move(x: float, y: float):
     if not state.is_connected or state.makcu is None:
         return
     dx, dy = int(x), int(y)
+    payload = f"km.move({dx},{dy})\r".encode()
+    lost = False
     with state.makcu_lock:
+        ser = state.makcu
+        if ser is None:
+            return
         # Give hardware USB HID endpoint at least 2ms grace period after release to avoid dropping button release
         if _last_release_time > 0.0:
             diff = time.perf_counter() - _last_release_time
             if diff < 0.002:
                 time.sleep(0.002 - diff)
-        state.makcu.write(f"km.move({dx},{dy})\r".encode())
-        state.makcu.flush()
+        lost = not _write_command(ser, payload)
+    if lost:
+        _notify_transport_lost("write failed (move)")
 
 
 def move_bezier(x: float, y: float, segments: int, ctrl_x: float, ctrl_y: float):
     global _last_release_time
     if not state.is_connected or state.makcu is None:
         return
+    cmd = f"km.move({int(x)},{int(y)},{int(segments)},{int(ctrl_x)},{int(ctrl_y)})\r"
+    payload = cmd.encode()
+    lost = False
     with state.makcu_lock:
+        ser = state.makcu
+        if ser is None:
+            return
         if _last_release_time > 0.0:
             diff = time.perf_counter() - _last_release_time
             if diff < 0.002:
                 time.sleep(0.002 - diff)
-        cmd = f"km.move({int(x)},{int(y)},{int(segments)},{int(ctrl_x)},{int(ctrl_y)})\r"
-        state.makcu.write(cmd.encode())
-        state.makcu.flush()
+        lost = not _write_command(ser, payload)
+    if lost:
+        _notify_transport_lost("write failed (move_bezier)")
 
 
 def left(isdown: int):
@@ -311,27 +541,45 @@ def left(isdown: int):
     if not state.is_connected or state.makcu is None:
         return
     val = 1 if isdown else 0
+    payload = f"km.left({val})\r\n".encode()
+    lost = False
     with state.makcu_lock:
-        state.makcu.write(f"km.left({val})\r\n".encode())
-        state.makcu.flush()
+        ser = state.makcu
+        if ser is None:
+            return
+        lost = not _write_command(ser, payload)
         if val == 0:
             _last_release_time = time.perf_counter()
+    if lost:
+        _notify_transport_lost("write failed (left)")
 
 
 def right(isdown: int):
     if not state.is_connected or state.makcu is None:
         return
+    payload = f"km.right({1 if isdown else 0})\r".encode()
+    lost = False
     with state.makcu_lock:
-        state.makcu.write(f"km.right({1 if isdown else 0})\r".encode())
-        state.makcu.flush()
+        ser = state.makcu
+        if ser is None:
+            return
+        lost = not _write_command(ser, payload)
+    if lost:
+        _notify_transport_lost("write failed (right)")
 
 
 def middle(isdown: int):
     if not state.is_connected or state.makcu is None:
         return
+    payload = f"km.middle({1 if isdown else 0})\r".encode()
+    lost = False
     with state.makcu_lock:
-        state.makcu.write(f"km.middle({1 if isdown else 0})\r".encode())
-        state.makcu.flush()
+        ser = state.makcu
+        if ser is None:
+            return
+        lost = not _write_command(ser, payload)
+    if lost:
+        _notify_transport_lost("write failed (middle)")
 
 
 def _resolve_hid_key_code(key):
@@ -374,9 +622,14 @@ def is_key_pressed(key) -> bool:
 
 def test_move():
     if state.is_connected and state.makcu is not None:
+        lost = False
         with state.makcu_lock:
-            state.makcu.write(b"km.move(100,100)\r")
-            state.makcu.flush()
+            ser = state.makcu
+            if ser is None:
+                return
+            lost = not _write_command(ser, b"km.move(100,100)\r")
+        if lost:
+            _notify_transport_lost("write failed (test_move)")
 
 
 def switch_to_4m():
@@ -403,6 +656,7 @@ def switch_to_4m():
         log_print("[INFO] Sending 4M handshake command...")
         _listener_stop_event.set()
         state.set_connected(False, "Serial")
+        _sync_public_connection_state()
         with state.makcu_lock:
             state.makcu.write(BAUD_CHANGE_COMMAND)
             state.makcu.flush()
@@ -412,29 +666,33 @@ def switch_to_4m():
         time.sleep(0.15)
 
         log_print("[INFO] Attempting to connect at 4M baud rate...")
-        ser4m = serial.Serial(port_name, 4_000_000, timeout=0.3)
+        ser4m = _open_serial(port_name, 4_000_000, timeout=_SERIAL_PROBE_TIMEOUT)
         time.sleep(0.1)
 
         if km_version_ok(ser4m):
             log_print(f"[INFO] Successfully switched to 4M on {port_name}.")
             ser4m.close()
             time.sleep(0.1)
-            state.makcu = serial.Serial(port_name, 4_000_000, timeout=0.1)
+            state.makcu = _open_serial(port_name, 4_000_000)
             with state.makcu_lock:
                 state.makcu.write(b"km.buttons(1)\r")
                 state.makcu.flush()
             state.set_connected(True, "Serial")
+            _sync_public_connection_state()
+            _remember_port_config(port_name, 4_000_000, manual=True)
             _start_listener_thread()
             return True
 
         log_print("[WARN] 4M handshake failed, reconnecting at 115200...")
         ser4m.close()
         time.sleep(0.1)
-        state.makcu = serial.Serial(port_name, 115_200, timeout=0.1)
+        state.makcu = _open_serial(port_name, 115_200)
         with state.makcu_lock:
             state.makcu.write(b"km.buttons(1)\r")
             state.makcu.flush()
         state.set_connected(True, "Serial")
+        _sync_public_connection_state()
+        _remember_port_config(port_name, 115_200, manual=True)
         _start_listener_thread()
         return False
 
@@ -444,14 +702,17 @@ def switch_to_4m():
             if state.makcu and state.makcu.is_open:
                 state.makcu.close()
             time.sleep(0.1)
-            state.makcu = serial.Serial(port_name, 115_200, timeout=0.1)
+            state.makcu = _open_serial(port_name, 115_200)
             with state.makcu_lock:
                 state.makcu.write(b"km.buttons(1)\r")
                 state.makcu.flush()
             state.set_connected(True, "Serial")
+            _sync_public_connection_state()
+            _remember_port_config(port_name, 115_200, manual=True)
             _start_listener_thread()
         except Exception:
             state.set_connected(False, "Serial")
+            _sync_public_connection_state()
             state.makcu = None
         return False
 

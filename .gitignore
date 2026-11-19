@@ -114,3 +114,9 @@ _perf_audit/
 
 # Ship pipeline artifacts
 .bangiao/
+
+# Graphify artifacts
+graphify-out/
+
+# AI detection models are large binaries fetched/copied per machine
+models/*.onnx

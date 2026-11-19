@@ -22,6 +22,10 @@ from src.utils.config import config
 _DEFAULT_FPS = 30
 _last_render = {}
 
+# How long the idle render worker sleeps before pumping HighGUI again. Small
+# enough to keep the window responding to the OS, large enough to cost nothing.
+_IDLE_PUMP_INTERVAL_S = 0.1
+
 # Renderer state. A single condition guards the pending slots and the worker
 # lifecycle so enqueue (tracking thread) and paint (worker) never interleave.
 _cond = threading.Condition()
@@ -42,6 +46,19 @@ _stats = {
     "overwritten": 0,
     "closed": 0,
 }
+
+
+def _reset_counters_locked():
+    """Zero the per-session counters. Caller holds ``_cond``.
+
+    ``stats()`` describes one renderer session: how many frames *this* worker
+    painted out of how many were submitted. Leaving the counters alive across
+    ``shutdown()`` made the next session inherit the previous one's paints, so
+    a fresh builder that submitted one frame could report eight renders — the
+    "the worker is replaying stale frames" symptom, without any backlog.
+    """
+    for key in _stats:
+        _stats[key] = 0
 
 
 def _target_fps():
@@ -92,6 +109,11 @@ def _ensure_worker_locked():
     global _worker, _worker_stop
     if _worker is not None and _worker.is_alive():
         return
+    # A new worker is a new render session: its "rendered" counter must count
+    # the frames *it* painted. Without this, counters accumulated across every
+    # earlier session (tests, a stop/start cycle) and a single submitted frame
+    # was reported as several replays.
+    _reset_counters_locked()
     _worker_stop = False
     _worker = threading.Thread(target=_render_worker, name="PreviewRender", daemon=True)
     _worker.start()
@@ -102,17 +124,41 @@ def _render_worker():
     while True:
         with _cond:
             while not _pending and not _worker_stop:
-                _cond.wait()
+                # A blocking wait() leaves the Win32 HighGUI message queue
+                # unpumped for as long as no new frame is submitted, which is
+                # exactly when the user drags/resizes the window and Windows
+                # paints it as "Not Responding". Wake up periodically and pump
+                # from outside the lock so a caller's imshow() never waits.
+                timed_out = not _cond.wait(timeout=_IDLE_PUMP_INTERVAL_S)
+                if _pending or _worker_stop:
+                    break
+                if timed_out and _created:
+                    break
             if _worker_stop and not _pending:
                 _worker = None
                 _cond.notify_all()
                 return
-            # Snapshot without clearing: an entry must keep occupying its slot
-            # until the frame is actually on screen, otherwise a submit that
-            # arrives during the paint sees an empty slot and the frame it
-            # replaced is never counted. The slot is released per window, under
-            # the lock, only when it still holds the frame just painted.
-            batch = list(_pending.items())
+            if not _pending:
+                # Idle with created windows: pump HighGUI, then loop back.
+                batch = []
+            else:
+                # Snapshot without clearing: an entry must keep occupying its slot
+                # until the frame is actually on screen, otherwise a submit that
+                # arrives during the paint sees an empty slot and the frame it
+                # replaced is never counted. The slot is released per window, under
+                # the lock, only when it still holds the frame just painted.
+                batch = list(_pending.items())
+
+        if not batch:
+            # Never hold _cond while calling into OpenCV: imshow() from the
+            # tracking thread must stay non-blocking.
+            try:
+                _cv2_wait_key(1)
+                with _cond:
+                    _stats["pumped"] += 1
+            except Exception:
+                pass
+            continue
 
         drew = False
         for name, image in batch:
@@ -132,6 +178,16 @@ def _render_worker():
                         pass
                 continue
 
+            # Count the paint before blocking in OpenCV. The frame is already
+            # committed to this worker at this point, and a stats() reader must
+            # not see "0 painted" after the image is visibly on screen: the
+            # high-frequency caller checks the first paint and reads the counter
+            # immediately, so incrementing after imshow() returns left a window
+            # in which a real paint looked like no paint at all. A failed paint
+            # is rolled back below.
+            with _cond:
+                _stats["rendered"] += 1
+
             painted = False
             try:
                 _cv2_imshow(name, image)
@@ -140,13 +196,17 @@ def _render_worker():
                 painted = False
             finally:
                 with _cond:
+                    if not painted:
+                        # Clamp: a session reset (shutdown/reset) may have zeroed
+                        # the counter between the optimistic bump and this
+                        # rollback, and a negative paint count is meaningless.
+                        _stats["rendered"] = max(0, _stats["rendered"] - 1)
                     # Only release the slot if it still holds this frame: a
                     # newer submit that landed meanwhile must stay queued.
                     if _pending.get(name) is image:
                         _pending.pop(name, None)
                     if painted:
                         _created.add(name)
-                        _stats["rendered"] += 1
                     _cond.notify_all()
             if painted:
                 drew = True
@@ -211,6 +271,7 @@ def shutdown(timeout: float = 2.0):
             created = list(_created)
             _created.clear()
             _pending.clear()
+            _reset_counters_locked()
         else:
             _worker_stop = True
             _cond.notify_all()
@@ -228,6 +289,9 @@ def shutdown(timeout: float = 2.0):
             created = list(_created)
             _created.clear()
             _pending.clear()
+            # The session is over: report no paints rather than leaving the
+            # finished worker's totals to be mistaken for the next one's.
+            _reset_counters_locked()
 
     for name in created:
         try:
@@ -248,3 +312,5 @@ def stats() -> dict:
 def reset():
     """Forget timing state (called when previews are turned off/reset)."""
     _last_render.clear()
+    with _cond:
+        _reset_counters_locked()
