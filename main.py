@@ -1694,8 +1694,19 @@ if __name__ == "__main__":
     3. 瑷疆 UI 澶栬
     4. 鍓靛缓涓﹀暉鍕?UI 鎳夌敤
     """
-    import customtkinter as ctk
-    from src.ui import ViewerApp
+    # UI selection: DearPyGui (DirectX 11) for ultra-low latency or Tkinter
+    try:
+        config.load_from_file()
+    except Exception:
+        pass
+
+    ui_type = "dpg"
+    if "--tk" in sys.argv:
+        ui_type = "tk"
+    elif "--dpg" in sys.argv:
+        ui_type = "dpg"
+    else:
+        ui_type = str(getattr(config, "ui_framework", "dpg")).strip().lower()
 
     # OpenCV's own thread pool competes with the capture/decode/track threads for
     # the same cores; on small ROIs it usually makes p95 worse. 0 keeps OpenCV's
@@ -1722,24 +1733,32 @@ if __name__ == "__main__":
     target_fps = getattr(config, "target_fps", 200)
     tracker = AimTracker(app=temp_app, target_fps=target_fps)
     
-    # 設置外觀
-    ctk.set_appearance_mode("Dark")
-    try:
-        config.load_from_file()
-    except Exception:
-        pass
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    theme_name = getattr(config, "ui_theme", "nord")
-    theme_file = os.path.join(base_dir, "themes", f"{theme_name}.json")
-    if not os.path.exists(theme_file):
-        theme_file = os.path.join(base_dir, "themes", "metal.json")
-    try:
-        ctk.set_default_color_theme(theme_file)
-    except Exception:
-        pass
-    
-    # 鍓靛缓 UI 鎳夌敤
-    app = ViewerApp(tracker=tracker, capture_service=capture_service)
+    # Launch chosen UI framework (DearPyGui GPU-accelerated vs Tkinter)
+    if ui_type == "dpg":
+        try:
+            from src.ui_dpg import DpgViewerApp
+            print("[Main] Launching Ultra-Fast GPU UI (DearPyGui / DirectX 11)")
+            app = DpgViewerApp(tracker=tracker, capture_service=capture_service)
+        except Exception as e:
+            print(f"[Main] Failed to load DearPyGui UI: {e}. Falling back to Tkinter UI.")
+            import customtkinter as ctk
+            from src.ui import ViewerApp
+            ctk.set_appearance_mode("Dark")
+            app = ViewerApp(tracker=tracker, capture_service=capture_service)
+    else:
+        import customtkinter as ctk
+        from src.ui import ViewerApp
+        ctk.set_appearance_mode("Dark")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        theme_name = getattr(config, "ui_theme", "nord")
+        theme_file = os.path.join(base_dir, "themes", f"{theme_name}.json")
+        if not os.path.exists(theme_file):
+            theme_file = os.path.join(base_dir, "themes", "metal.json")
+        try:
+            ctk.set_default_color_theme(theme_file)
+        except Exception:
+            pass
+        app = ViewerApp(tracker=tracker, capture_service=capture_service)
     
     # 鏇存柊 tracker 鐨?app 寮曠敤
     tracker.app = app
