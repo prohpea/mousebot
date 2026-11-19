@@ -27,6 +27,46 @@ class DpgViewerApp:
     Provides drop-in compatibility with ViewerApp (Tkinter) interface for main.py & AimTracker.
     """
 
+    # Single source of truth for "which config key has which widget".
+    # ``_cfg_tag(key)`` derives the DPG tag, ``_sync_ui_from_config()`` walks this
+    # tuple to push config values back into the widgets after a profile load, an
+    # F1/F5 engine hotkey or a main.py config reload.
+    _CONFIG_WIDGETS = (
+        ("enableaim", bool),
+        ("mode", str),
+        ("aim_type", str),
+        ("selected_mouse_button", int),
+        ("fovsize", float),
+        ("normal_x_speed", float),
+        ("normal_y_speed", float),
+        ("wm_settle_radius_px", float),
+        ("aim_offsetX", int),
+        ("aim_offsetY", int),
+        ("ads_fov_enabled", bool),
+        ("ads_fovsize", float),
+        ("normal_x_speed_sec", float),
+        ("normal_y_speed_sec", float),
+        ("enabletb", bool),
+        ("tbfovsize", float),
+        ("color", str),
+        ("custom_hsv_min_h", int),
+        ("custom_hsv_max_h", int),
+        ("custom_hsv_min_s", int),
+        ("custom_hsv_max_s", int),
+        ("custom_hsv_min_v", int),
+        ("custom_hsv_max_v", int),
+        ("detection_min_bbox_area", int),
+        ("detection_min_contour_area", int),
+        ("detection_min_width", int),
+        ("detection_min_height", int),
+        ("ai_detection_enabled", bool),
+        ("mouse_api", str),
+        ("serial_port_mode", str),
+        ("serial_auto_switch_4m", bool),
+        ("in_game_sens", float),
+        ("mouse_dpi", int),
+    )
+
     def __init__(self, tracker=None, capture_service=None):
         if dpg is None:
             raise RuntimeError("DearPyGui is not installed. Please run: pip install dearpygui")
@@ -43,7 +83,12 @@ class DpgViewerApp:
         self._scheduled_callbacks = []
         self._callback_lock = threading.Lock()
         self._running = False
+        self._closed = False
         self._close_handlers = []
+
+        # Frame publish diagnostics: only the first failure is logged, so a
+        # persistent 144 Hz error cannot flood the console.
+        self._preview_error_count = 0
 
         # Telemetry history for GPU plot (last 100 frames)
         self.max_plot_pts = 100
@@ -166,12 +211,14 @@ class DpgViewerApp:
             with dpg.collapsing_header(label="Main Aimbot Settings", default_open=True):
                 dpg.add_checkbox(
                     label="Enable Main Aimbot",
+                    tag=self._cfg_tag("enableaim"),
                     default_value=bool(getattr(config, "enableaim", True)),
                     callback=self._make_config_cb("enableaim", bool),
                 )
                 with dpg.group(horizontal=True):
                     dpg.add_combo(
                         items=["WindMouse", "Normal", "Bezier", "Flick", "Silent"],
+                        tag=self._cfg_tag("mode"),
                         default_value=str(getattr(config, "mode", "WindMouse")),
                         label="Aim Engine",
                         width=180,
@@ -179,6 +226,7 @@ class DpgViewerApp:
                     )
                     dpg.add_combo(
                         items=["head", "neck", "chest"],
+                        tag=self._cfg_tag("aim_type"),
                         default_value=str(getattr(config, "aim_type", "head")),
                         label="Aim Bone",
                         width=140,
@@ -188,6 +236,7 @@ class DpgViewerApp:
                 with dpg.group(horizontal=True):
                     dpg.add_combo(
                         items=["Left Mouse", "Right Mouse", "Side Mouse 4", "Side Mouse 5"],
+                        tag=self._cfg_tag("selected_mouse_button"),
                         default_value=self._get_btn_name(getattr(config, "selected_mouse_button", 4)),
                         label="Activation Key",
                         width=180,
@@ -196,6 +245,7 @@ class DpgViewerApp:
 
                 dpg.add_slider_float(
                     label="FOV Radius (px)",
+                    tag=self._cfg_tag("fovsize"),
                     min_value=5.0,
                     max_value=120.0,
                     default_value=float(getattr(config, "fovsize", 28.0)),
@@ -205,6 +255,7 @@ class DpgViewerApp:
                 with dpg.group(horizontal=True):
                     dpg.add_slider_float(
                         label="Speed X",
+                        tag=self._cfg_tag("normal_x_speed"),
                         min_value=10.0,
                         max_value=250.0,
                         default_value=float(getattr(config, "normal_x_speed", 100.0)),
@@ -213,6 +264,7 @@ class DpgViewerApp:
                     )
                     dpg.add_slider_float(
                         label="Speed Y",
+                        tag=self._cfg_tag("normal_y_speed"),
                         min_value=10.0,
                         max_value=250.0,
                         default_value=float(getattr(config, "normal_y_speed", 60.0)),
@@ -222,6 +274,7 @@ class DpgViewerApp:
 
                 dpg.add_slider_float(
                     label="WindMouse Settle Radius (px)",
+                    tag=self._cfg_tag("wm_settle_radius_px"),
                     min_value=0.5,
                     max_value=6.0,
                     default_value=float(getattr(config, "wm_settle_radius_px", 2.8)),
@@ -231,6 +284,7 @@ class DpgViewerApp:
                 with dpg.group(horizontal=True):
                     dpg.add_slider_int(
                         label="Aim Offset X",
+                        tag=self._cfg_tag("aim_offsetX"),
                         min_value=-20,
                         max_value=20,
                         default_value=int(getattr(config, "aim_offsetX", 1)),
@@ -239,6 +293,7 @@ class DpgViewerApp:
                     )
                     dpg.add_slider_int(
                         label="Aim Offset Y",
+                        tag=self._cfg_tag("aim_offsetY"),
                         min_value=-20,
                         max_value=20,
                         default_value=int(getattr(config, "aim_offsetY", -1)),
@@ -249,11 +304,13 @@ class DpgViewerApp:
             with dpg.collapsing_header(label="Secondary Aim (ADS / Sniping)", default_open=False):
                 dpg.add_checkbox(
                     label="Enable ADS Secondary Aim",
+                    tag=self._cfg_tag("ads_fov_enabled"),
                     default_value=bool(getattr(config, "ads_fov_enabled", True)),
                     callback=self._make_config_cb("ads_fov_enabled", bool),
                 )
                 dpg.add_slider_float(
                     label="ADS FOV Radius (px)",
+                    tag=self._cfg_tag("ads_fovsize"),
                     min_value=10.0,
                     max_value=200.0,
                     default_value=float(getattr(config, "ads_fovsize", 45.0)),
@@ -262,6 +319,7 @@ class DpgViewerApp:
                 with dpg.group(horizontal=True):
                     dpg.add_slider_float(
                         label="ADS Speed X",
+                        tag=self._cfg_tag("normal_x_speed_sec"),
                         min_value=10.0,
                         max_value=250.0,
                         default_value=float(getattr(config, "normal_x_speed_sec", 100.0)),
@@ -270,6 +328,7 @@ class DpgViewerApp:
                     )
                     dpg.add_slider_float(
                         label="ADS Speed Y",
+                        tag=self._cfg_tag("normal_y_speed_sec"),
                         min_value=10.0,
                         max_value=250.0,
                         default_value=float(getattr(config, "normal_y_speed_sec", 60.0)),
@@ -280,11 +339,13 @@ class DpgViewerApp:
             with dpg.collapsing_header(label="Triggerbot Settings", default_open=False):
                 dpg.add_checkbox(
                     label="Enable Triggerbot",
+                    tag=self._cfg_tag("enabletb"),
                     default_value=bool(getattr(config, "enabletb", False)),
                     callback=self._make_config_cb("enabletb", bool),
                 )
                 dpg.add_slider_float(
                     label="Trigger FOV (px)",
+                    tag=self._cfg_tag("tbfovsize"),
                     min_value=1.0,
                     max_value=30.0,
                     default_value=float(getattr(config, "tbfovsize", 3.3)),
@@ -299,6 +360,7 @@ class DpgViewerApp:
                     dpg.add_text("Color & Anti-Noise Calibration", color=(56, 189, 248))
                     dpg.add_combo(
                         items=["custom", "purple", "yellow", "red"],
+                        tag=self._cfg_tag("color"),
                         default_value=str(getattr(config, "color", "custom")),
                         label="Target Color",
                         callback=self._make_config_cb("color", str),
@@ -308,6 +370,7 @@ class DpgViewerApp:
                     with dpg.group(horizontal=True):
                         dpg.add_slider_int(
                             label="Min H",
+                            tag=self._cfg_tag("custom_hsv_min_h"),
                             min_value=0,
                             max_value=180,
                             default_value=int(getattr(config, "custom_hsv_min_h", 125)),
@@ -316,6 +379,7 @@ class DpgViewerApp:
                         )
                         dpg.add_slider_int(
                             label="Max H",
+                            tag=self._cfg_tag("custom_hsv_max_h"),
                             min_value=0,
                             max_value=180,
                             default_value=int(getattr(config, "custom_hsv_max_h", 165)),
@@ -326,6 +390,7 @@ class DpgViewerApp:
                     with dpg.group(horizontal=True):
                         dpg.add_slider_int(
                             label="Min S",
+                            tag=self._cfg_tag("custom_hsv_min_s"),
                             min_value=0,
                             max_value=255,
                             default_value=int(getattr(config, "custom_hsv_min_s", 80)),
@@ -334,6 +399,7 @@ class DpgViewerApp:
                         )
                         dpg.add_slider_int(
                             label="Max S",
+                            tag=self._cfg_tag("custom_hsv_max_s"),
                             min_value=0,
                             max_value=255,
                             default_value=int(getattr(config, "custom_hsv_max_s", 255)),
@@ -344,6 +410,7 @@ class DpgViewerApp:
                     with dpg.group(horizontal=True):
                         dpg.add_slider_int(
                             label="Min V",
+                            tag=self._cfg_tag("custom_hsv_min_v"),
                             min_value=0,
                             max_value=255,
                             default_value=int(getattr(config, "custom_hsv_min_v", 85)),
@@ -352,6 +419,7 @@ class DpgViewerApp:
                         )
                         dpg.add_slider_int(
                             label="Max V",
+                            tag=self._cfg_tag("custom_hsv_max_v"),
                             min_value=0,
                             max_value=255,
                             default_value=int(getattr(config, "custom_hsv_max_v", 255)),
@@ -364,6 +432,7 @@ class DpgViewerApp:
                     with dpg.group(horizontal=True):
                         dpg.add_slider_int(
                             label="Min Bbox Area",
+                            tag=self._cfg_tag("detection_min_bbox_area"),
                             min_value=20,
                             max_value=300,
                             default_value=int(getattr(config, "detection_min_bbox_area", 90)),
@@ -372,6 +441,7 @@ class DpgViewerApp:
                         )
                         dpg.add_slider_int(
                             label="Min Contour Area",
+                            tag=self._cfg_tag("detection_min_contour_area"),
                             min_value=5,
                             max_value=120,
                             default_value=int(getattr(config, "detection_min_contour_area", 30)),
@@ -382,6 +452,7 @@ class DpgViewerApp:
                     with dpg.group(horizontal=True):
                         dpg.add_slider_int(
                             label="Min Width (px)",
+                            tag=self._cfg_tag("detection_min_width"),
                             min_value=2,
                             max_value=20,
                             default_value=int(getattr(config, "detection_min_width", 6)),
@@ -390,6 +461,7 @@ class DpgViewerApp:
                         )
                         dpg.add_slider_int(
                             label="Min Height (px)",
+                            tag=self._cfg_tag("detection_min_height"),
                             min_value=2,
                             max_value=20,
                             default_value=int(getattr(config, "detection_min_height", 8)),
@@ -401,6 +473,7 @@ class DpgViewerApp:
                     dpg.add_text("AI YOLO Model (ONNX / DirectML):", color=(56, 189, 248))
                     dpg.add_checkbox(
                         label="Enable AI Detection Guard",
+                        tag=self._cfg_tag("ai_detection_enabled"),
                         default_value=bool(getattr(config, "ai_detection_enabled", False)),
                         callback=self._make_config_cb("ai_detection_enabled", bool),
                     )
@@ -410,6 +483,7 @@ class DpgViewerApp:
                     dpg.add_text("Real-time Vision Viewport", color=(56, 189, 248))
                     dpg.add_checkbox(
                         label="Stream Live Texture (GPU 60-144 FPS)",
+                        tag="chk_preview",
                         default_value=self.preview_enabled,
                         callback=self._cb_toggle_preview,
                     )
@@ -422,6 +496,7 @@ class DpgViewerApp:
             with dpg.group(horizontal=True):
                 dpg.add_combo(
                     items=["Serial", "Makcu", "Ferrum", "Kmbox", "SendInput"],
+                    tag=self._cfg_tag("mouse_api"),
                     default_value=str(getattr(config, "mouse_api", "Serial")),
                     label="Mouse API",
                     width=160,
@@ -429,6 +504,7 @@ class DpgViewerApp:
                 )
                 dpg.add_combo(
                     items=["Auto", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9"],
+                    tag=self._cfg_tag("serial_port_mode"),
                     default_value=str(getattr(config, "serial_port_mode", "Auto")),
                     label="Serial Port",
                     width=140,
@@ -437,6 +513,7 @@ class DpgViewerApp:
 
             dpg.add_checkbox(
                 label="Auto Switch to 4M Baud Rate (MAKCU High-Speed)",
+                tag=self._cfg_tag("serial_auto_switch_4m"),
                 default_value=bool(getattr(config, "serial_auto_switch_4m", True)),
                 callback=self._make_config_cb("serial_auto_switch_4m", bool),
             )
@@ -445,6 +522,7 @@ class DpgViewerApp:
             with dpg.group(horizontal=True):
                 dpg.add_slider_float(
                     label="In-Game Sensitivity",
+                    tag=self._cfg_tag("in_game_sens"),
                     min_value=0.05,
                     max_value=2.0,
                     default_value=float(getattr(config, "in_game_sens", 0.23)),
@@ -453,6 +531,7 @@ class DpgViewerApp:
                 )
                 dpg.add_slider_int(
                     label="Mouse DPI",
+                    tag=self._cfg_tag("mouse_dpi"),
                     min_value=400,
                     max_value=6400,
                     default_value=int(getattr(config, "mouse_dpi", 1100)),
@@ -463,6 +542,7 @@ class DpgViewerApp:
             dpg.add_spacer(height=10)
             dpg.add_button(
                 label="Reconnect Serial Device (COM3/4M)",
+                tag="btn_reconnect_serial",
                 callback=self._cb_reconnect_serial,
             )
 
@@ -511,8 +591,16 @@ class DpgViewerApp:
             )
 
             with dpg.group(horizontal=True):
-                dpg.add_button(label="LOAD SELECTED PROFILE", callback=self._cb_load_profile)
-                dpg.add_button(label="SAVE CURRENT AS ACTIVE", callback=self._cb_save_profile)
+                dpg.add_button(
+                    label="LOAD SELECTED PROFILE",
+                    tag="btn_load_profile",
+                    callback=self._cb_load_profile,
+                )
+                dpg.add_button(
+                    label="SAVE CURRENT AS ACTIVE",
+                    tag="btn_save_profile",
+                    callback=self._cb_save_profile,
+                )
 
             dpg.add_separator()
             dpg.add_text("Engine Info:", color=(148, 163, 184))
@@ -521,6 +609,87 @@ class DpgViewerApp:
             dpg.add_text("• Video Ingest: UDP TurboJPEG 144Hz MJPEG Protocol")
 
     # --- Callbacks & Helpers ---
+    def _cfg_tag(self, key):
+        """Stable DPG tag for a config-backed widget."""
+        return f"cfg_{key}"
+
+    def _sync_ui_from_config(self):
+        """Push ``config`` values into the widgets (config -> UI, one way).
+
+        Never writes ``config``, never saves, never touches the tracker and
+        never creates widgets: it is a pure read-and-display pass. Safe to call
+        repeatedly (idempotent) and only from the UI thread. Returns ``True``
+        when at least one widget was updated.
+        """
+        if self._closed:
+            return False
+
+        updated = 0
+        for key, type_fn in self._CONFIG_WIDGETS:
+            try:
+                tag = self._cfg_tag(key)
+                if not dpg.does_item_exist(tag):
+                    continue
+
+                raw = getattr(config, key, None)
+                if key == "selected_mouse_button":
+                    value = self._get_btn_name(int(raw))
+                else:
+                    value = type_fn(raw)
+
+                item_cfg = dpg.get_item_configuration(tag) or {}
+                items = item_cfg.get("items")
+                if items:
+                    # A profile may hold an engine/API name the combo does not
+                    # offer; keep the previous display instead of inventing one.
+                    if value not in items:
+                        continue
+                else:
+                    min_value = item_cfg.get("min_value")
+                    max_value = item_cfg.get("max_value")
+                    # DPG reports "" for items without bounds (checkbox, text),
+                    # so only real numbers clamp a real number.
+                    numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+                    if (
+                        numeric
+                        and isinstance(min_value, (int, float))
+                        and not isinstance(min_value, bool)
+                        and isinstance(max_value, (int, float))
+                        and not isinstance(max_value, bool)
+                    ):
+                        # Clamp for display only; config keeps its own value.
+                        value = max(min_value, min(max_value, value))
+
+                dpg.set_value(tag, value)
+                updated += 1
+            except Exception as e:
+                print(f"[UI-DPG] Error syncing widget {key}: {e}")
+
+        try:
+            if dpg.does_item_exist("txt_status_badge"):
+                ai_on = bool(getattr(config, "ai_detection_enabled", False)) or (
+                    str(getattr(config, "detection_engine", "colorbot")).strip().lower()
+                    == "ai_detection"
+                )
+                dpg.set_value(
+                    "txt_status_badge",
+                    "STATUS: AI DETECTION" if ai_on else "STATUS: ONLINE",
+                )
+                updated += 1
+        except Exception as e:
+            print(f"[UI-DPG] Error syncing status badge: {e}")
+
+        return updated > 0
+
+    def _sync_engine_ui_from_config(self):
+        """Compatibility shim for main.py's F1/F5 hotkey path.
+
+        ``main.py`` only calls this when ``hasattr(app, ...)`` is True; the
+        detection engine is not a second source of truth, so it just forwards
+        to ``_sync_ui_from_config()``.
+        """
+        return self._sync_ui_from_config()
+
     def _make_config_cb(self, key, type_fn):
         def _callback(sender, app_data):
             try:
@@ -547,7 +716,7 @@ class DpgViewerApp:
     def _cb_toggle_preview(self, sender, app_data):
         self.preview_enabled = bool(app_data)
 
-    def _cb_reconnect_serial(self):
+    def _cb_reconnect_serial(self, sender=None, app_data=None):
         log_print("[UI-DPG] Reconnect serial requested.")
         if self.tracker and hasattr(self.tracker, "mouse_api"):
             try:
@@ -556,8 +725,11 @@ class DpgViewerApp:
             except Exception as e:
                 log_print(f"[UI-DPG] Reconnect error: {e}")
 
-    def _cb_load_profile(self):
-        choice = dpg.get_value("combo_preset_profile")
+    def _cb_load_profile(self, sender=None, app_data=None):
+        choice = ""
+        if dpg.does_item_exist("combo_preset_profile"):
+            choice = dpg.get_value("combo_preset_profile")
+        choice = str(choice or "")
         fname = "config.json"
         if "burst_spray" in choice:
             fname = "config.burst_spray.json"
@@ -569,33 +741,37 @@ class DpgViewerApp:
         if os.path.exists(fname):
             config.load_from_file(fname)
             self._sync_config_to_tracker()
+            self._sync_ui_from_config()
             log_print(f"[UI-DPG] Profile loaded: {fname}")
 
-    def _cb_save_profile(self):
+    def _cb_save_profile(self, sender=None, app_data=None):
         config.save_to_file()
         log_print("[UI-DPG] Active configuration saved to config.json.")
 
     def _sync_config_to_tracker(self):
-        if not self.tracker:
-            return
-        try:
-            self.tracker.normal_x_speed = getattr(config, "normal_x_speed", 100.0)
-            self.tracker.normal_y_speed = getattr(config, "normal_y_speed", 60.0)
-            self.tracker.normalsmooth = getattr(config, "normalsmooth", 3.0)
-            self.tracker.normalsmoothfov = getattr(config, "normalsmoothfov", 18.67)
-            self.tracker.mouse_dpi = getattr(config, "mouse_dpi", 1100)
-            self.tracker.fovsize = getattr(config, "fovsize", 28.0)
-            self.tracker.ads_fov_enabled = getattr(config, "ads_fov_enabled", False)
-            self.tracker.ads_fovsize = getattr(config, "ads_fovsize", config.fovsize)
-            self.tracker.ads_key = getattr(config, "ads_key", "Right Mouse Button")
-            self.tracker.tbfovsize = getattr(config, "tbfovsize", 3.3)
-            self.tracker.trigger_ads_fov_enabled = getattr(config, "trigger_ads_fov_enabled", False)
-            self.tracker.trigger_ads_fovsize = getattr(config, "trigger_ads_fovsize", config.tbfovsize)
-            self.tracker.trigger_ads_key = getattr(config, "trigger_ads_key", "Right Mouse Button")
-            self.tracker.trigger_ads_key_type = getattr(config, "trigger_ads_key_type", "hold")
-            self.tracker.selected_tb_btn = getattr(config, "selected_tb_btn", 1)
-        except Exception as e:
-            print(f"[UI-DPG] Error syncing config: {e}")
+        if self.tracker:
+            try:
+                self.tracker.normal_x_speed = getattr(config, "normal_x_speed", 100.0)
+                self.tracker.normal_y_speed = getattr(config, "normal_y_speed", 60.0)
+                self.tracker.normalsmooth = getattr(config, "normalsmooth", 3.0)
+                self.tracker.normalsmoothfov = getattr(config, "normalsmoothfov", 18.67)
+                self.tracker.mouse_dpi = getattr(config, "mouse_dpi", 1100)
+                self.tracker.fovsize = getattr(config, "fovsize", 28.0)
+                self.tracker.ads_fov_enabled = getattr(config, "ads_fov_enabled", False)
+                self.tracker.ads_fovsize = getattr(config, "ads_fovsize", config.fovsize)
+                self.tracker.ads_key = getattr(config, "ads_key", "Right Mouse Button")
+                self.tracker.tbfovsize = getattr(config, "tbfovsize", 3.3)
+                self.tracker.trigger_ads_fov_enabled = getattr(config, "trigger_ads_fov_enabled", False)
+                self.tracker.trigger_ads_fovsize = getattr(config, "trigger_ads_fovsize", config.tbfovsize)
+                self.tracker.trigger_ads_key = getattr(config, "trigger_ads_key", "Right Mouse Button")
+                self.tracker.trigger_ads_key_type = getattr(config, "trigger_ads_key_type", "hold")
+                self.tracker.selected_tb_btn = getattr(config, "selected_tb_btn", 1)
+            except Exception as e:
+                print(f"[UI-DPG] Error syncing config: {e}")
+
+        # Always mirror config back into the widgets: main.py reloads the config
+        # *after* the UI is built, and hotkeys mutate it from the tracker thread.
+        self._sync_ui_from_config()
 
     # --- Framework Compatibility with main.py ---
     def after(self, ms, func, *args):
@@ -636,23 +812,86 @@ class DpgViewerApp:
             current_fps = getattr(self.tracker, "current_fps", 144.0) if self.tracker else 144.0
             latency = getattr(self.tracker, "last_latency_ms", 1.8) if self.tracker else 1.8
 
+            try:
+                current_fps = float(current_fps)
+            except (TypeError, ValueError):
+                current_fps = 144.0
+            try:
+                latency = float(latency)
+            except (TypeError, ValueError):
+                latency = 1.8
+            if not math.isfinite(latency):
+                latency = 0.0
+            if not math.isfinite(current_fps):
+                current_fps = 0.0
+
             self.plot_latency.pop(0)
             self.plot_latency.append(latency)
             self.plot_fps.pop(0)
             self.plot_fps.append(current_fps / 10.0)
 
-            if hasattr(self, "series_latency"):
-                dpg.set_value(self.series_latency, [self.plot_x, self.plot_latency])
-                dpg.set_value(self.series_fps, [self.plot_x, self.plot_fps])
+            series_latency = getattr(self, "series_latency", None)
+            if series_latency is not None and dpg.does_item_exist(series_latency):
+                dpg.set_value(series_latency, [self.plot_x, self.plot_latency])
+            series_fps = getattr(self, "series_fps", None)
+            if series_fps is not None and dpg.does_item_exist(series_fps):
+                dpg.set_value(series_fps, [self.plot_x, self.plot_fps])
 
-            # Update log console
-            recent_logs = get_recent_logs()
+            # Update log console. get_recent_logs() returns list[dict], not
+            # list[str]: joining it directly raised TypeError every tick.
+            recent_logs = get_recent_logs(20)
             if recent_logs and dpg.does_item_exist("txt_log_console"):
-                dpg.set_value("txt_log_console", "".join(recent_logs[-20:]))
+                lines = []
+                for entry in recent_logs:
+                    if isinstance(entry, dict):
+                        lines.append(f"[{entry.get('level', 'INFO')}] {entry.get('message', '')}")
+                    else:
+                        lines.append(str(entry))
+                dpg.set_value("txt_log_console", "\n".join(lines))
+
+    def _prepare_preview_rgba(self, frame):
+        """Normalise an arbitrary capture frame to a float32 RGBA/255 image.
+
+        Returns ``None`` when the frame cannot be published (empty, wrong
+        dimensionality or an unsupported channel count) instead of raising.
+        """
+        if frame is None or not isinstance(frame, np.ndarray):
+            return None
+        if frame.size == 0 or frame.ndim not in (2, 3):
+            return None
+
+        if frame.ndim == 2:
+            rgba = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_GRAY2RGBA)
+        else:
+            channels = frame.shape[2]
+            if channels == 1:
+                # (H, W, 1) masks are common; drop the singleton axis first.
+                gray = np.ascontiguousarray(frame[:, :, 0])
+                rgba = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGBA)
+            elif channels == 3:
+                rgba = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_BGR2RGBA)
+            elif channels == 4:
+                rgba = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_BGRA2RGBA)
+            else:
+                return None
+
+        if rgba.dtype != np.uint8:
+            if np.issubdtype(rgba.dtype, np.floating) and rgba.max() <= 1.0:
+                rgba = np.clip(rgba * 255.0, 0, 255).astype(np.uint8)
+            else:
+                rgba = np.clip(rgba, 0, 255).astype(np.uint8)
+
+        if (rgba.shape[1], rgba.shape[0]) != (self.preview_w, self.preview_h):
+            rgba = cv2.resize(rgba, (self.preview_w, self.preview_h))
+
+        return (rgba.astype(np.float32) / 255.0).ravel()
 
     def _update_video_preview(self):
-        if not self.preview_enabled or not self.capture:
-            return
+        if self._closed or not self.preview_enabled or not self.capture:
+            return False
+        if self.texture_tag is None:
+            return False
+
         try:
             frame = None
             if hasattr(self.capture, "get_last_frame"):
@@ -660,17 +899,24 @@ class DpgViewerApp:
             elif hasattr(self.capture, "read_frame"):
                 frame = self.capture.read_frame()
 
-            if frame is not None and frame.size > 0:
-                h, w = frame.shape[:2]
-                if (w, h) != (self.preview_w, self.preview_h):
-                    frame_resized = cv2.resize(frame, (self.preview_w, self.preview_h))
-                else:
-                    frame_resized = frame
+            buffer = self._prepare_preview_rgba(frame)
+            if buffer is None:
+                return False
+            if not dpg.does_item_exist(self.texture_tag):
+                return False
 
-                rgba = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGBA).astype(np.float32) / 255.0
-                dpg.set_value(self.texture_tag, rgba)
-        except Exception:
-            pass
+            # DPG raw textures expect a flat float buffer, not an (H, W, 4) array.
+            try:
+                dpg.set_value(self.texture_tag, buffer)
+            except Exception:
+                # Some DPG builds only accept a plain Python list here.
+                dpg.set_value(self.texture_tag, buffer.tolist())
+            return True
+        except Exception as e:
+            self._preview_error_count += 1
+            if self._preview_error_count == 1:
+                log_print(f"[UI-DPG] Preview update failed: {e}")
+            return False
 
     def mainloop(self):
         """Run GPU render loop at monitor refresh rate with VSync (DirectX 11)."""
@@ -687,13 +933,19 @@ class DpgViewerApp:
             self._on_close()
 
     def _on_close(self):
+        if self._closed:
+            return
+        self._closed = True
         self._running = False
         for handler in self._close_handlers:
             try:
                 handler()
             except Exception as e:
                 print(f"[UI-DPG] Close handler error: {e}")
-        dpg.destroy_context()
+        try:
+            dpg.destroy_context()
+        except Exception as e:
+            print(f"[UI-DPG] Error destroying context: {e}")
 
 
 if __name__ == "__main__":
