@@ -65,6 +65,7 @@ class DpgViewerApp:
         ("serial_auto_switch_4m", bool),
         ("in_game_sens", float),
         ("mouse_dpi", int),
+        ("capture_mode", str),
     )
 
     def __init__(self, tracker=None, capture_service=None):
@@ -85,6 +86,8 @@ class DpgViewerApp:
         self._running = False
         self._closed = False
         self._close_handlers = []
+        self._runtime_active = False
+        self._runtime_busy = False
 
         # Frame publish diagnostics: only the first failure is logged, so a
         # persistent 144 Hz error cannot flood the console.
@@ -103,6 +106,9 @@ class DpgViewerApp:
         self._setup_theme()
         self._build_textures()
         self._build_gui()
+
+        # Auto-connect mouse and capture if enabled (matching ViewerApp)
+        self.after(500, self._maybe_auto_start_runtime)
 
     def _setup_theme(self):
         """Configure sleek dark gaming palette (DirectX 11 Tactical HUD)."""
@@ -176,9 +182,14 @@ class DpgViewerApp:
             with dpg.group(horizontal=True):
                 dpg.add_text("CVM COLORBOT", color=(56, 189, 248))
                 dpg.add_text("|", color=(80, 80, 100))
-                dpg.add_text("DirectX 11 Accelerated", color=(148, 163, 184))
-                dpg.add_spacer(width=20)
-                dpg.add_text("STATUS: ONLINE", tag="txt_status_badge", color=(52, 211, 153))
+                dpg.add_text("DirectX 11", color=(148, 163, 184))
+                dpg.add_spacer(width=10)
+                dpg.add_button(
+                    label="[▶ START RUNTIME]",
+                    tag="btn_runtime_toggle",
+                    callback=self._toggle_runtime,
+                )
+                dpg.add_text("STATUS: INITIALIZING...", tag="txt_status_badge", color=(251, 191, 36))
 
             dpg.add_separator()
 
@@ -539,12 +550,43 @@ class DpgViewerApp:
                     callback=self._make_config_cb("mouse_dpi", int),
                 )
 
+            dpg.add_spacer(height=6)
+            dpg.add_separator()
+            dpg.add_text("Video Capture Ingest Stream", color=(56, 189, 248))
+            with dpg.group(horizontal=True):
+                dpg.add_combo(
+                    items=["UDP", "NDI", "MSS", "CaptureCard", "Teleport"],
+                    tag=self._cfg_tag("capture_mode"),
+                    default_value=str(getattr(config, "capture_mode", "UDP")),
+                    label="Capture Mode",
+                    width=150,
+                    callback=self._cb_capture_mode,
+                )
+                dpg.add_input_text(
+                    label="UDP IP",
+                    tag="input_udp_ip",
+                    default_value=str(getattr(config, "udp_ip", "0.0.0.0")),
+                    width=110,
+                )
+                dpg.add_input_text(
+                    label="Port",
+                    tag="input_udp_port",
+                    default_value=str(getattr(config, "udp_port", "5000")),
+                    width=70,
+                )
+
             dpg.add_spacer(height=10)
-            dpg.add_button(
-                label="Reconnect Serial Device (COM3/4M)",
-                tag="btn_reconnect_serial",
-                callback=self._cb_reconnect_serial,
-            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Reconnect Serial Device",
+                    tag="btn_reconnect_serial",
+                    callback=self._cb_reconnect_serial,
+                )
+                dpg.add_button(
+                    label="Reconnect Capture Stream",
+                    tag="btn_reconnect_capture",
+                    callback=self._cb_reconnect_capture,
+                )
 
     def _build_telemetry_tab(self):
         with dpg.child_window(border=False):
@@ -716,14 +758,176 @@ class DpgViewerApp:
     def _cb_toggle_preview(self, sender, app_data):
         self.preview_enabled = bool(app_data)
 
+    def _cb_capture_mode(self, sender, app_data):
+        try:
+            config.capture_mode = str(app_data)
+            config.save_to_file()
+            if self.capture:
+                self.capture.set_mode(str(app_data))
+            log_print(f"[UI-DPG] Capture mode switched to: {app_data}")
+        except Exception as e:
+            log_print(f"[UI-DPG] Error setting capture_mode: {e}")
+
+    def _cb_reconnect_capture(self, sender=None, app_data=None):
+        log_print("[UI-DPG] Reconnect capture requested.")
+        if not self.capture:
+            return
+        cap_mode = str(getattr(config, "capture_mode", "UDP"))
+        try:
+            self.capture.disconnect()
+            self.capture.set_mode(cap_mode)
+            if cap_mode == "UDP":
+                ip = dpg.get_value("input_udp_ip") if dpg.does_item_exist("input_udp_ip") else getattr(config, "udp_ip", "0.0.0.0")
+                port = dpg.get_value("input_udp_port") if dpg.does_item_exist("input_udp_port") else getattr(config, "udp_port", 5000)
+                config.udp_ip = str(ip)
+                config.udp_port = str(port)
+                config.save_to_file()
+                ok, err = self.capture.connect_udp(ip, port)
+                log_print(f"[UI-DPG] Reconnect UDP on {ip}:{port} -> {'OK' if ok else err}")
+            elif cap_mode == "NDI":
+                ok, err = self.capture.connect_ndi(getattr(config, "last_ndi_source", ""))
+            elif cap_mode == "MSS":
+                ok, err = self.capture.connect_mss(1, 320, 320)
+            elif cap_mode in ("CaptureCard", "CaptureCardGStreamer"):
+                ok, err = self.capture.connect_capture_card(config)
+            elif cap_mode == "Teleport":
+                ok, err = self.capture.connect_teleport(host=getattr(config, "teleport_host", ""), port=getattr(config, "teleport_port", "0"))
+        except Exception as e:
+            log_print(f"[UI-DPG] Reconnect capture error: {e}")
+
     def _cb_reconnect_serial(self, sender=None, app_data=None):
         log_print("[UI-DPG] Reconnect serial requested.")
-        if self.tracker and hasattr(self.tracker, "mouse_api"):
+        if self.tracker and hasattr(self.tracker, "mouse_api") and self.tracker.mouse_api is not None:
             try:
                 self.tracker.mouse_api.disconnect()
                 self.tracker.mouse_api.connect()
             except Exception as e:
                 log_print(f"[UI-DPG] Reconnect error: {e}")
+            return
+
+        try:
+            from src.utils.mouse import switch_backend
+            hw_ok, hw_err = switch_backend(
+                getattr(config, "mouse_api", "Serial"),
+                serial_port_mode=getattr(config, "serial_port_mode", "Auto"),
+                serial_port=getattr(config, "serial_port", ""),
+            )
+            log_print(f"[UI-DPG] Mouse backend reconnect: {'OK' if hw_ok else hw_err}")
+        except Exception as e:
+            log_print(f"[UI-DPG] Reconnect error: {e}")
+
+    def _toggle_runtime(self, sender=None, app_data=None):
+        if getattr(self, "_runtime_busy", False):
+            return
+        if getattr(self, "_runtime_active", False):
+            self._stop_runtime()
+        else:
+            self._start_runtime()
+
+    def _start_runtime(self):
+        if getattr(self, "_runtime_busy", False) or getattr(self, "_runtime_active", False):
+            return
+        self._runtime_busy = True
+        log_print("[UI-DPG] Starting hardware + capture runtime...")
+        if dpg.does_item_exist("btn_runtime_toggle"):
+            dpg.set_item_label("btn_runtime_toggle", "[CONNECTING...]")
+        if dpg.does_item_exist("txt_status_badge"):
+            dpg.set_value("txt_status_badge", "STATUS: CONNECTING...")
+            dpg.configure_item("txt_status_badge", color=(251, 191, 36))
+
+        threading.Thread(target=self._start_runtime_worker, daemon=True, name="DPG_RuntimeStart").start()
+
+    def _start_runtime_worker(self):
+        # 1. Connect mouse API
+        mouse_mode = str(getattr(config, "mouse_api", "Serial"))
+        hw_ok, hw_err = False, None
+        try:
+            from src.utils.mouse import switch_backend
+            hw_ok, hw_err = switch_backend(
+                mouse_mode,
+                serial_port_mode=getattr(config, "serial_port_mode", "Auto"),
+                serial_port=getattr(config, "serial_port", ""),
+            )
+        except Exception as e:
+            hw_ok, hw_err = False, str(e)
+
+        # 2. Connect capture backend
+        cap_mode = str(getattr(config, "capture_mode", "UDP"))
+        cap_ok, cap_err = False, None
+        try:
+            if self.capture:
+                self.capture.set_mode(cap_mode)
+                if cap_mode == "UDP":
+                    ip = dpg.get_value("input_udp_ip") if dpg.does_item_exist("input_udp_ip") else getattr(config, "udp_ip", "0.0.0.0")
+                    port = dpg.get_value("input_udp_port") if dpg.does_item_exist("input_udp_port") else getattr(config, "udp_port", 5000)
+                    cap_ok, cap_err = self.capture.connect_udp(str(ip), str(port))
+                elif cap_mode == "NDI":
+                    src = str(getattr(config, "last_ndi_source", ""))
+                    cap_ok, cap_err = self.capture.connect_ndi(src)
+                elif cap_mode == "MSS":
+                    cap_ok, cap_err = self.capture.connect_mss(
+                        int(getattr(config, "mss_monitor_index", 1)),
+                        int(getattr(config, "mss_fov_x", 320)),
+                        int(getattr(config, "mss_fov_y", 320)),
+                    )
+                elif cap_mode in ("CaptureCard", "CaptureCardGStreamer"):
+                    cap_ok, cap_err = self.capture.connect_capture_card(config)
+                elif cap_mode == "Teleport":
+                    cap_ok, cap_err = self.capture.connect_teleport(
+                        host=str(getattr(config, "teleport_host", "")),
+                        port=str(getattr(config, "teleport_port", "0")),
+                        stream_key=str(getattr(config, "teleport_stream_key", "")),
+                    )
+                else:
+                    cap_ok, cap_err = False, f"Unknown capture mode {cap_mode}"
+            else:
+                cap_ok, cap_err = False, "No capture service"
+        except Exception as e:
+            cap_ok, cap_err = False, str(e)
+
+        self.after(0, self._on_runtime_started, hw_ok, hw_err, cap_ok, cap_err, mouse_mode, cap_mode)
+
+    def _on_runtime_started(self, hw_ok, hw_err, cap_ok, cap_err, mouse_mode, cap_mode):
+        self._runtime_busy = False
+        if hw_ok and cap_ok:
+            self._runtime_active = True
+            log_print(f"[UI-DPG] Runtime active: {mouse_mode} + {cap_mode}")
+            if dpg.does_item_exist("btn_runtime_toggle"):
+                dpg.set_item_label("btn_runtime_toggle", "[⏹ STOP RUNTIME]")
+            if dpg.does_item_exist("txt_status_badge"):
+                dpg.set_value("txt_status_badge", f"STATUS: RUNNING ({mouse_mode} + {cap_mode})")
+                dpg.configure_item("txt_status_badge", color=(52, 211, 153))
+        else:
+            self._runtime_active = False
+            err_msg = hw_err if not hw_ok else cap_err
+            log_print(f"[UI-DPG] Runtime start failed: {err_msg}")
+            if dpg.does_item_exist("btn_runtime_toggle"):
+                dpg.set_item_label("btn_runtime_toggle", "[▶ START RUNTIME]")
+            if dpg.does_item_exist("txt_status_badge"):
+                dpg.set_value("txt_status_badge", f"STATUS: FAILED ({err_msg})")
+                dpg.configure_item("txt_status_badge", color=(239, 68, 68))
+
+    def _stop_runtime(self):
+        self._runtime_busy = True
+        try:
+            if self.capture and hasattr(self.capture, "disconnect"):
+                self.capture.disconnect()
+            from src.utils.mouse import disconnect_all
+            disconnect_all()
+        except Exception as e:
+            log_print(f"[UI-DPG] Stop runtime error: {e}")
+        self._runtime_active = False
+        self._runtime_busy = False
+        log_print("[UI-DPG] Runtime stopped.")
+        if dpg.does_item_exist("btn_runtime_toggle"):
+            dpg.set_item_label("btn_runtime_toggle", "[▶ START RUNTIME]")
+        if dpg.does_item_exist("txt_status_badge"):
+            dpg.set_value("txt_status_badge", "STATUS: STOPPED")
+            dpg.configure_item("txt_status_badge", color=(148, 163, 184))
+
+    def _maybe_auto_start_runtime(self):
+        if bool(getattr(config, "auto_connect_mouse_api", True)):
+            self._start_runtime()
 
     def _cb_load_profile(self, sender=None, app_data=None):
         choice = ""
@@ -937,6 +1141,10 @@ class DpgViewerApp:
             return
         self._closed = True
         self._running = False
+        try:
+            self._stop_runtime()
+        except Exception:
+            pass
         for handler in self._close_handlers:
             try:
                 handler()

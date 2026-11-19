@@ -585,6 +585,20 @@ class TestDpgUI(unittest.TestCase):
         self.assertAlmostEqual(self.tracker.normal_y_speed, 142.5, places=5)
         self.assertAlmostEqual(dpg.get_value("cfg_normal_y_speed"), 142.5, places=4)
 
+    def test_runtime_toggle_and_start_stop(self):
+        self.assertFalse(self.app._runtime_active)
+        self.app._toggle_runtime()
+        # Toggle triggers start worker
+        self.app._stop_runtime()
+        self.assertFalse(self.app._runtime_active)
+
+    def test_capture_mode_callback(self):
+        self.app._cb_capture_mode(None, "UDP")
+        self.assertEqual(config.capture_mode, "UDP")
+
+    def test_reconnect_capture_without_crash(self):
+        self.app._cb_reconnect_capture()  # must not raise
+
 
 if __name__ == "__main__":
     unittest.main()
