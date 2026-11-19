@@ -19,6 +19,7 @@ the collaborators on the existing app instead of building a second context.
 
 import copy
 import os
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -27,7 +28,14 @@ import numpy as np
 
 import dearpygui.dearpygui as dpg
 
-from src.ui_dpg import DpgViewerApp
+from src.ui_dpg import (
+    DpgViewerApp,
+    _AIM_TYPE_ITEMS,
+    _CAPTURE_MODE_ITEMS,
+    _MODE_ITEMS,
+    _MOUSE_API_ITEMS,
+    _SERIAL_MODE_ITEMS,
+)
 from src.utils.config import config
 from src.utils.debug_logger import log_print
 
@@ -67,6 +75,48 @@ class MockCapture:
         return self._frame
 
 
+class _ReceiverStub:
+    """UDP receiver stub exposing only the performance stats surface."""
+
+    def __init__(self, stats):
+        self._stats = stats
+
+    def get_performance_stats(self):
+        return self._stats
+
+
+class _UdpManagerStub:
+    def __init__(self, receiver):
+        self._receiver = receiver
+
+    def get_receiver(self):
+        return self._receiver
+
+
+class CaptureTelemetryStub:
+    """Capture service stub publishing UDP stats and/or frame metadata."""
+
+    def __init__(self, stats=None, meta=None, mode="UDP"):
+        self.mode = mode
+        self.udp_manager = _UdpManagerStub(_ReceiverStub(stats)) if stats is not None else None
+        self._meta = meta
+        self.connect_calls = []
+        self.disconnect_calls = 0
+
+    def get_frame_meta(self):
+        return self._meta
+
+    def set_mode(self, mode):
+        self.mode = mode
+
+    def disconnect(self):
+        self.disconnect_calls += 1
+
+    def connect_udp(self, ip, port):
+        self.connect_calls.append((ip, port))
+        return True, None
+
+
 class _CountingSaver:
     """Stands in for ``config.save_to_file`` so tests never touch disk."""
 
@@ -97,6 +147,10 @@ class TestDpgUI(unittest.TestCase):
     def setUp(self):
         config.from_dict(copy.deepcopy(self._config_snapshot))
         self.saver.calls.clear()
+        # The app schedules ``_maybe_auto_start_runtime`` 500 ms after
+        # construction. Keep it disarmed so a slow test can never make the HUD
+        # open real serial/UDP hardware from the test process.
+        config.auto_connect_mouse_api = False
         self.tracker = MockTracker()
         self.app = DpgViewerApp(tracker=self.tracker, capture_service=None)
 
@@ -156,7 +210,7 @@ class TestDpgUI(unittest.TestCase):
         config.enableaim = False
         config.mode = "Silent"
         config.color = "red"
-        config.mouse_api = "Makcu"
+        config.mouse_api = "Medius"
         config.selected_mouse_button = 2
 
         self.assertTrue(self.app._sync_ui_from_config())
@@ -166,7 +220,7 @@ class TestDpgUI(unittest.TestCase):
         self.assertFalse(dpg.get_value("cfg_enableaim"))
         self.assertEqual(dpg.get_value("cfg_mode"), "Silent")
         self.assertEqual(dpg.get_value("cfg_color"), "red")
-        self.assertEqual(dpg.get_value("cfg_mouse_api"), "Makcu")
+        self.assertEqual(dpg.get_value("cfg_mouse_api"), "Medius")
         self.assertEqual(dpg.get_value("cfg_selected_mouse_button"), "Right Mouse")
 
     def test_sync_ui_from_config_is_idempotent(self):
@@ -587,10 +641,27 @@ class TestDpgUI(unittest.TestCase):
 
     def test_runtime_toggle_and_start_stop(self):
         self.assertFalse(self.app._runtime_active)
-        self.app._toggle_runtime()
-        # Toggle triggers start worker
-        self.app._stop_runtime()
+
+        class _DeferredThread:
+            """Records the worker but never runs it: no hardware in tests."""
+
+            started = []
+
+            def __init__(self, target, args=(), **kwargs):
+                self._target = target
+                self._args = args
+
+            def start(self):
+                _DeferredThread.started.append((self._target, self._args))
+
+        with patch("src.ui_dpg.threading.Thread", _DeferredThread):
+            self.app._toggle_runtime()
+        self.assertEqual(len(_DeferredThread.started), 1)
+
+        with patch("src.utils.mouse.disconnect_all", return_value=None):
+            self.app._stop_runtime()
         self.assertFalse(self.app._runtime_active)
+        self.assertFalse(self.app._runtime_busy)
 
     def test_capture_mode_callback(self):
         self.app._cb_capture_mode(None, "UDP")
@@ -598,6 +669,277 @@ class TestDpgUI(unittest.TestCase):
 
     def test_reconnect_capture_without_crash(self):
         self.app._cb_reconnect_capture()  # must not raise
+
+    # --- (j) combo domains ----------------------------------------------
+    def test_combo_domains_match_module_tuples(self):
+        self.assertEqual(_MODE_ITEMS, ("Normal", "Flick", "Silent", "NCAF", "WindMouse", "Bezier", "PID"))
+        self.assertEqual(_AIM_TYPE_ITEMS, ("head", "body", "nearest"))
+        self.assertEqual(_SERIAL_MODE_ITEMS, ("Auto", "Manual"))
+        self.assertEqual(len(_MOUSE_API_ITEMS), 12)
+        self.assertIn("CaptureCardGStreamer", _CAPTURE_MODE_ITEMS)
+
+        cases = (
+            ("mode", "cfg_mode", _MODE_ITEMS),
+            ("aim_type", "cfg_aim_type", _AIM_TYPE_ITEMS),
+            ("mouse_api", "cfg_mouse_api", _MOUSE_API_ITEMS),
+            ("serial_port_mode", "cfg_serial_port_mode", _SERIAL_MODE_ITEMS),
+            ("capture_mode", "cfg_capture_mode", _CAPTURE_MODE_ITEMS),
+        )
+        for key, tag, expected in cases:
+            with self.subTest(tag=tag):
+                # DPG exposes a combo's items in its configuration dict; the
+                # round-trip below also proves the widget really accepts each
+                # value instead of silently keeping the previous one.
+                configured = (dpg.get_item_configuration(tag) or {}).get("items")
+                self.assertIsNotNone(configured, f"{tag} does not expose items")
+                self.assertEqual(tuple(configured), tuple(expected))
+                for value in expected:
+                    setattr(config, key, value)
+                    self.app._sync_ui_from_config()
+                    self.assertEqual(
+                        dpg.get_value(tag),
+                        value,
+                        f"{value!r} was rejected by {tag}",
+                    )
+
+    def test_combo_domains_cover_config_normalisation(self):
+        # Every canonical name the engine normalises to must be selectable, so a
+        # saved profile never hits the "outside items" skip branch.
+        for bogus in ("Makcu", "Kmbox", "kmboxa"):
+            with self.subTest(name=bogus):
+                self.assertNotIn(bogus, _MOUSE_API_ITEMS)
+        self.assertNotIn("COM4", _SERIAL_MODE_ITEMS)
+        self.assertNotIn("neck", _AIM_TYPE_ITEMS)
+
+    def test_engine_choices_sync_into_widgets(self):
+        cases = (
+            ("mode", "PID", "cfg_mode"),
+            ("mode", "NCAF", "cfg_mode"),
+            ("aim_type", "body", "cfg_aim_type"),
+            ("aim_type", "nearest", "cfg_aim_type"),
+            ("serial_port_mode", "Manual", "cfg_serial_port_mode"),
+            ("mouse_api", "Medius", "cfg_mouse_api"),
+            ("capture_mode", "CaptureCardGStreamer", "cfg_capture_mode"),
+        )
+        for key, value, tag in cases:
+            with self.subTest(key=key, value=value):
+                setattr(config, key, value)
+                self.app._sync_ui_from_config()
+                self.assertEqual(dpg.get_value(tag), value)
+
+    def test_serial_port_round_trip(self):
+        config.serial_port = "COM7"
+        self.app._sync_ui_from_config()
+        self.assertEqual(dpg.get_value("cfg_serial_port"), "COM7")
+
+        before = len(self.saver)
+        callback = dpg.get_item_callback("cfg_serial_port")
+        self.assertIsNotNone(callback)
+        callback("cfg_serial_port", "COM12")
+        self.assertEqual(config.serial_port, "COM12")
+        self.assertEqual(len(self.saver), before + 1)
+
+    def test_serial_port_none_displays_empty_string(self):
+        config.serial_port = None
+        self.app._sync_ui_from_config()
+        value = dpg.get_value("cfg_serial_port")
+        # Never the literal "None": an unset port is an empty field.
+        self.assertIn(value, ("", None))
+
+    def test_no_hardcoded_telemetry_strings_in_source(self):
+        source = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "ui_dpg.py")
+        with open(source, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        for stale in ("(AVG 1.8ms)", "144.2 Hz"):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, text)
+
+    def test_initial_sync_matches_config(self):
+        # setUp built the app with the current config: no INITIALIZING badge
+        # and no save during construction.
+        self.assertEqual(len(self.saver), 0)
+        self.assertAlmostEqual(dpg.get_value("cfg_fovsize"), float(config.fovsize), places=4)
+        self.assertEqual(dpg.get_value("cfg_mode"), config.mode)
+        self.assertEqual(dpg.get_value("cfg_serial_port"), str(config.serial_port))
+        badge = dpg.get_value("txt_status_badge")
+        self.assertNotIn("INITIALIZING", badge)
+        self.assertTrue(badge.strip())
+
+        before = len(self.saver)
+        self.app._sync_ui_from_config()
+        self.assertEqual(len(self.saver), before)
+
+    # --- (k) telemetry sources ------------------------------------------
+    def _telemetry_with(self, tracker="keep", capture=None):
+        app = self._use_collaborators(tracker=tracker, capture=capture)
+        app._last_telemetry_time = 0.0
+        return app
+
+    def test_telemetry_reads_udp_stats(self):
+        capture = CaptureTelemetryStub(
+            stats={
+                "current_fps": 120.0,
+                "receive_delay_ms": 1.5,
+                "decode_delay_ms": 2.0,
+                "processing_delay_ms": 0.5,
+                "last_packet_age_s": 0.01,
+            },
+            meta={"publish_latency_ms": 9.9},
+        )
+        app = self._telemetry_with(tracker=None, capture=capture)
+        # UDP stats win over the frame meta latency while the stream is alive.
+        self.assertEqual(app._read_telemetry_sample(), (120.0, 4.0))
+        app._update_telemetry()
+        self.assertAlmostEqual(app.plot_latency[-1], 4.0, places=5)
+        self.assertAlmostEqual(app.plot_fps[-1], 12.0, places=5)
+        self.assertEqual(dpg.get_value("txt_telemetry_avg_lat"), "(AVG 4.0ms)")
+        self.assertEqual(dpg.get_value("txt_telemetry_rate"), "120.0 Hz")
+
+    def test_telemetry_falls_back_to_frame_meta_latency(self):
+        capture = CaptureTelemetryStub(stats={"current_fps": 0.0}, meta={"publish_latency_ms": 6.5})
+        app = self._telemetry_with(tracker=None, capture=capture)
+        self.assertEqual(app._read_telemetry_sample(), (0.0, 6.5))
+
+    def test_telemetry_stalled_udp_reports_zero_fps(self):
+        capture = CaptureTelemetryStub(
+            stats={
+                "current_fps": 144.0,
+                "receive_delay_ms": 1.0,
+                "last_packet_age_s": 5.0,
+            }
+        )
+        app = self._telemetry_with(tracker=None, capture=capture)
+        app._update_telemetry()
+        self.assertEqual(app.plot_fps[-1], 0.0)
+        self.assertEqual(dpg.get_value("txt_telemetry_rate"), "0.0 Hz")
+
+    def test_telemetry_falls_back_to_tracker_without_capture_source(self):
+        capture = CaptureTelemetryStub(stats=None, meta={})
+        app = self._telemetry_with(capture=capture)
+        self.tracker.current_fps = 77.0
+        self.tracker.last_latency_ms = 3.25
+        self.assertEqual(app._read_telemetry_sample(), (77.0, 3.25))
+
+    def test_telemetry_falls_back_to_tracker_perf(self):
+        app = self._telemetry_with(capture=None)
+        self.tracker.last_latency_ms = None
+        self.tracker.perf = {"publish_to_detect_ms": 2.75}
+        self.assertEqual(app._read_telemetry_sample()[1], 2.75)
+
+    def test_telemetry_without_any_source_shows_placeholder(self):
+        app = self._telemetry_with(tracker=None, capture=None)
+        self.assertEqual(app._read_telemetry_sample(), (None, None))
+        app._update_telemetry()
+        self.assertEqual(app.plot_latency[-1], 0.0)
+        self.assertEqual(app.plot_fps[-1], 0.0)
+        self.assertEqual(dpg.get_value("txt_telemetry_avg_lat"), "(AVG --ms)")
+        self.assertEqual(dpg.get_value("txt_telemetry_rate"), "-- Hz")
+
+    def test_telemetry_nan_and_bad_stats_do_not_raise(self):
+        capture = CaptureTelemetryStub(
+            stats={
+                "current_fps": float("nan"),
+                "receive_delay_ms": float("inf"),
+                "decode_delay_ms": "oops",
+                "last_packet_age_s": None,
+            },
+            meta={"publish_latency_ms": float("nan")},
+        )
+        app = self._telemetry_with(tracker=None, capture=capture)
+        app._update_telemetry()
+        self.assertTrue(np.isfinite(app.plot_latency[-1]))
+        self.assertTrue(np.isfinite(app.plot_fps[-1]))
+
+    def test_telemetry_survives_broken_capture(self):
+        capture = MagicMock()
+        capture.mode = "UDP"
+        capture.udp_manager.get_receiver.side_effect = RuntimeError("receiver gone")
+        capture.get_frame_meta.side_effect = RuntimeError("meta gone")
+        app = self._telemetry_with(tracker=None, capture=capture)
+        app._update_telemetry()  # must not raise
+        self.assertTrue(np.isfinite(app.plot_latency[-1]))
+
+    def test_telemetry_avg_uses_measured_samples_only(self):
+        app = self._telemetry_with(capture=None)
+        self.tracker.last_latency_ms = 10.0
+        app._last_telemetry_time = 0.0
+        app._update_telemetry()
+        self.tracker.last_latency_ms = 20.0
+        app._last_telemetry_time = 0.0
+        app._update_telemetry()
+        self.assertEqual(dpg.get_value("txt_telemetry_avg_lat"), "(AVG 15.0ms)")
+
+    def test_telemetry_after_close_is_silent(self):
+        app = self._telemetry_with(capture=None)
+        app._on_close()
+        app._last_telemetry_time = 0.0
+        before = list(app.plot_latency)
+        with patch("src.ui_dpg.dpg.set_value") as set_value:
+            app._update_telemetry()
+            app._process_callbacks()
+        set_value.assert_not_called()
+        self.assertEqual(app.plot_latency, before)
+
+    # --- (l) thread safety ----------------------------------------------
+    def test_start_runtime_worker_never_calls_dpg(self):
+        capture = CaptureTelemetryStub(stats={}, meta={})
+        app = self._use_collaborators(capture=capture)
+        config.capture_mode = "UDP"
+        dpg.set_value("input_udp_ip", "10.0.0.5")
+        dpg.set_value("input_udp_port", "6001")
+        main_thread = threading.current_thread().ident
+        read_threads = []
+        real_get_value = dpg.get_value
+
+        def _record_thread(tag, *args, **kwargs):
+            read_threads.append(threading.current_thread().ident)
+            return real_get_value(tag, *args, **kwargs)
+
+        with patch("src.ui_dpg.dpg.get_value", side_effect=_record_thread), patch(
+            "src.utils.mouse.switch_backend", return_value=(True, None)
+        ):
+            app._start_runtime()
+            # The worker is a real background thread: wait for it to reach
+            # connect_udp, i.e. past every DPG access it might attempt.
+            deadline = time.time() + 10.0
+            while not capture.connect_calls and time.time() < deadline:
+                time.sleep(0.01)
+
+        self.assertEqual(capture.connect_calls, [("10.0.0.5", "6001")])
+        # Both widget reads happened, and all of them on the caller's thread.
+        self.assertEqual(len(read_threads), 2)
+        self.assertEqual(
+            set(read_threads),
+            {main_thread},
+            "dpg.get_value was called from a background thread",
+        )
+
+    def test_start_runtime_worker_ignores_config_endpoint_when_ui_has_values(self):
+        capture = CaptureTelemetryStub(stats={}, meta={})
+        app = self._use_collaborators(capture=capture)
+        config.capture_mode = "UDP"
+        config.udp_ip = "0.0.0.0"
+        config.udp_port = "5000"
+        dpg.set_value("input_udp_ip", "192.168.1.9")
+        dpg.set_value("input_udp_port", "7000")
+
+        with patch("src.utils.mouse.switch_backend", return_value=(True, None)):
+            app._start_runtime_worker("192.168.1.9", "7000")
+        self.assertEqual(capture.connect_calls, [("192.168.1.9", "7000")])
+
+    def test_read_udp_endpoint_falls_back_to_config(self):
+        app = self._use_collaborators(capture=None)
+        config.udp_ip = "1.2.3.4"
+        config.udp_port = "4444"
+        with patch("src.ui_dpg.dpg.does_item_exist", return_value=False):
+            self.assertEqual(app._read_udp_endpoint(), ("1.2.3.4", "4444"))
+
+    def test_start_runtime_after_close_is_noop(self):
+        app = self._use_collaborators(capture=CaptureTelemetryStub())
+        app._on_close()
+        with patch("src.ui_dpg.threading.Thread") as thread_cls:
+            app._start_runtime()
+        thread_cls.assert_not_called()
 
 
 if __name__ == "__main__":

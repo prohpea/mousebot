@@ -413,6 +413,7 @@ class Config:
         # Persist UI collapsible section open/closed state per tab.
         self.ui_collapsible_states = {}
         self.legacy_ui_mode = False
+        self.ui_framework = "dpg"
         self.ui_theme = "nord"
         # Tactical HUD shell state (width mode, accent cycle, background variant).
         self.ui_hud_mode = "simple"
@@ -886,6 +887,7 @@ class Config:
             "show_distance_text": self.show_distance_text,
             "ui_collapsible_states": self.ui_collapsible_states,
             "legacy_ui_mode": self.legacy_ui_mode,
+            "ui_framework": getattr(self, "ui_framework", "dpg"),
             "ui_theme": self.ui_theme,
             "ui_hud_mode": self.ui_hud_mode,
             "ui_accent": self.ui_accent,
@@ -1418,6 +1420,8 @@ class Config:
         else:
             self.ui_collapsible_states = {}
         self.legacy_ui_mode = bool(getattr(self, "legacy_ui_mode", False))
+        ui_framework = str(data.get("ui_framework", getattr(self, "ui_framework", "dpg"))).strip().lower()
+        self.ui_framework = ui_framework if ui_framework in {"dpg", "tk"} else "dpg"
         theme = str(getattr(self, "ui_theme", "nord")).strip().lower()
         if theme not in {"nord", "emerald", "dracula", "ocean", "neon", "classic", "tactical"}:
             theme = "classic" if self.legacy_ui_mode else "nord"

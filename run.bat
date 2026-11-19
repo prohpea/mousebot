@@ -46,16 +46,16 @@ if exist "venv\Scripts\python.exe" (
 goto :launch_sys
 
 :launch_venv
-echo [*] Dang khoi dong CVM colorBot (Virtual Environment)...
+echo [*] Dang khoi dong CVM colorBot (Virtual Environment - Demo 2 GPU HUD)...
 echo.
-"venv\Scripts\python.exe" main.py
+"venv\Scripts\python.exe" main.py --dpg %*
 goto :check_exit
 
 :launch_sys
-echo [*] Dang khoi dong CVM colorBot (Native 64-bit Python)...
+echo [*] Dang khoi dong CVM colorBot (Native 64-bit Python - Demo 2 GPU HUD)...
 echo.
 set "PYTHONPATH=%~dp0venv\Lib\site-packages;%PYTHONPATH%"
-python main.py
+python main.py --dpg %*
 goto :check_exit
 
 :check_exit

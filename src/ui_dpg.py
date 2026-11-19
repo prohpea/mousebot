@@ -21,6 +21,52 @@ from src.utils.config import config
 from src.utils.debug_logger import get_recent_logs, log_print
 
 
+# Engine/backend domains accepted by ``config`` and the runtime dispatchers.
+# These tuples are a deliberate copy: ``src/ui_dpg.py`` must not import the
+# private normalisers of ``src/utils`` (config owns storage, this module only
+# offers the values the engine actually understands). ``tests/test_ui_dpg.py``
+# asserts the combos expose exactly these tuples so a silent drift is caught.
+_MODE_ITEMS = ("Normal", "Flick", "Silent", "NCAF", "WindMouse", "Bezier", "PID")
+_AIM_TYPE_ITEMS = ("head", "body", "nearest")
+_MOUSE_API_ITEMS = (
+    "Serial",
+    "Arduino",
+    "SendInput",
+    "Net",
+    "KmboxA",
+    "MakV2",
+    "MakcuController",
+    "MakxdMakAPI",
+    "MakAPI",
+    "DHZ",
+    "Ferrum",
+    "Medius",
+)
+_SERIAL_MODE_ITEMS = ("Auto", "Manual")
+_CAPTURE_MODE_ITEMS = ("UDP", "NDI", "MSS", "CaptureCard", "CaptureCardGStreamer", "Teleport")
+
+# A UDP stream whose last datagram is older than this is treated as stalled:
+# the receiver's cached FPS would otherwise keep the HUD green while the feed is
+# dead (same intent as the Tk HUD's starvation check).
+_UDP_STALL_SECONDS = 1.0
+
+
+def _finite_float(value):
+    """Return ``value`` as a finite float, else ``None`` (never raises).
+
+    Rejects ``bool``/``str``/``None`` so a stray flag or a non-numeric metric
+    never reads as a measurement, but accepts any numeric type (including
+    ``numpy`` scalars, which are not ``float`` subclasses).
+    """
+    if value is None or isinstance(value, (bool, str, bytes)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 class DpgViewerApp:
     """
     High-Performance GPU-Accelerated UI for CVM-colorBot powered by DearPyGui (DirectX 11).
@@ -62,6 +108,7 @@ class DpgViewerApp:
         ("ai_detection_enabled", bool),
         ("mouse_api", str),
         ("serial_port_mode", str),
+        ("serial_port", str),
         ("serial_auto_switch_4m", bool),
         ("in_game_sens", float),
         ("mouse_dpi", int),
@@ -100,12 +147,22 @@ class DpgViewerApp:
         self.plot_fps = [0.0] * self.max_plot_pts
         self._last_telemetry_time = time.time()
         self._last_frame_seq = 0
+        # Only measured latencies feed the AVG label; the pre-filled plot window
+        # is placeholder data, not a sample.
+        self._latency_history = []
+        self._telemetry_error_logged = False
 
         # Build DPG context & viewport
         dpg.create_context()
         self._setup_theme()
         self._build_textures()
         self._build_gui()
+
+        # The window opens already matching ``config``: main.py reloads the
+        # profile *after* the UI is built, and the hotkey path only syncs later,
+        # so without this pass the HUD would sit on its INITIALIZING badge until
+        # the first interaction. Pure read-and-display: no save, no tracker.
+        self._sync_ui_from_config()
 
         # Auto-connect mouse and capture if enabled (matching ViewerApp)
         self.after(500, self._maybe_auto_start_runtime)
@@ -168,22 +225,23 @@ class DpgViewerApp:
             )
 
     def _build_gui(self):
-        """Construct the DPG window and tabs."""
+        """Construct the DPG window and tabs matching Demo 2 (ImGui Tactical HUD)."""
         dpg.create_viewport(
-            title="CVM-colorBot v1.2.2 [GPU HUD • 240Hz]",
+            title="CVM-colorBot — Demo 2: DearPyGui / ImGui (GPU 240 FPS HUD)",
             width=760,
-            height=680,
+            height=700,
             min_width=640,
             min_height=520,
         )
 
         with dpg.window(tag="PrimaryWindow"):
-            # Header status bar
+            # Header status bar matching Demo 2
             with dpg.group(horizontal=True):
-                dpg.add_text("CVM COLORBOT", color=(56, 189, 248))
-                dpg.add_text("|", color=(80, 80, 100))
-                dpg.add_text("DirectX 11", color=(148, 163, 184))
-                dpg.add_spacer(width=10)
+                dpg.add_text("●", color=(56, 189, 248))
+                dpg.add_text("[IMGUI] TACTICAL HUD", color=(56, 189, 248))
+                dpg.add_text("•", color=(80, 80, 100))
+                dpg.add_text("D3D11 • 240 FPS", color=(148, 163, 184))
+                dpg.add_spacer(width=20)
                 dpg.add_button(
                     label="[▶ START RUNTIME]",
                     tag="btn_runtime_toggle",
@@ -194,20 +252,20 @@ class DpgViewerApp:
             dpg.add_separator()
 
             with dpg.tab_bar(tag="main_tab_bar"):
-                # TAB 1: COMBAT (Aimbot & Triggerbot)
-                with dpg.tab(label="COMBAT"):
+                # TAB 1: AIMBOT
+                with dpg.tab(label="AIMBOT"):
                     self._build_combat_tab()
 
-                # TAB 2: VISION (Color Filter, Anti-Noise & AI)
-                with dpg.tab(label="VISION"):
+                # TAB 2: COLOR_HSV
+                with dpg.tab(label="COLOR_HSV"):
                     self._build_vision_tab()
 
-                # TAB 3: HARDWARE (Mouse, Serial, Sens)
-                with dpg.tab(label="HARDWARE"):
+                # TAB 3: SERIAL_IO
+                with dpg.tab(label="SERIAL_IO"):
                     self._build_hardware_tab()
 
-                # TAB 4: TELEMETRY & LOGS
-                with dpg.tab(label="TELEMETRY"):
+                # TAB 4: GRAPHS
+                with dpg.tab(label="GRAPHS"):
                     self._build_telemetry_tab()
 
                 # TAB 5: PROFILES
@@ -219,43 +277,50 @@ class DpgViewerApp:
 
     def _build_combat_tab(self):
         with dpg.child_window(border=False):
-            with dpg.collapsing_header(label="Main Aimbot Settings", default_open=True):
-                dpg.add_checkbox(
-                    label="Enable Main Aimbot",
-                    tag=self._cfg_tag("enableaim"),
-                    default_value=bool(getattr(config, "enableaim", True)),
-                    callback=self._make_config_cb("enableaim", bool),
-                )
+            # Card 1: Primary Aimbot Control
+            with dpg.child_window(border=True, auto_resize_y=True):
                 with dpg.group(horizontal=True):
+                    dpg.add_checkbox(
+                        label="Active Primary Aim",
+                        tag=self._cfg_tag("enableaim"),
+                        default_value=bool(getattr(config, "enableaim", True)),
+                        callback=self._make_config_cb("enableaim", bool),
+                    )
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("ENGINE:", color=(148, 163, 184))
                     dpg.add_combo(
-                        items=["WindMouse", "Normal", "Bezier", "Flick", "Silent"],
+                        items=list(_MODE_ITEMS),
                         tag=self._cfg_tag("mode"),
                         default_value=str(getattr(config, "mode", "WindMouse")),
-                        label="Aim Engine",
-                        width=180,
+                        width=140,
                         callback=self._make_config_cb("mode", str),
                     )
+                    dpg.add_text("BONE:", color=(148, 163, 184))
                     dpg.add_combo(
-                        items=["head", "neck", "chest"],
+                        items=list(_AIM_TYPE_ITEMS),
                         tag=self._cfg_tag("aim_type"),
                         default_value=str(getattr(config, "aim_type", "head")),
-                        label="Aim Bone",
-                        width=140,
+                        width=110,
                         callback=self._make_config_cb("aim_type", str),
                     )
 
                 with dpg.group(horizontal=True):
+                    dpg.add_text("Activation Key:", color=(148, 163, 184))
                     dpg.add_combo(
                         items=["Left Mouse", "Right Mouse", "Side Mouse 4", "Side Mouse 5"],
                         tag=self._cfg_tag("selected_mouse_button"),
                         default_value=self._get_btn_name(getattr(config, "selected_mouse_button", 4)),
-                        label="Activation Key",
                         width=180,
                         callback=self._cb_aim_btn,
                     )
 
+            dpg.add_spacer(height=4)
+
+            # Card 2: FOV Radial Radius
+            with dpg.child_window(border=True, auto_resize_y=True):
+                dpg.add_text("FOV RADIAL RADIUS", color=(56, 189, 248))
                 dpg.add_slider_float(
-                    label="FOV Radius (px)",
+                    label="Radius (px)",
                     tag=self._cfg_tag("fovsize"),
                     min_value=5.0,
                     max_value=120.0,
@@ -263,6 +328,11 @@ class DpgViewerApp:
                     callback=self._make_config_cb("fovsize", float),
                 )
 
+            dpg.add_spacer(height=4)
+
+            # Card 3: Target Smoothing & Speed
+            with dpg.child_window(border=True, auto_resize_y=True):
+                dpg.add_text("TARGET SMOOTH (SPEED X / Y)", color=(56, 189, 248))
                 with dpg.group(horizontal=True):
                     dpg.add_slider_float(
                         label="Speed X",
@@ -283,6 +353,11 @@ class DpgViewerApp:
                         callback=self._make_config_cb("normal_y_speed", float),
                     )
 
+            dpg.add_spacer(height=4)
+
+            # Card 4: WindMouse Settle & Aim Offsets
+            with dpg.child_window(border=True, auto_resize_y=True):
+                dpg.add_text("WINDMOUSE TRAJECTORY & OFFSETS", color=(56, 189, 248))
                 dpg.add_slider_float(
                     label="WindMouse Settle Radius (px)",
                     tag=self._cfg_tag("wm_settle_radius_px"),
@@ -291,7 +366,6 @@ class DpgViewerApp:
                     default_value=float(getattr(config, "wm_settle_radius_px", 2.8)),
                     callback=self._make_config_cb("wm_settle_radius_px", float),
                 )
-
                 with dpg.group(horizontal=True):
                     dpg.add_slider_int(
                         label="Aim Offset X",
@@ -312,55 +386,74 @@ class DpgViewerApp:
                         callback=self._make_config_cb("aim_offsetY", int),
                     )
 
-            with dpg.collapsing_header(label="Secondary Aim (ADS / Sniping)", default_open=False):
-                dpg.add_checkbox(
-                    label="Enable ADS Secondary Aim",
-                    tag=self._cfg_tag("ads_fov_enabled"),
-                    default_value=bool(getattr(config, "ads_fov_enabled", True)),
-                    callback=self._make_config_cb("ads_fov_enabled", bool),
-                )
-                dpg.add_slider_float(
-                    label="ADS FOV Radius (px)",
-                    tag=self._cfg_tag("ads_fovsize"),
-                    min_value=10.0,
-                    max_value=200.0,
-                    default_value=float(getattr(config, "ads_fovsize", 45.0)),
-                    callback=self._make_config_cb("ads_fovsize", float),
-                )
-                with dpg.group(horizontal=True):
-                    dpg.add_slider_float(
-                        label="ADS Speed X",
-                        tag=self._cfg_tag("normal_x_speed_sec"),
-                        min_value=10.0,
-                        max_value=250.0,
-                        default_value=float(getattr(config, "normal_x_speed_sec", 100.0)),
-                        width=220,
-                        callback=self._make_config_cb("normal_x_speed_sec", float),
+            dpg.add_spacer(height=4)
+
+            # Card 5: Secondary Aim (ADS) & Triggerbot
+            with dpg.child_window(border=True, auto_resize_y=True):
+                with dpg.collapsing_header(label="Secondary Aim (ADS / Sniping)", default_open=False):
+                    dpg.add_checkbox(
+                        label="Enable ADS Secondary Aim",
+                        tag=self._cfg_tag("ads_fov_enabled"),
+                        default_value=bool(getattr(config, "ads_fov_enabled", True)),
+                        callback=self._make_config_cb("ads_fov_enabled", bool),
                     )
                     dpg.add_slider_float(
-                        label="ADS Speed Y",
-                        tag=self._cfg_tag("normal_y_speed_sec"),
+                        label="ADS FOV Radius (px)",
+                        tag=self._cfg_tag("ads_fovsize"),
                         min_value=10.0,
-                        max_value=250.0,
-                        default_value=float(getattr(config, "normal_y_speed_sec", 60.0)),
-                        width=220,
-                        callback=self._make_config_cb("normal_y_speed_sec", float),
+                        max_value=200.0,
+                        default_value=float(getattr(config, "ads_fovsize", 45.0)),
+                        callback=self._make_config_cb("ads_fovsize", float),
+                    )
+                    with dpg.group(horizontal=True):
+                        dpg.add_slider_float(
+                            label="ADS Speed X",
+                            tag=self._cfg_tag("normal_x_speed_sec"),
+                            min_value=10.0,
+                            max_value=250.0,
+                            default_value=float(getattr(config, "normal_x_speed_sec", 100.0)),
+                            width=220,
+                            callback=self._make_config_cb("normal_x_speed_sec", float),
+                        )
+                        dpg.add_slider_float(
+                            label="ADS Speed Y",
+                            tag=self._cfg_tag("normal_y_speed_sec"),
+                            min_value=10.0,
+                            max_value=250.0,
+                            default_value=float(getattr(config, "normal_y_speed_sec", 60.0)),
+                            width=220,
+                            callback=self._make_config_cb("normal_y_speed_sec", float),
+                        )
+
+                with dpg.collapsing_header(label="Triggerbot Settings", default_open=False):
+                    dpg.add_checkbox(
+                        label="Enable Triggerbot",
+                        tag=self._cfg_tag("enabletb"),
+                        default_value=bool(getattr(config, "enabletb", False)),
+                        callback=self._make_config_cb("enabletb", bool),
+                    )
+                    dpg.add_slider_float(
+                        label="Triggerbot FOV (px)",
+                        tag=self._cfg_tag("tbfovsize"),
+                        min_value=1.0,
+                        max_value=30.0,
+                        default_value=float(getattr(config, "tbfovsize", 5.0)),
+                        callback=self._make_config_cb("tbfovsize", float),
                     )
 
-            with dpg.collapsing_header(label="Triggerbot Settings", default_open=False):
-                dpg.add_checkbox(
-                    label="Enable Triggerbot",
-                    tag=self._cfg_tag("enabletb"),
-                    default_value=bool(getattr(config, "enabletb", False)),
-                    callback=self._make_config_cb("enabletb", bool),
+            dpg.add_spacer(height=6)
+
+            # Card 6: Quick Action Buttons matching Demo 2 mockup
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="APPLY PROFILE",
+                    width=220,
+                    callback=self._cb_load_profile,
                 )
-                dpg.add_slider_float(
-                    label="Trigger FOV (px)",
-                    tag=self._cfg_tag("tbfovsize"),
-                    min_value=1.0,
-                    max_value=30.0,
-                    default_value=float(getattr(config, "tbfovsize", 3.3)),
-                    callback=self._make_config_cb("tbfovsize", float),
+                dpg.add_button(
+                    label="SAVE ACTIVE",
+                    width=160,
+                    callback=self._cb_save_profile,
                 )
 
     def _build_vision_tab(self):
@@ -506,7 +599,7 @@ class DpgViewerApp:
             dpg.add_text("Mouse Hardware & Sensitivity Interface", color=(56, 189, 248))
             with dpg.group(horizontal=True):
                 dpg.add_combo(
-                    items=["Serial", "Makcu", "Ferrum", "Kmbox", "SendInput"],
+                    items=list(_MOUSE_API_ITEMS),
                     tag=self._cfg_tag("mouse_api"),
                     default_value=str(getattr(config, "mouse_api", "Serial")),
                     label="Mouse API",
@@ -514,12 +607,19 @@ class DpgViewerApp:
                     callback=self._make_config_cb("mouse_api", str),
                 )
                 dpg.add_combo(
-                    items=["Auto", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9"],
+                    items=list(_SERIAL_MODE_ITEMS),
                     tag=self._cfg_tag("serial_port_mode"),
                     default_value=str(getattr(config, "serial_port_mode", "Auto")),
                     label="Serial Port",
                     width=140,
                     callback=self._make_config_cb("serial_port_mode", str),
+                )
+                dpg.add_input_text(
+                    label="Port Name",
+                    tag=self._cfg_tag("serial_port"),
+                    default_value=str(getattr(config, "serial_port", "") or ""),
+                    width=110,
+                    callback=self._make_config_cb("serial_port", str),
                 )
 
             dpg.add_checkbox(
@@ -555,7 +655,7 @@ class DpgViewerApp:
             dpg.add_text("Video Capture Ingest Stream", color=(56, 189, 248))
             with dpg.group(horizontal=True):
                 dpg.add_combo(
-                    items=["UDP", "NDI", "MSS", "CaptureCard", "Teleport"],
+                    items=list(_CAPTURE_MODE_ITEMS),
                     tag=self._cfg_tag("capture_mode"),
                     default_value=str(getattr(config, "capture_mode", "UDP")),
                     label="Capture Mode",
@@ -590,31 +690,46 @@ class DpgViewerApp:
 
     def _build_telemetry_tab(self):
         with dpg.child_window(border=False):
-            dpg.add_text("Hardware-Accelerated Real-Time Telemetry (DirectX 11)", color=(56, 189, 248))
+            # Telemetry Overview Card matching Demo 2 mockup
+            with dpg.child_window(border=True, auto_resize_y=True):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("TELEMETRY: LATENCY", color=(56, 189, 248))
+                    dpg.add_text("(AVG --ms)", tag="txt_telemetry_avg_lat", color=(148, 163, 184))
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("TRACK RATE:", color=(148, 163, 184))
+                    dpg.add_text("-- Hz", tag="txt_telemetry_rate", color=(52, 211, 153))
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("D3D11 • 240 FPS HUD", color=(148, 163, 184))
+
+            dpg.add_spacer(height=4)
 
             # GPU Plot: Frame Latency & FPS
-            with dpg.plot(label="Latency & FPS Plot (0% CPU)", height=160, width=-1):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="Frame Timeline", no_tick_labels=True)
-                y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Latency (ms) / FPS / 10")
-                dpg.set_axis_limits(y_axis, 0, 30)
-                self.series_latency = dpg.add_line_series(
-                    self.plot_x, self.plot_latency, label="Latency (ms)", parent=y_axis
-                )
-                self.series_fps = dpg.add_line_series(
-                    self.plot_x, self.plot_fps, label="Track FPS / 10", parent=y_axis
-                )
+            with dpg.child_window(border=True, auto_resize_y=True):
+                with dpg.plot(label="DirectX 11 Latency & FPS Telemetry (0% CPU)", height=160, width=-1):
+                    dpg.add_plot_legend()
+                    dpg.add_plot_axis(dpg.mvXAxis, label="Frame Timeline (last 100 frames)", no_tick_labels=True)
+                    y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Latency (ms) / FPS / 10")
+                    dpg.set_axis_limits(y_axis, 0, 30)
+                    self.series_latency = dpg.add_line_series(
+                        self.plot_x, self.plot_latency, label="Latency (ms)", parent=y_axis
+                    )
+                    self.series_fps = dpg.add_line_series(
+                        self.plot_x, self.plot_fps, label="Track FPS / 10", parent=y_axis
+                    )
 
-            dpg.add_separator()
-            dpg.add_text("Live Logging Console:", color=(148, 163, 184))
-            dpg.add_input_text(
-                tag="txt_log_console",
-                multiline=True,
-                readonly=True,
-                height=160,
-                width=-1,
-                default_value="[System] DPG GPU Engine started.\n",
-            )
+            dpg.add_spacer(height=4)
+
+            # Live Logging Console Card
+            with dpg.child_window(border=True, auto_resize_y=True):
+                dpg.add_text("TACTICAL LOG TERMINAL", color=(56, 189, 248))
+                dpg.add_input_text(
+                    tag="txt_log_console",
+                    multiline=True,
+                    readonly=True,
+                    height=160,
+                    width=-1,
+                    default_value="[System] DPG GPU Engine started.\n",
+                )
 
     def _build_profiles_tab(self):
         with dpg.child_window(border=False):
@@ -676,6 +791,9 @@ class DpgViewerApp:
                 raw = getattr(config, key, None)
                 if key == "selected_mouse_button":
                     value = self._get_btn_name(int(raw))
+                elif key in ("serial_port", "mouse_api", "serial_port_mode"):
+                    # Free-text/backend names: never display the string "None".
+                    value = str(raw or "")
                 else:
                     value = type_fn(raw)
 
@@ -777,8 +895,7 @@ class DpgViewerApp:
             self.capture.disconnect()
             self.capture.set_mode(cap_mode)
             if cap_mode == "UDP":
-                ip = dpg.get_value("input_udp_ip") if dpg.does_item_exist("input_udp_ip") else getattr(config, "udp_ip", "0.0.0.0")
-                port = dpg.get_value("input_udp_port") if dpg.does_item_exist("input_udp_port") else getattr(config, "udp_port", 5000)
+                ip, port = self._read_udp_endpoint()
                 config.udp_ip = str(ip)
                 config.udp_port = str(port)
                 config.save_to_file()
@@ -824,7 +941,35 @@ class DpgViewerApp:
         else:
             self._start_runtime()
 
+    def _read_udp_endpoint(self):
+        """Read the UDP endpoint widgets **on the UI thread**.
+
+        DPG is not thread safe, so the worker must never call ``dpg.get_value``.
+        ``_start_runtime()`` captures both fields here and hands them to the
+        worker as plain strings. Values fall back to ``config`` (never to a
+        hard-coded default) when a widget is missing.
+        """
+        ip = ""
+        port = ""
+        try:
+            if dpg.does_item_exist("input_udp_ip"):
+                ip = dpg.get_value("input_udp_ip")
+        except Exception as e:
+            log_print(f"[UI-DPG] Could not read UDP IP: {e}")
+        try:
+            if dpg.does_item_exist("input_udp_port"):
+                port = dpg.get_value("input_udp_port")
+        except Exception as e:
+            log_print(f"[UI-DPG] Could not read UDP port: {e}")
+        if ip in (None, ""):
+            ip = getattr(config, "udp_ip", "0.0.0.0")
+        if port in (None, ""):
+            port = getattr(config, "udp_port", 5000)
+        return str(ip), str(port)
+
     def _start_runtime(self):
+        if self._closed:
+            return
         if getattr(self, "_runtime_busy", False) or getattr(self, "_runtime_active", False):
             return
         self._runtime_busy = True
@@ -835,9 +980,22 @@ class DpgViewerApp:
             dpg.set_value("txt_status_badge", "STATUS: CONNECTING...")
             dpg.configure_item("txt_status_badge", color=(251, 191, 36))
 
-        threading.Thread(target=self._start_runtime_worker, daemon=True, name="DPG_RuntimeStart").start()
+        # Read the UI-owned values before leaving this thread.
+        udp_ip, udp_port = self._read_udp_endpoint()
+        threading.Thread(
+            target=self._start_runtime_worker,
+            args=(udp_ip, udp_port),
+            daemon=True,
+            name="DPG_RuntimeStart",
+        ).start()
 
-    def _start_runtime_worker(self):
+    def _start_runtime_worker(self, udp_ip, udp_port):
+        """Connect hardware + capture off the UI thread.
+
+        This runs on a background thread: it may touch ``config`` and the
+        capture service but must never call ``dpg.*`` (the endpoint was read by
+        ``_read_udp_endpoint`` before the thread was spawned).
+        """
         # 1. Connect mouse API
         mouse_mode = str(getattr(config, "mouse_api", "Serial"))
         hw_ok, hw_err = False, None
@@ -858,9 +1016,7 @@ class DpgViewerApp:
             if self.capture:
                 self.capture.set_mode(cap_mode)
                 if cap_mode == "UDP":
-                    ip = dpg.get_value("input_udp_ip") if dpg.does_item_exist("input_udp_ip") else getattr(config, "udp_ip", "0.0.0.0")
-                    port = dpg.get_value("input_udp_port") if dpg.does_item_exist("input_udp_port") else getattr(config, "udp_port", 5000)
-                    cap_ok, cap_err = self.capture.connect_udp(str(ip), str(port))
+                    cap_ok, cap_err = self.capture.connect_udp(str(udp_ip), str(udp_port))
                 elif cap_mode == "NDI":
                     src = str(getattr(config, "last_ndi_source", ""))
                     cap_ok, cap_err = self.capture.connect_ndi(src)
@@ -990,6 +1146,8 @@ class DpgViewerApp:
             self._close_handlers.append(handler)
 
     def _process_callbacks(self):
+        if self._closed:
+            return
         now = time.time()
         to_run = []
         with self._callback_lock:
@@ -1007,27 +1165,119 @@ class DpgViewerApp:
             except Exception as e:
                 print(f"[UI-DPG] Callback error: {e}")
 
+    def _udp_performance_stats(self):
+        """Return the UDP receiver's stats dict, or ``None``.
+
+        Read-only and defensive: the capture service may be ``None``, a mock, or
+        a real service whose receiver is not bound yet.
+        """
+        capture = self.capture if self.capture is not None else self.capture_service
+        if capture is None:
+            return None
+        try:
+            mode = getattr(capture, "mode", None)
+            if isinstance(mode, str) and mode != "UDP":
+                return None
+            manager = getattr(capture, "udp_manager", None)
+            if manager is None:
+                return None
+            getter = getattr(manager, "get_receiver", None)
+            if not callable(getter):
+                return None
+            receiver = getter()
+            if receiver is None:
+                return None
+            stats_getter = getattr(receiver, "get_performance_stats", None)
+            if not callable(stats_getter):
+                return None
+            stats = stats_getter()
+            return stats if isinstance(stats, dict) else None
+        except Exception as e:
+            self._log_telemetry_error(e)
+            return None
+
+    def _log_telemetry_error(self, error):
+        """Log telemetry read failures once, not ten times per second."""
+        if not self._telemetry_error_logged:
+            self._telemetry_error_logged = True
+            log_print(f"[UI-DPG] Telemetry source unavailable: {error}")
+
+    def _read_telemetry_sample(self):
+        """Read one ``(fps, latency_ms)`` sample from the real pipeline.
+
+        Priority: live UDP receiver stats, then the last frame's publish
+        latency, then the tracker counters kept for compatibility. Either side
+        may be ``None`` when no source reports it; callers display ``--`` and
+        push ``0.0`` into the plot. Never raises.
+        """
+        fps = None
+        latency = None
+
+        stats = self._udp_performance_stats()
+        if stats is not None:
+            fps = _finite_float(stats.get("current_fps"))
+            age = _finite_float(stats.get("last_packet_age_s"))
+            if age is not None and age > _UDP_STALL_SECONDS:
+                # Bind succeeded but the feed is dead: a cached FPS would lie.
+                fps = 0.0
+            delays = []
+            for key in ("receive_delay_ms", "decode_delay_ms", "processing_delay_ms"):
+                value = _finite_float(stats.get(key))
+                if value is not None:
+                    delays.append(value)
+            if delays:
+                latency = _finite_float(sum(delays))
+
+        capture = self.capture if self.capture is not None else self.capture_service
+        if latency is None and capture is not None:
+            meta_getter = getattr(capture, "get_frame_meta", None)
+            if callable(meta_getter):
+                try:
+                    meta = meta_getter()
+                except Exception as e:
+                    self._log_telemetry_error(e)
+                    meta = None
+                if isinstance(meta, dict):
+                    latency = _finite_float(meta.get("publish_latency_ms"))
+
+        tracker = self.tracker
+        if tracker is not None:
+            if fps is None:
+                try:
+                    fps = _finite_float(getattr(tracker, "current_fps", None))
+                except Exception as e:
+                    self._log_telemetry_error(e)
+            if latency is None:
+                try:
+                    latency = _finite_float(getattr(tracker, "last_latency_ms", None))
+                except Exception as e:
+                    self._log_telemetry_error(e)
+            if latency is None:
+                perf = getattr(tracker, "perf", None)
+                if isinstance(perf, dict):
+                    latency = _finite_float(perf.get("publish_to_detect_ms"))
+
+        return fps, latency
+
     def _update_telemetry(self):
+        if self._closed:
+            return
         now = time.time()
         if now - self._last_telemetry_time >= 0.1:  # 10 Hz telemetry sample rate
             self._last_telemetry_time = now
 
-            # Fetch FPS and Latency from tracker/capture
-            current_fps = getattr(self.tracker, "current_fps", 144.0) if self.tracker else 144.0
-            latency = getattr(self.tracker, "last_latency_ms", 1.8) if self.tracker else 1.8
-
-            try:
-                current_fps = float(current_fps)
-            except (TypeError, ValueError):
-                current_fps = 144.0
-            try:
-                latency = float(latency)
-            except (TypeError, ValueError):
-                latency = 1.8
-            if not math.isfinite(latency):
-                latency = 0.0
-            if not math.isfinite(current_fps):
+            current_fps, latency = self._read_telemetry_sample()
+            fps_known = current_fps is not None
+            if not fps_known:
                 current_fps = 0.0
+            if latency is None:
+                latency = 0.0
+            else:
+                # Average only measured samples: the pre-filled zeros of the
+                # plot window are placeholders, not measurements.
+                self._latency_history.append(latency)
+                if len(self._latency_history) > self.max_plot_pts:
+                    del self._latency_history[: -self.max_plot_pts]
 
             self.plot_latency.pop(0)
             self.plot_latency.append(latency)
@@ -1040,6 +1290,18 @@ class DpgViewerApp:
             series_fps = getattr(self, "series_fps", None)
             if series_fps is not None and dpg.does_item_exist(series_fps):
                 dpg.set_value(series_fps, [self.plot_x, self.plot_fps])
+
+            if dpg.does_item_exist("txt_telemetry_avg_lat"):
+                if self._latency_history:
+                    avg = sum(self._latency_history) / len(self._latency_history)
+                    dpg.set_value("txt_telemetry_avg_lat", f"(AVG {avg:.1f}ms)")
+                else:
+                    dpg.set_value("txt_telemetry_avg_lat", "(AVG --ms)")
+            if dpg.does_item_exist("txt_telemetry_rate"):
+                if fps_known:
+                    dpg.set_value("txt_telemetry_rate", f"{current_fps:.1f} Hz")
+                else:
+                    dpg.set_value("txt_telemetry_rate", "-- Hz")
 
             # Update log console. get_recent_logs() returns list[dict], not
             # list[str]: joining it directly raised TypeError every tick.

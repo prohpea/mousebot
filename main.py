@@ -1706,7 +1706,10 @@ if __name__ == "__main__":
     elif "--dpg" in sys.argv:
         ui_type = "dpg"
     else:
-        ui_type = str(getattr(config, "ui_framework", "dpg")).strip().lower()
+        raw_fw = getattr(config, "ui_framework", "dpg")
+        ui_type = str(raw_fw).strip().lower() if raw_fw else "dpg"
+        if ui_type not in ("dpg", "tk"):
+            ui_type = "dpg"
 
     # OpenCV's own thread pool competes with the capture/decode/track threads for
     # the same cores; on small ROIs it usually makes p95 worse. 0 keeps OpenCV's
