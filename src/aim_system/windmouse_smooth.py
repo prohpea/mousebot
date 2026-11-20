@@ -382,6 +382,10 @@ class SmoothAiming:
             reaction_max = _config_float(config, "smooth_reaction_max", 0.20)
             if reaction_max < reaction_min:
                 reaction_min, reaction_max = reaction_max, reaction_min
+            # For close-range targets (<= 20px, e.g. FOV 15 snap), tighten reaction window for instant snap
+            if distance <= 20.0:
+                reaction_min = min(reaction_min, 0.02)
+                reaction_max = min(reaction_max, 0.03)
             self.reaction_delay = self.rng.uniform(reaction_min, reaction_max)
             self.last_target = (dx, dy)
             self.last_reaction_time = current_time
@@ -397,7 +401,7 @@ class SmoothAiming:
 
         self.last_target = (dx, dy)
 
-        close_speed = _config_float(config, "smooth_close_speed", 0.15)
+        close_speed = _config_float(config, "smooth_close_speed", 0.35)
         far_speed = _config_float(config, "smooth_far_speed", 0.35)
         close_range = _config_float(config, "smooth_close_range", 30.0)
         far_range = _config_float(config, "smooth_far_range", 200.0)

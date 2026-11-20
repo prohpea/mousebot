@@ -829,6 +829,17 @@ def _emit_windmouse_budget(tracker, dx, dy, wm_config, is_sec=False):
     emit_x = max(-limit_x, min(limit_x, emit_x))
     emit_y = max(-limit_y, min(limit_y, emit_y))
 
+    # Anti-overshoot critical damping for sub-count error:
+    # If remaining target error is smaller than 1 count (|desired| < 1.0),
+    # only emit 1 count if doing so brings us closer to the target without overshooting
+    # past it into a larger error on the other side.
+    if abs(desired_x) < 1.0 and abs(emit_x) >= 1:
+        if abs(abs(desired_x) - 1.0) >= abs(desired_x):
+            emit_x = 0
+    if abs(desired_y) < 1.0 and abs(emit_y) >= 1:
+        if abs(abs(desired_y) - 1.0) >= abs(desired_y):
+            emit_y = 0
+
     # Re-derive the carry from what is actually sent so a clamped command does
     # not silently drop the remainder either.
     new_carry_x = max(-_WM_MAX_CARRY, min(_WM_MAX_CARRY, target_x - emit_x))
@@ -957,6 +968,49 @@ def _unpack_target(target):
     return cx, cy, distance, head_y_min, body_y_max
 
 
+def _select_sticky_target(targets, tracker, is_sec=False):
+    """Select the best target with hysteresis/stickiness to prevent flipping between two close enemies."""
+    if not targets:
+        return None
+    now = time.time()
+    attr_name = "_locked_target_pos_sec" if is_sec else "_locked_target_pos_main"
+    time_attr = "_locked_target_time_sec" if is_sec else "_locked_target_time_main"
+
+    locked_pos = getattr(tracker, attr_name, None)
+    locked_time = getattr(tracker, time_attr, 0.0)
+
+    # Expire lock if target hasn't been tracked for > 0.35s
+    if locked_pos is not None and (now - locked_time) > 0.35:
+        locked_pos = None
+        setattr(tracker, attr_name, None)
+
+    stickiness_bonus = float(getattr(config, "target_stickiness_px", 12.0))
+    stickiness_radius = float(getattr(config, "target_stickiness_radius_px", 35.0))
+
+    # Identify the unique target that matches the previously locked position (closest to locked_pos)
+    locked_idx = None
+    if locked_pos is not None:
+        best_lock_d = float("inf")
+        for i, t in enumerate(targets):
+            d_lock = math.hypot(t[0] - locked_pos[0], t[1] - locked_pos[1])
+            if d_lock < best_lock_d and d_lock <= stickiness_radius:
+                best_lock_d = d_lock
+                locked_idx = i
+
+    def _score(entry):
+        i, t = entry
+        dist = float(t[2])
+        if i == locked_idx:
+            return dist - stickiness_bonus
+        return dist
+
+    _, best = min(enumerate(targets), key=_score)
+    if best is not None:
+        setattr(tracker, attr_name, (best[0], best[1]))
+        setattr(tracker, time_attr, now)
+    return best
+
+
 def process_normal_mode(
     targets_main,
     frame,
@@ -1027,9 +1081,9 @@ def process_normal_mode(
         tracker.rcs_rapid_click_threshold
     )
     
-    # 處理 Aimbot（優先級：Main > Sec）
-    best_target_main = min(targets_main, key=lambda t: t[2]) if targets_main else None
-    best_target_sec = min(targets_sec, key=lambda t: t[2]) if targets_sec else None
+    # 處理 Aimbot（優先級：Main > Sec），帶目標黏滯性（Hysteresis）防止在兩敵人之間頻繁翻轉
+    best_target_main = _select_sticky_target(targets_main, tracker, is_sec=False)
+    best_target_sec = _select_sticky_target(targets_sec, tracker, is_sec=True)
 
     if best_target_main:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_main)

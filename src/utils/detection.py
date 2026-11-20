@@ -150,29 +150,60 @@ def _overlap_len(a0, a1, b0, b1):
 
 
 def _boxes_should_merge(r1, r2, dist_threshold):
-    if _boxes_overlap(r1, r2):
-        return True
-
     x1, y1, w1, h1 = r1
     x2, y2, w2, h2 = r2
     x1r, y1r = x1 + w1, y1 + h1
     x2r, y2r = x2 + w2, y2 + h2
 
-    h_gap = max(0, max(x1, x2) - min(x1r, x2r))
-    v_gap = max(0, max(y1, y2) - min(y1r, y2r))
+    # Merged bounding box geometry
+    nx1 = min(x1, x2)
+    ny1 = min(y1, y2)
+    nx2 = max(x1r, x2r)
+    ny2 = max(y1r, y2r)
+    merged_w = nx2 - nx1
+    merged_h = ny2 - ny1
+
     h_overlap = _overlap_len(x1, x1r, x2, x2r)
     v_overlap = _overlap_len(y1, y1r, y2, y2r)
+    min_h = min(h1, h2)
+    max_h = max(h1, h2)
+    min_w = min(w1, w2)
+    max_w = max(w1, w2)
 
     a1 = max(1, _bbox_area(r1))
     a2 = max(1, _bbox_area(r2))
+
+    # Anti-bridge rule 1: Reject horizontal side-by-side merging of distinct player silhouettes.
+    # If two boxes share vertical overlap (standing next to each other), but merging them
+    # would create an unnaturally wide box (> 1.20 * individual box width or aspect ratio > 0.55),
+    # they are separate entities and MUST NOT be merged unless one is > 80% nested inside the other.
+    if min_h >= 25 and v_overlap >= 0.40 * min_h:
+        if merged_w > 1.20 * max_w or (merged_w / float(max_h)) > 0.55:
+            overlap_area = h_overlap * v_overlap
+            if overlap_area < 0.80 * min(a1, a2):
+                return False
+
+    # Anti-bridge rule 2: If both boxes are independently viable player bboxes, do not merge.
+    min_bbox_area = int(getattr(config, "detection_min_bbox_area", 90))
+    if a1 >= min_bbox_area and a2 >= min_bbox_area and h1 >= 25 and h2 >= 25:
+        overlap_area = h_overlap * v_overlap
+        if overlap_area < 0.80 * min(a1, a2):
+            return False
+
+    if _boxes_overlap(r1, r2):
+        return True
+
+    h_gap = max(0, max(x1, x2) - min(x1r, x2r))
+    v_gap = max(0, max(y1, y2) - min(y1r, y2r))
+
     size_ratio = min(a1, a2) / max(a1, a2)
     # Merge mainly fragment-like splits; avoid merging similarly sized players.
     small_fragment = size_ratio <= 0.80
     if not small_fragment:
         return False
 
-    close_h = h_gap <= dist_threshold and v_overlap >= 0.60 * min(h1, h2)
-    close_v = v_gap <= dist_threshold and h_overlap >= 0.60 * min(w1, w2)
+    close_h = h_gap <= dist_threshold and v_overlap >= 0.60 * min_h
+    close_v = v_gap <= dist_threshold and h_overlap >= 0.60 * min_w
     return close_h or close_v
 
 
@@ -491,9 +522,9 @@ def _analyze_region(model, sub_image, frame_w, frame_h, offset_x, offset_y):
         if blur_kernel_size >= 3:
             mask = cv2.medianBlur(mask, blur_kernel_size)
     else:
-        legacy_kernel_w = int(getattr(config, "detection_legacy_kernel_w", 15))
-        legacy_kernel_h = int(getattr(config, "detection_legacy_kernel_h", 9))
-        legacy_dilate_iterations = int(getattr(config, "detection_legacy_dilate_iterations", 1))
+        legacy_kernel_w = int(getattr(config, "detection_legacy_kernel_w", 7))
+        legacy_kernel_h = int(getattr(config, "detection_legacy_kernel_h", 5))
+        legacy_dilate_iterations = int(getattr(config, "detection_legacy_dilate_iterations", 0))
         legacy_kernel_w = max(1, min(legacy_kernel_w, 40))
         legacy_kernel_h = max(1, min(legacy_kernel_h, 30))
         legacy_dilate_iterations = max(0, min(legacy_dilate_iterations, 3))
@@ -612,8 +643,19 @@ def _analyze_region(model, sub_image, frame_w, frame_h, offset_x, offset_y):
         if require_vertical_line and not has_color_vertical_line(mask, cx, y, y + h):
             continue
 
-        rects.append((x + offset_x, y + offset_y, w, h))
-        centers.append((cx + offset_x, cy + offset_y))
+        # Composite fused-player decomposition:
+        # A single human player silhouette has aspect ratio w/h typically 0.20 to 0.50.
+        # When two adjacent enemies fuse into one contour (aspect >= 0.58 and w >= 32, h >= 35),
+        # decompose into two distinct entities so aimbot locks onto an actual head rather than empty air between them.
+        if aspect >= 0.58 and int(w) >= 32 and int(h) >= 35:
+            half_w = int(w) // 2
+            rects.append((x + offset_x, y + offset_y, half_w, h))
+            centers.append((x + offset_x + half_w // 2, y + offset_y + h // 2))
+            rects.append((x + offset_x + half_w, y + offset_y, int(w) - half_w, h))
+            centers.append((x + offset_x + half_w + (int(w) - half_w) // 2, y + offset_y + h // 2))
+        else:
+            rects.append((x + offset_x, y + offset_y, w, h))
+            centers.append((cx + offset_x, cy + offset_y))
 
     # Fallback pass on the raw mask when the filtered pass found nothing but the
     # frame does contain colour. It exists to recover a frame the morphology

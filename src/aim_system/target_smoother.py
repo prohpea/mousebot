@@ -168,6 +168,7 @@ class TargetSmoother:
         desired_head_y_min = cand_head_y_min
         desired_body_y_max = cand_body_y_max
 
+        switched = False
         if candidate_far:
             if self._same_candidate(self.stable_candidate, (cand_x, cand_y), switch_radius):
                 self.stable_count += 1
@@ -183,10 +184,19 @@ class TargetSmoother:
             else:
                 self._clear_candidate()
                 self._reset_euro()
+                switched = True
         else:
             self._clear_candidate()
 
-        if self.use_one_euro:
+        if switched:
+            # When switching to a new target, snap directly to avoid interpolating
+            # across empty space between two distinct enemies.
+            smooth_x = desired_x
+            smooth_y = desired_y
+            if self.use_one_euro:
+                self._euro_x.filter(now, smooth_x)
+                self._euro_y.filter(now, smooth_y)
+        elif self.use_one_euro:
             smooth_x = self._euro_x.filter(now, desired_x)
             smooth_y = self._euro_y.filter(now, desired_y)
         else:
