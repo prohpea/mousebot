@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CVM colorBot — 3 UI concepts</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:#0b0d12;color:#e8edf5;font-family:Inter,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .picker{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:10px;padding:14px 26px;background:rgba(11,13,18,.94);backdrop-filter:blur(14px);border-bottom:1px solid #242b38}
+  .picker h1{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#8fa2bd;margin:0 20px 0 0;font-weight:600}
+  .picker button{cursor:pointer;border:1px solid #2a3445;background:#121823;color:#a9bad1;padding:9px 16px;border-radius:8px;font:600 12px/1 Inter,"Segoe UI",sans-serif;transition:.18s}
+  .picker button:hover{border-color:#4b6b93;color:#fff}
+  .picker button.on{background:#2563eb;border-color:#2563eb;color:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.18)}
+  .picker .hint{margin-left:auto;color:#64748b;font-size:11px}
+  .concept{display:none;padding:22px 26px 60px}
+  .concept.active{display:block}
+  .meta{max-width:1280px;margin:0 auto 16px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+  .meta .idx{font:700 34px/1 "Cascadia Mono",Consolas,monospace;color:#334155}
+  .meta h2{font-size:18px;margin:0 0 3px;font-weight:700;letter-spacing:-.01em}
+  .meta p{margin:0;color:#94a3b8;font-size:12px;max-width:640px;line-height:1.5}
+  .swatches{display:flex;gap:6px;margin-left:auto}
+  .sw{width:22px;height:22px;border-radius:6px;border:2px solid rgba(255,255,255,.18)}
+  .stage{max-width:1280px;margin:0 auto;overflow:auto}
+  .mock{width:1280px;height:820px;position:relative;overflow:hidden;border-radius:12px;box-shadow:0 28px 70px rgba(0,0,0,.55)}
+  @media(max-width:1360px){.mock{zoom:.8}}
+  @media(max-width:1100px){.mock{zoom:.62}}
+  @media(max-width:800px){.mock{zoom:.48}}
+
+  /* ============ CONCEPT 1 — OPS / TACTICAL HUD ============ */
+  .m1{background:#080c12;color:#c8d6e5;font:12px/1.45 "Cascadia Mono",Consolas,monospace;border:1px solid #1b2836}
+  .m1 .bar{height:38px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:#0b1119;border-bottom:1px solid #1b2836}
+  .m1 .brand{color:#00e5ff;font-weight:700;letter-spacing:.16em;font-size:13px}
+  .m1 .brand b{color:#ffb020}
+  .m1 .bar-mid{color:#52708c;font-size:10px;letter-spacing:.12em}
+  .m1 .wbtn{color:#5c7793;padding:2px 8px;font-size:12px}
+  .m1 .shell{display:flex;height:calc(100% - 38px - 40px)}
+  .m1 .rail{width:58px;flex:none;background:#0a0f16;border-right:1px solid #1b2836;display:flex;flex-direction:column;align-items:center;gap:5px;padding:10px 0}
+  .m1 .ri{width:40px;height:38px;display:grid;place-items:center;font-size:17px;color:#54708d;border:1px solid transparent;border-radius:5px}
+  .m1 .ri.on{color:#00e5ff;background:#0c212b;border-color:#17414f;box-shadow:inset 3px 0 #00e5ff}
+  .m1 .ri.bottom{margin-top:auto;color:#3c5871}
+  .m1 .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .m1 .tabs{height:40px;flex:none;display:flex;align-items:stretch;background:#0a1017;border-bottom:1px solid #1b2836;padding-left:10px}
+  .m1 .tab{display:flex;align-items:center;padding:0 15px;font-size:10px;letter-spacing:.1em;color:#5b7b98;border-bottom:2px solid transparent}
+  .m1 .tab.on{color:#00e5ff;border-color:#00e5ff;background:#0b1c25}
+  .m1 .scroll{padding:14px 16px}
+  .m1 .hero{display:grid;grid-template-columns:1.35fr .95fr;gap:12px}
+  .m1 .p{border:1px solid #1b2836;background:linear-gradient(180deg,#0d1721,#09111a);border-radius:4px;padding:12px 14px;position:relative}
+  .m1 .p:after{content:"";position:absolute;left:0;top:0;width:26px;height:1px;background:#00e5ff}
+  .m1 .kick{font-size:9px;letter-spacing:.18em;color:#4f7391}
+  .m1 .prof{font-size:19px;color:#e6f4ff;margin:4px 0 2px;font-weight:700;letter-spacing:-.02em}
+  .m1 .badge{font-size:9px;color:#00e5ff;border:1px solid #17414f;padding:2px 6px;border-radius:3px;vertical-align:middle;margin-left:8px}
+  .m1 .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+  .m1 .chip{font-size:9px;padding:4px 8px;border:1px solid #1e3346;color:#6d8ba6;border-radius:3px;letter-spacing:.06em}
+  .m1 .chip.on{color:#041318;background:#00e5ff;border-color:#00e5ff;font-weight:700}
+  .m1 .sens{display:flex;gap:18px;margin-top:10px;color:#7d9bb7;font-size:10px}
+  .m1 .sens b{color:#ffb020}
+  .m1 .feed{display:flex;flex-direction:column;align-items:center}
+  .m1 .feed-head{width:100%;display:flex;justify-content:space-between;color:#4f7391;font-size:9px;letter-spacing:.14em}
+  .m1 .feed svg{margin:2px auto 0}
+  .m1 .tele{display:flex;gap:16px;width:100%;justify-content:center;border-top:1px solid #162534;padding-top:6px;margin-top:2px}
+  .m1 .tele div{text-align:center;font-size:9px;color:#4f7391}
+  .m1 .tele b{display:block;font-size:15px;color:#00e5ff;line-height:1.1}
+  .m1 .tele b.warm{color:#ffb020}
+  .m1 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+  .m1 .card{background:#0b141d;border:1px solid #1b2836;border-radius:4px;padding:10px 12px}
+  .m1 .card h4{margin:0 0 9px;font-size:10px;letter-spacing:.14em;color:#ffb020;font-weight:700}
+  .m1 .row{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#7694ae;margin:7px 0}
+  .m1 .row b{color:#d8e9f7;font-weight:600}
+  .m1 .track{height:3px;background:#152434;border-radius:2px;margin:3px 0 8px;position:relative}
+  .m1 .fill{position:absolute;left:0;top:0;bottom:0;background:#00e5ff;border-radius:2px}
+  .m1 .knob{position:absolute;top:-3px;width:9px;height:9px;background:#d9f6ff;border-radius:1px;transform:translateX(-50%)}
+  .m1 .sw2{width:30px;height:14px;border-radius:2px;background:#152434;border:1px solid #24445a;position:relative}
+  .m1 .sw2 i{position:absolute;width:10px;height:10px;background:#4d6b85;top:1px;left:2px;border-radius:1px}
+  .m1 .sw2.on{background:#0c3a41;border-color:#00e5ff}
+  .m1 .sw2.on i{left:16px;background:#00e5ff}
+  .m1 .foot{height:40px;display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:#0b1119;border-top:1px solid #1b2836}
+  .m1 .run{color:#00e5ff;font-size:10px;letter-spacing:.1em}
+  .m1 .run i{display:inline-block;width:7px;height:7px;background:#00e5ff;border-radius:50%;margin-right:7px;box-shadow:0 0 10px #00e5ff}
+  .m1 .bars{display:flex;gap:3px;align-items:flex-end;height:18px}
+  .m1 .bars span{width:3px;background:#17414f}
+  .m1 .stop{color:#ff5c7a;border:1px solid #7a2338;background:#200b13;padding:6px 20px;border-radius:3px;font:700 11px "Cascadia Mono",monospace;letter-spacing:.12em}
+
+  /* ============ CONCEPT 2 — STUDIO / LIGHT WORKSPACE ============ */
+  .m2{background:#f5f7fb;color:#172033;font-family:Inter,"Segoe UI",sans-serif;display:flex;border:1px solid #dbe3ef}
+  .m2 .side{width:232px;flex:none;background:#fff;border-right:1px solid #e4eaf3;display:flex;flex-direction:column;padding:22px 14px 16px}
+  .m2 .logo{font-size:22px;font-weight:800;letter-spacing:-.04em;color:#111c33;padding:0 10px 22px}
+  .m2 .logo span{font-size:11px;font-weight:600;color:#94a3b8;display:block;letter-spacing:.12em;margin-top:2px}
+  .m2 .g{font-size:9px;font-weight:700;letter-spacing:.14em;color:#9aa8bd;padding:14px 10px 7px}
+  .m2 .nav{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;color:#51627c;font-size:12px;font-weight:500;margin:1px 0}
+  .m2 .nav .ic{width:18px;text-align:center;font-size:14px;color:#8494ab}
+  .m2 .nav.on{background:#eaf1ff;color:#2563eb;font-weight:700}
+  .m2 .nav.on .ic{color:#2563eb}
+  .m2 .setup{margin-top:auto;background:#f7f9fd;border:1px solid #e4eaf3;border-radius:12px;padding:13px}
+  .m2 .setup .t{font-size:11px;font-weight:700;color:#1e293b}
+  .m2 .setup .s{font-size:10px;color:#8494ab;margin-top:2px}
+  .m2 .prog{height:5px;background:#e2e8f0;border-radius:3px;margin:10px 0 8px;overflow:hidden}
+  .m2 .prog i{display:block;height:100%;width:66%;background:#2563eb;border-radius:3px}
+  .m2 .step{font-size:10px;color:#64748b;margin:4px 0}
+  .m2 .step b{color:#10b981}
+  .m2 .cta{width:100%;margin-top:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font:700 12px Inter,sans-serif;padding:11px;box-shadow:0 6px 16px rgba(37,99,235,.28)}
+  .m2 .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .m2 .head{height:66px;flex:none;background:#fff;border-bottom:1px solid #e4eaf3;display:flex;align-items:center;justify-content:space-between;padding:0 26px}
+  .m2 .head h3{margin:0;font-size:19px;letter-spacing:-.02em;color:#111c33}
+  .m2 .head p{margin:2px 0 0;font-size:11px;color:#8494ab}
+  .m2 .pill{display:inline-flex;align-items:center;gap:7px;border:1px solid #e4eaf3;background:#fff;border-radius:8px;padding:8px 12px;font-size:11px;color:#52627a;margin-left:8px;font-weight:600}
+  .m2 .pill i{width:7px;height:7px;border-radius:50%;background:#10b981}
+  .m2 .body{padding:20px 26px}
+  .m2 .notice{display:flex;align-items:center;gap:12px;background:#eff5ff;border:1px solid #d7e5ff;border-radius:11px;padding:12px 16px;margin-bottom:16px}
+  .m2 .notice .dot{width:28px;height:28px;border-radius:8px;background:#2563eb;color:#fff;display:grid;place-items:center;font-weight:800;font-size:12px}
+  .m2 .notice b{font-size:12px;color:#1e3a8a}
+  .m2 .notice span{font-size:11px;color:#5c7395}
+  .m2 .notice .link{margin-left:auto;color:#2563eb;font-size:11px;font-weight:700}
+  .m2 .cards{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .m2 .card{background:#fff;border:1px solid #e6ebf3;border-radius:13px;padding:16px 18px;box-shadow:0 2px 6px rgba(20,40,80,.03)}
+  .m2 .card.wide{grid-column:1 / -1}
+  .m2 .card h4{margin:0 0 3px;font-size:13px;color:#1e293b;font-weight:700}
+  .m2 .card .sub{font-size:10px;color:#94a3b8;margin-bottom:12px}
+  .m2 .seg{display:inline-flex;background:#f1f5fb;border-radius:8px;padding:3px;gap:2px;flex-wrap:wrap}
+  .m2 .seg span{font-size:10px;color:#7b8ca5;padding:6px 10px;border-radius:6px;font-weight:600}
+  .m2 .seg span.on{background:#fff;color:#2563eb;box-shadow:0 1px 4px rgba(20,40,80,.12)}
+  .m2 .field{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:11px;font-size:11px;color:#64748b}
+  .m2 .inp{border:1px solid #dde5f0;background:#fbfcfe;border-radius:7px;padding:6px 10px;color:#334155;font-size:11px;min-width:140px;text-align:left;font-weight:600}
+  .m2 .inp.ok{color:#0f9d6b;border-color:#bce8d6;background:#f2fbf7}
+  .m2 .mini{border:1px solid #d8e3f5;background:#fff;color:#2563eb;border-radius:7px;padding:6px 11px;font:700 10px Inter,sans-serif}
+  .m2 .srow{display:flex;align-items:center;gap:12px;margin:12px 0;font-size:11px;color:#64748b}
+  .m2 .srow .track{flex:1;height:5px;background:#e8eef7;border-radius:3px;position:relative}
+  .m2 .srow .fill{position:absolute;inset:0 auto 0 0;background:#2563eb;border-radius:3px;width:62%}
+  .m2 .srow .knob{position:absolute;top:-4px;left:62%;width:13px;height:13px;background:#fff;border:3px solid #2563eb;border-radius:50%;transform:translateX(-50%);box-shadow:0 1px 4px rgba(0,0,0,.15)}
+  .m2 .srow b{color:#1e293b;min-width:38px;text-align:right;font-variant-numeric:tabular-nums}
+  .m2 .tog{display:inline-block;width:34px;height:19px;border-radius:10px;background:#dbe3ef;position:relative;flex:none}
+  .m2 .tog i{position:absolute;top:2px;left:2px;width:15px;height:15px;background:#fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+  .m2 .tog.on{background:#2563eb}
+  .m2 .tog.on i{left:17px}
+  .m2 .togrow{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f3f8;font-size:11px;color:#475569}
+  .m2 .togrow:last-child{border:0}
+  .m2 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:11px}
+  .m2 .stat{background:#f7f9fd;border-radius:9px;padding:10px}
+  .m2 .stat span{font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
+  .m2 .stat b{display:block;font-size:18px;color:#1e293b;margin-top:3px;font-variant-numeric:tabular-nums}
+  .m2 .stat b.good{color:#0f9d6b}
+
+  /* ============ CONCEPT 3 — NOVA / GLASS NEON ============ */
+  .m3{background:linear-gradient(135deg,#0a0820 0%,#120c2e 48%,#071426 100%);color:#e9e6ff;font-family:Inter,"Segoe UI",sans-serif;display:flex;border:1px solid #2a2352}
+  .m3 .orb{position:absolute;border-radius:50%;filter:blur(70px);pointer-events:none}
+  .m3 .o1{width:420px;height:420px;background:rgba(124,58,237,.35);top:-120px;left:120px}
+  .m3 .o2{width:380px;height:380px;background:rgba(34,211,238,.20);bottom:-140px;right:60px}
+  .m3 .o3{width:260px;height:260px;background:rgba(244,114,182,.16);top:320px;left:480px}
+  .m3 .rail{width:64px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 0;position:relative;z-index:2;background:rgba(255,255,255,.03);border-right:1px solid rgba(255,255,255,.08);backdrop-filter:blur(18px)}
+  .m3 .hex{width:34px;height:34px;display:grid;place-items:center;border-radius:11px;background:linear-gradient(135deg,#8b5cf6,#22d3ee);color:#fff;font-size:16px;box-shadow:0 0 22px rgba(139,92,246,.6);margin-bottom:16px}
+  .m3 .ri{width:40px;height:40px;display:grid;place-items:center;font-size:17px;color:#8d86bd;border-radius:11px;border:1px solid transparent}
+  .m3 .ri.on{color:#fff;background:rgba(139,92,246,.22);border-color:rgba(167,139,250,.55);box-shadow:0 0 18px rgba(139,92,246,.45),inset 0 0 12px rgba(139,92,246,.25)}
+  .m3 .main{flex:1;min-width:0;position:relative;z-index:1;padding:18px 22px;display:flex;flex-direction:column}
+  .m3 .head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .m3 .head .brand{font-size:11px;letter-spacing:.24em;color:#a78bfa;font-weight:700}
+  .m3 .head .brand span{color:#e9e6ff;letter-spacing:.04em;font-size:15px;margin-left:8px;font-weight:600}
+  .m3 .pills{display:flex;gap:8px}
+  .m3 .pill{border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);border-radius:20px;padding:6px 12px;font-size:10px;color:#c4bfe8;backdrop-filter:blur(10px)}
+  .m3 .pill i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 8px #34d399;margin-right:6px}
+  .m3 .glass{background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.13);backdrop-filter:blur(20px);border-radius:18px;box-shadow:0 14px 40px rgba(0,0,0,.28)}
+  .m3 .hero{display:grid;grid-template-columns:1.1fr .9fr .55fr;gap:16px;padding:20px 24px;align-items:center}
+  .m3 .kick{font-size:9px;letter-spacing:.24em;color:#9d8fd8;text-transform:uppercase}
+  .m3 .mode{font-size:34px;font-weight:800;letter-spacing:-.03em;margin:4px 0 10px;background:linear-gradient(90deg,#fff,#c4b5fd 55%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 35px rgba(167,139,250,.35)}
+  .m3 .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .m3 .chip{font-size:9px;letter-spacing:.08em;border-radius:14px;padding:5px 9px;border:1px solid rgba(255,255,255,.14);color:#a9a3d4}
+  .m3 .chip.on{color:#fff;border-color:#a78bfa;background:rgba(167,139,250,.24);box-shadow:0 0 14px rgba(167,139,250,.4)}
+  .m3 .radar{display:grid;place-items:center}
+  .m3 .mini{display:flex;flex-direction:column;gap:10px}
+  .m3 .mini div{border-left:2px solid rgba(167,139,250,.55);padding-left:10px}
+  .m3 .mini span{display:block;font-size:9px;letter-spacing:.12em;color:#8b83bb}
+  .m3 .mini b{font-size:20px;font-variant-numeric:tabular-nums;color:#67e8f9}
+  .m3 .mini b.pink{color:#f9a8d4}
+  .m3 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-top:14px}
+  .m3 .card{padding:15px 16px}
+  .m3 .card h4{margin:0 0 2px;font-size:10px;letter-spacing:.18em;color:#c4b5fd;text-transform:uppercase}
+  .m3 .card .sub{font-size:9px;color:#796fa8;margin-bottom:10px}
+  .m3 .row{display:flex;justify-content:space-between;font-size:10px;color:#a9a3d4;margin:8px 0}
+  .m3 .row b{color:#fff;font-variant-numeric:tabular-nums}
+  .m3 .track{height:3px;background:rgba(255,255,255,.1);border-radius:3px;position:relative;margin:3px 0 9px}
+  .m3 .fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:linear-gradient(90deg,#8b5cf6,#22d3ee);box-shadow:0 0 10px rgba(34,211,238,.5)}
+  .m3 .knob{position:absolute;top:-3px;width:9px;height:9px;border-radius:50%;background:#fff;transform:translateX(-50%);box-shadow:0 0 8px #22d3ee}
+  .m3 .seg{display:flex;gap:4px;flex-wrap:wrap}
+  .m3 .seg span{font-size:9px;padding:5px 8px;border-radius:7px;background:rgba(255,255,255,.06);color:#9f97cf;border:1px solid rgba(255,255,255,.08)}
+  .m3 .seg span.on{background:linear-gradient(135deg,rgba(139,92,246,.55),rgba(34,211,238,.35));color:#fff;border-color:rgba(167,139,250,.7);box-shadow:0 0 12px rgba(139,92,246,.4)}
+  .m3 .sw3{width:32px;height:16px;border-radius:10px;background:rgba(255,255,255,.12);position:relative;border:1px solid rgba(255,255,255,.14)}
+  .m3 .sw3 i{position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:#8d86bd}
+  .m3 .sw3.on{background:linear-gradient(90deg,#7c3aed,#22d3ee);border-color:transparent;box-shadow:0 0 12px rgba(124,58,237,.55)}
+  .m3 .sw3.on i{left:18px;background:#fff}
+  .m3 .foot{margin-top:auto;display:flex;align-items:center;justify-content:space-between;padding-top:14px}
+  .m3 .status{font-size:10px;color:#9f97cf;letter-spacing:.1em}
+  .m3 .status i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 10px #34d399;margin-right:8px}
+  .m3 .cta{border:1px solid rgba(167,139,250,.7);background:linear-gradient(90deg,rgba(124,58,237,.65),rgba(34,211,238,.4));color:#fff;border-radius:22px;padding:9px 26px;font:700 11px Inter,sans-serif;letter-spacing:.16em;box-shadow:0 0 22px rgba(124,58,237,.5)}
+</style>
+</head>
+<body>
+
+<div class="picker">
+  <h1>CVM colorBot — UI concepts</h1>
+  <button class="on" data-c="c1">01 / OPS Console</button>
+  <button data-c="c2">02 / Studio Workspace</button>
+  <button data-c="c3">03 / Nova Glass</button>
+  <span class="hint">Mockup trực quan · chưa áp vào app</span>
+</div>
+
+<!-- ==================== CONCEPT 1 ==================== -->
+<section class="concept active" id="c1">
+  <div class="meta">
+    <div class="idx">01</div>
+    <div>
+      <h2>OPS Console — bảng điều khiển chiến thuật</h2>
+      <p>Tối ưu cho tốc độ: mọi thông số quan trọng nằm trong một màn hình, icon rail + tab ngang, số liệu telemetry ngay cạnh mode selector. Monospace, góc vuông, điểm nhấn cyan/amber.</p>
+    </div>
+    <div class="swatches"><i class="sw" style="background:#080c12"></i><i class="sw" style="background:#00e5ff"></i><i class="sw" style="background:#ffb020"></i><i class="sw" style="background:#1b2836"></i></div>
+  </div>
+  <div class="stage"><div class="mock m1">
+    <div class="bar">
+      <div class="brand">CVM<b>//</b>colorBot</div>
+      <div class="bar-mid">OPS CONSOLE · PROFILE: RIFLE_COMPETITIVE · v2.4.1</div>
+      <div><span class="wbtn">_</span><span class="wbtn">□</span><span class="wbtn">×</span></div>
+    </div>
+    <div class="shell">
+      <aside class="rail">
+        <div class="ri">⌂</div><div class="ri on">⌖</div><div class="ri">⊕</div><div class="ri">◈</div>
+        <div class="ri">⚡</div><div class="ri">▤</div><div class="ri">➤</div><div class="ri bottom">⚙</div>
+      </aside>
+      <div class="main">
+        <nav class="tabs">
+          <div class="tab on">GENERAL</div><div class="tab">MAIN AIM</div><div class="tab">SEC AIM</div>
+          <div class="tab">TRIGGER</div><div class="tab">MAGNET</div><div class="tab">RCS</div>
+          <div class="tab">CONFIG</div><div class="tab">DEBUG</div>
+        </nav>
+        <div class="scroll">
+          <div class="hero">
+            <div class="p">
+              <div class="kick">ACTIVE PROFILE / 01</div>
+              <div class="prof">Rifle_Competitive <span class="badge">SAVED</span></div>
+              <div class="kick">OPERATION MODE</div>
+              <div class="chips">
+                <span class="chip on">ABCURVES</span><span class="chip">NORMAL</span><span class="chip">FLICK</span>
+                <span class="chip">SILENT</span><span class="chip">NCAF</span><span class="chip">WINDMOUSE</span>
+                <span class="chip">BEZIER</span><span class="chip">PID</span>
+              </div>
+              <div class="sens"><span>SENSOR <b>800 DPI</b></span><span>INGAME SENS <b>0.235</b></span><span>MAX SPEED <b>1000</b></span></div>
+            </div>
+            <div class="p feed">
+              <div class="feed-head"><span>LIVE FEED</span><span>FOV 300 · TARGETS 03</span></div>
+              <svg width="240" height="150" viewBox="0 0 240 150">
+                <circle cx="120" cy="75" r="58" fill="none" stroke="#173344" stroke-width="1"/>
+                <circle cx="120" cy="75" r="34" fill="none" stroke="#22576b" stroke-width="1" stroke-dasharray="4 4"/>
+                <circle cx="120" cy="75" r="7" fill="none" stroke="#00e5ff" stroke-width="1"/>
+                <path d="M112 75h16M120 67v16" stroke="#00e5ff" stroke-width="1"/>
+                <path d="M120 75 L172 46" stroke="#00e5ff" stroke-width="1" opacity=".7"/>
+                <circle cx="172" cy="46" r="4" fill="#ffb020"/><circle cx="158" cy="90" r="3" fill="none" stroke="#ffb020"/>
+                <circle cx="90" cy="52" r="3" fill="none" stroke="#ffb020"/>
+                <path d="M90 40v24M78 52h24" stroke="#ffb020" stroke-width="1" opacity=".6"/>
+              </svg>
+              <div class="tele"><div>FPS<b>82</b></div><div>DECODE<b>4.1ms</b></div><div>TARGETS<b class="warm">03</b></div></div>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="card"><h4>ACQUISITION</h4>
+              <div class="row"><span>FOV SIZE</span><b>300 px</b></div><div class="track"><i class="fill" style="width:60%"></i><i class="knob" style="left:60%"></i></div>
+              <div class="row"><span>SMOOTH</span><b>10</b></div><div class="track"><i class="fill" style="width:40%"></i><i class="knob" style="left:40%"></i></div>
+              <div class="row"><span>SPEED X / Y</span><b>0.50 / 0.50</b></div>
+              <div class="row"><span>ADS FOV</span><div class="sw2 on"><i></i></div></div>
+            </div>
+            <div class="card"><h4>TARGETING</h4>
+              <div class="row"><span>AIM POINT</span><b>HEAD</b></div>
+              <div class="chips" style="margin:2px 0 8px"><span class="chip on">HEAD</span><span class="chip">BODY</span><span class="chip">NEAREST</span></div>
+              <div class="row"><span>OFFSET X / Y</span><b>0 / 0</b></div>
+              <div class="row"><span>ANTI-SMOKE</span><div class="sw2 on"><i></i></div></div>
+              <div class="row"><span>TEMPORAL SMOOTH</span><div class="sw2"><i></i></div></div>
+            </div>
+            <div class="card"><h4>ACTIVATION</h4>
+              <div class="row"><span>ENABLE MAIN AIM</span><div class="sw2 on"><i></i></div></div>
+              <div class="row"><span>KEY</span><b>RIGHT MOUSE</b></div>
+              <div class="row"><span>DEADZONE</span><div class="sw2"><i></i></div></div>
+              <div class="row"><span>BUTTON MASK</span><div class="sw2"><i></i></div></div>
+              <div class="row"><span>AIM LATEST FRAME</span><div class="sw2 on"><i></i></div></div>
+            </div>
+            <div class="card"><h4>TRIGGERBOT</h4>
+              <div class="row"><span>ENABLE</span><div class="sw2 on"><i></i></div></div>
+              <div class="row"><span>TYPE</span><b>CLASSIC</b></div>
+              <div class="row"><span>DELAY</span><b>0.08 – 0.15 s</b></div>
+              <div class="row"><span>HOLD</span><b>40 – 60 ms</b></div>
+              <div class="row"><span>BURST</span><b>1 shot</b></div>
+            </div>
+            <div class="card"><h4>CAPTURE</h4>
+              <div class="chips" style="margin:0 0 8px"><span class="chip on">UDP</span><span class="chip">NDI</span><span class="chip">TELEPORT</span><span class="chip">MSS</span></div>
+              <div class="row"><span>IP : PORT</span><b>127.0.0.1 : 1234</b></div>
+              <div class="row"><span>RESOLUTION</span><b>1920 × 1080</b></div>
+              <div class="row"><span>LINK</span><b style="color:#00e5ff">● CONNECTED</b></div>
+            </div>
+            <div class="card"><h4>HARDWARE</h4>
+              <div class="chips" style="margin:0 0 8px"><span class="chip on">MEDIUS</span><span class="chip">SERIAL</span><span class="chip">KmAPI</span></div>
+              <div class="row"><span>PORT</span><b>AUTO</b></div>
+              <div class="row"><span>LATENCY</span><b>0.8 ms</b></div>
+              <div class="row"><span>STATUS</span><b style="color:#00e5ff">● ONLINE</b></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="foot">
+      <div class="run"><i></i>RUNNING · MEDIUS + UDP</div>
+      <div class="bars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:14px"></span><span style="height:8px"></span><span style="height:17px"></span><span style="height:11px"></span><span style="height:15px"></span><span style="height:9px"></span><span style="height:13px"></span></div>
+      <div class="stop">STOP ENGINE</div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ==================== CONCEPT 2 ==================== -->
+<section class="concept" id="c2">
+  <div class="meta">
+    <div class="idx">02</div>
+    <div>
+      <h2>Studio Workspace — bảng cấu hình sáng, dễ đọc</h2>
+      <p>Ưu tiên onboarding và quản lý cấu hình: sidebar nhóm theo tác vụ, thẻ hướng dẫn 3 bước, card trắng, chữ sans-serif, nhiều khoảng trắng. Hợp người chỉnh thông số lâu dài.</p>
+    </div>
+    <div class="swatches"><i class="sw" style="background:#f5f7fb"></i><i class="sw" style="background:#2563eb"></i><i class="sw" style="background:#10b981"></i><i class="sw" style="background:#1e293b"></i></div>
+  </div>
+  <div class="stage"><div class="mock m2">
+    <aside class="side">
+      <div class="logo">CVM<span>colorBot · studio</span></div>
+      <div class="g">WORKSPACE</div>
+      <div class="nav on"><span class="ic">⌂</span> General</div>
+      <div class="nav"><span class="ic">▤</span> Configuration</div>
+      <div class="nav"><span class="ic">➤</span> Debug & logs</div>
+      <div class="g">AIM</div>
+      <div class="nav"><span class="ic">⌖</span> Main Aimbot</div>
+      <div class="nav"><span class="ic">◎</span> Secondary Aimbot</div>
+      <div class="nav"><span class="ic">⚡</span> RCS</div>
+      <div class="g">TRIGGER</div>
+      <div class="nav"><span class="ic">⊕</span> Triggerbot</div>
+      <div class="nav"><span class="ic">◈</span> Magnet Trigger</div>
+      <div class="setup">
+        <div class="t">Getting started</div><div class="s">2 of 3 steps complete</div>
+        <div class="prog"><i></i></div>
+        <div class="step"><b>✓</b> Hardware API connected</div>
+        <div class="step"><b>✓</b> Capture source selected</div>
+        <div class="step">○ Start the engine</div>
+        <button class="cta">START ENGINE</button>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="head">
+        <div><h3>General</h3><p>Connect hardware and choose your video source</p></div>
+        <div><span class="pill"><i></i> Rifle_Competitive</span><span class="pill">EN ▾</span></div>
+      </header>
+      <div class="body">
+        <div class="notice"><div class="dot">i</div><div><b>Almost ready</b><br><span>Hardware and capture are connected. Start the engine to go live.</span></div><div class="link">Finish setup →</div></div>
+        <div class="cards">
+          <div class="card"><h4>Hardware API</h4><div class="sub">How mouse movement is sent to the system</div>
+            <div class="seg"><span class="on">Medius</span><span>Serial</span><span>KmAPI</span><span>Ferrum</span><span>MAK</span></div>
+            <div class="field"><span>Port mode</span><div class="inp">Auto ▾</div></div>
+            <div class="field"><span>Device</span><div class="inp ok">● Medius connected</div></div>
+            <div class="field"><span>Auto-connect on launch</span><div class="tog on"><i></i></div></div>
+          </div>
+          <div class="card"><h4>Capture source</h4><div class="sub">Where the game frames come from</div>
+            <div class="seg"><span class="on">UDP</span><span>NDI</span><span>Teleport</span><span>Capture Card</span><span>MSS</span></div>
+            <div class="field"><span>IP address</span><div class="inp">127.0.0.1</div></div>
+            <div class="field"><span>Port</span><div class="inp">1234</div></div>
+            <div class="field"><span>Stream</span><button class="mini">Scan sources</button></div>
+          </div>
+          <div class="card wide"><h4>Detection</h4><div class="sub">Color threshold and target filtering</div>
+            <div class="srow"><span style="min-width:120px">Min bbox area</span><div class="track"><i class="fill"></i><i class="knob"></i></div><b>120 px²</b></div>
+            <div class="srow"><span style="min-width:120px">Confidence</span><div class="track"><i class="fill" style="width:65%"></i><i class="knob" style="left:65%"></i></div><b>0.65</b></div>
+            <div class="field"><span>Morph mode</span><div class="seg"><span class="on">Legacy</span><span>Stable</span></div></div>
+            <div class="field"><span>Show detection window</span><div class="tog"><i></i></div></div>
+          </div>
+          <div class="card"><h4>Aimbot quick settings</h4><div class="sub">Most used switches in one place</div>
+            <div class="togrow"><span>Enable main aimbot</span><div class="tog on"><i></i></div></div>
+            <div class="togrow"><span>ADS FOV override</span><div class="tog on"><i></i></div></div>
+            <div class="togrow"><span>Anti-smoke filter</span><div class="tog on"><i></i></div></div>
+            <div class="togrow"><span>Temporal smoothing</span><div class="tog"><i></i></div></div>
+            <div class="srow"><span style="min-width:90px">FOV size</span><div class="track"><i class="fill"></i><i class="knob"></i></div><b>300</b></div>
+          </div>
+          <div class="card"><h4>Performance</h4><div class="sub">Live pipeline health</div>
+            <div class="stats">
+              <div class="stat"><span>FPS</span><b class="good">82</b></div>
+              <div class="stat"><span>Decode</span><b>4.1 ms</b></div>
+              <div class="stat"><span>Delay</span><b>12.4 ms</b></div>
+              <div class="stat"><span>Targets</span><b>3</b></div>
+            </div>
+            <div class="field" style="margin-top:18px"><span>Running profile</span><span style="font-weight:700;color:#2563eb">Rifle_Competitive</span></div>
+            <div class="field"><span>Session uptime</span><span>00:12:48</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ==================== CONCEPT 3 ==================== -->
+<section class="concept" id="c3">
+  <div class="meta">
+    <div class="idx">03</div>
+    <div>
+      <h2>Nova Glass — giao diện kính mờ, neon</h2>
+      <p>Concept trình diễn: nền gradient, panel glassmorphism, mode selector phát sáng và radar FOV ở giữa. Bố cục vẫn đủ đọc nhưng nhấn mạnh cảm giác cao cấp, hợp làm bộ mặt nhận diện.</p>
+    </div>
+    <div class="swatches"><i class="sw" style="background:#0a0820"></i><i class="sw" style="background:#a78bfa"></i><i class="sw" style="background:#22d3ee"></i><i class="sw" style="background:#f472b6"></i></div>
+  </div>
+  <div class="stage"><div class="mock m3">
+    <div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div>
+    <aside class="rail">
+      <div class="hex">◆</div><div class="ri">⌂</div><div class="ri on">⌖</div><div class="ri">⊕</div>
+      <div class="ri">◈</div><div class="ri">⚡</div><div class="ri">▤</div><div class="ri">⚙</div>
+    </aside>
+    <div class="main">
+      <header class="head">
+        <div class="brand">CVM <span>/ Control Room</span></div>
+        <div class="pills"><span class="pill"><i></i> UDP STREAM</span><span class="pill"><i></i> MEDIUS</span><span class="pill">v2.4.1</span></div>
+      </header>
+      <div class="glass hero">
+        <div>
+          <div class="kick">ACTIVE ENGINE · RIFLE_COMPETITIVE</div>
+          <div class="mode">ABCURVES</div>
+          <div class="chips"><span class="chip on">ABCURVES</span><span class="chip">NORMAL</span><span class="chip">FLICK</span><span class="chip">SILENT</span><span class="chip">NCAF</span><span class="chip">WINDMOUSE</span><span class="chip">BEZIER</span><span class="chip">PID</span></div>
+        </div>
+        <div class="radar">
+          <svg width="230" height="230" viewBox="0 0 230 230">
+            <defs><linearGradient id="g3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>
+            <circle cx="115" cy="115" r="100" fill="none" stroke="rgba(255,255,255,.10)" stroke-width="1"/>
+            <circle cx="115" cy="115" r="72" fill="none" stroke="rgba(167,139,250,.28)" stroke-width="1" stroke-dasharray="6 7"/>
+            <circle cx="115" cy="115" r="40" fill="none" stroke="rgba(34,211,238,.30)" stroke-width="1"/>
+            <circle cx="115" cy="115" r="10" fill="none" stroke="url(#g3)" stroke-width="2"/>
+            <path d="M105 115h20M115 105v20" stroke="#22d3ee" stroke-width="1.5"/>
+            <path d="M115 115 Q145 70 178 62" fill="none" stroke="rgba(34,211,238,.5)" stroke-width="1"/>
+            <circle cx="178" cy="62" r="6" fill="#f9a8d4" opacity=".9"/>
+            <circle cx="158" cy="140" r="4" fill="none" stroke="#f9a8d4"/><circle cx="72" cy="88" r="4" fill="none" stroke="#f9a8d4"/>
+            <circle cx="178" cy="62" r="12" fill="none" stroke="rgba(249,168,212,.35)" stroke-width="1"/>
+          </svg>
+        </div>
+        <div class="mini">
+          <div><span>FOV</span><b>300</b></div>
+          <div><span>FPS</span><b>82</b></div>
+          <div><span>TARGETS</span><b class="pink">03</b></div>
+          <div><span>LATENCY</span><b>12.4</b></div>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="glass card"><h4>Aim engine</h4><div class="sub">Motion & acquisition</div>
+          <div class="row"><span>FOV size</span><b>300 px</b></div><div class="track"><i class="fill" style="width:62%"></i><i class="knob" style="left:62%"></i></div>
+          <div class="row"><span>Smooth</span><b>10</b></div><div class="track"><i class="fill" style="width:42%"></i><i class="knob" style="left:42%"></i></div>
+          <div class="row"><span>Speed X / Y</span><b>0.50 / 0.50</b></div>
+          <div class="row"><span>ADS FOV</span><div class="sw3 on"><i></i></div></div>
+        </div>
+        <div class="glass card"><h4>Target lock</h4><div class="sub">Where the aim lands</div>
+          <div class="seg"><span class="on">HEAD</span><span>BODY</span><span>NEAREST</span></div>
+          <div class="row"><span>Offset X / Y</span><b>0 / 0</b></div>
+          <div class="row"><span>Anti-smoke</span><div class="sw3 on"><i></i></div></div>
+          <div class="row"><span>Temporal smooth</span><div class="sw3"><i></i></div></div>
+        </div>
+        <div class="glass card"><h4>Trigger</h4><div class="sub">Fire conditions</div>
+          <div class="row"><span>Enable triggerbot</span><div class="sw3 on"><i></i></div></div>
+          <div class="row"><span>Delay</span><b>0.08 – 0.15 s</b></div>
+          <div class="row"><span>Hold</span><b>40 – 60 ms</b></div>
+          <div class="row"><span>Strafe mode</span><b>AUTO</b></div>
+        </div>
+        <div class="glass card"><h4>System</h4><div class="sub">Links & runtime</div>
+          <div class="row"><span>Capture</span><b style="color:#67e8f9">UDP ●</b></div>
+          <div class="row"><span>Hardware</span><b style="color:#67e8f9">MEDIUS ●</b></div>
+          <div class="row"><span>RCS</span><div class="sw3"><i></i></div></div>
+          <div class="row"><span>Profile</span><b>SAVED</b></div>
+        </div>
+      </div>
+      <div class="foot">
+        <div class="status"><i></i>ENGINE LIVE · 1920×1080 · 12.4 ms</div>
+        <button class="cta">STOP ENGINE</button>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<script>
+  const buttons = document.querySelectorAll('.picker button');
+  function activate(id){
+    buttons.forEach(x => x.classList.toggle('on', x.dataset.c === id));
+    document.querySelectorAll('.concept').forEach(c => c.classList.toggle('active', c.id === id));
+  }
+  buttons.forEach(b => b.addEventListener('click', () => {
+    activate(b.dataset.c);
+    window.scrollTo({top:0, behavior:'smooth'});
+  }));
+  const initial = location.hash.replace('#','');
+  if (['c1','c2','c3'].includes(initial)) activate(initial);
+  if (location.search.includes('clean')) {
+    document.querySelector('.picker').style.display='none';
+    document.querySelectorAll('.meta').forEach(m => m.style.display='none');
+    document.querySelectorAll('.concept').forEach(c => c.style.padding='0');
+  }
+</script>
+</body>
+</html>
