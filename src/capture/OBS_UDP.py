@@ -405,17 +405,11 @@ class OBS_UDP_Receiver:
                         continue
 
                     if self.executor and not self.stop_event.is_set():
-                        # Keep only the newest pending decode; stale frames are useless for aim.
-                        while self.frame_queue.qsize() >= 2:
-                            try:
-                                self.frame_queue.get_nowait()[0].cancel()
-                            except Exception:
-                                break
                         future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
                         try:
                             self.frame_queue.put_nowait((future, receive_time))
                         except Exception:
-                            pass
+                            pass  # Queue full: drop this frame to stay real-time.
 
                 if consumed:
                     del self.mjpeg_buffer[:consumed]
@@ -597,8 +591,8 @@ class OBS_UDP_Receiver:
             Current frame or None if no frame available
         """
         with self.frame_lock:
-            # Owner replaces the whole array on each frame; readers never mutate it in place.
-            return self.current_frame
+            # Callers draw overlays on the returned frame, so never hand out the stored one.
+            return self.current_frame.copy() if self.current_frame is not None else None
     
     def get_performance_stats(self) -> dict:
         """
