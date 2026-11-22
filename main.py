@@ -37,7 +37,7 @@ except Exception:
 
 from src.utils.config import config
 from src.utils.mouse import Mouse, is_button_pressed
-from src.utils.activation import get_active_aim_fov
+from src.utils.activation import get_active_aim_fov, get_aimbot_activation_state
 from src.utils.detection import load_model, perform_detection
 from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
@@ -870,13 +870,25 @@ class AimTracker:
         
         # Aimbot 鐙€鎱?
         if getattr(config, "show_aimbot_status", True):
-            if getattr(config, "enableaim", False):
-                main_status = "ON" if getattr(config, "enableaim", False) else "OFF"
-                status_color = (0, 255, 0) if main_status == "ON" else (0, 0, 255)
-                cv2.putText(img, f"Main Aim: {main_status}", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
-                y_offset += line_height
-            
+            main_enabled = bool(getattr(config, "enableaim", False))
+            main_on = main_enabled and get_aimbot_activation_state(False)
+            main_status = "ON" if main_on else ("OFF" if main_enabled else "DISABLED")
+            status_color = (0, 255, 0) if main_on else (0, 0, 255)
+            cv2.putText(img, f"Main Aim: {main_status}", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
+            y_offset += line_height
+
+            # Badge góc phải: trạng thái toggle luôn nhìn thấy trên cửa sổ Detection.
+            badge_font = cv2.FONT_HERSHEY_SIMPLEX
+            badge_text = "MAIN ON" if main_on else "MAIN OFF"
+            (badge_w, badge_h), _ = cv2.getTextSize(badge_text, badge_font, 0.7, 2)
+            badge_x2 = img.shape[1] - 10
+            badge_x1 = badge_x2 - badge_w - 20
+            badge_y1, badge_y2 = 8, 8 + badge_h + 14
+            cv2.rectangle(img, (badge_x1, badge_y1), (badge_x2, badge_y2), status_color, -1)
+            cv2.putText(img, badge_text, (badge_x1 + 10, badge_y2 - 7),
+                       badge_font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
             if getattr(config, "enableaim_sec", False):
                 sec_status = "ON" if getattr(config, "enableaim_sec", False) else "OFF"
                 status_color = (255, 0, 255) if sec_status == "ON" else (128, 128, 128)

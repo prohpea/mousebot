@@ -179,6 +179,33 @@ def check_aimbot_activation(button_idx, activation_type: str, is_sec: bool = Fal
     return result
 
 
+def get_aimbot_activation_state(is_sec: bool = False) -> bool:
+    """Read current activation state without mutating toggle edge detection."""
+    key = "sec" if is_sec else "main"
+    state = _activation_states[key]
+    activation_type = str(
+        getattr(
+            config,
+            "aimbot_activation_type_sec" if is_sec else "aimbot_activation_type",
+            "hold_enable",
+        )
+    ).strip().lower()
+
+    if activation_type in ("hold_enable", "hold_disable"):
+        binding = getattr(
+            config,
+            "selected_mouse_button_sec" if is_sec else "selected_mouse_button",
+            None,
+        )
+        pressed = is_binding_pressed(binding)
+        return not pressed if activation_type == "hold_disable" else pressed
+
+    with state["lock"]:
+        if activation_type == "use_enable":
+            return bool(state["use_enable_state"])
+        return bool(state["toggle_state"])
+
+
 def reset_activation_state(is_sec: bool = False):
     """Reset activation runtime state."""
     key = "sec" if is_sec else "main"

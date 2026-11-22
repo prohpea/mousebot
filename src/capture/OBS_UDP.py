@@ -370,81 +370,56 @@ class OBS_UDP_Receiver:
             receive_time: Timestamp when data was received
         """
         try:
-            # Add data to buffer with lock for thread safety
             with self.buffer_lock:
                 self.mjpeg_buffer.extend(data)
-                
-                # Prevent buffer from growing too large
-                buffer_len = len(self.mjpeg_buffer)
-                if buffer_len > self.max_buffer_size:
-                    logger.debug(f"MJPEG buffer too large ({buffer_len} bytes), clearing")
+                if len(self.mjpeg_buffer) > self.max_buffer_size:
+                    logger.debug(f"MJPEG buffer too large ({len(self.mjpeg_buffer)} bytes), clearing")
                     self.mjpeg_buffer.clear()
                     return
-                
-                # Work with local copy of buffer for processing
+
+                # One snapshot for searching, index-based walk to avoid repeated slice copies.
                 buffer = bytes(self.mjpeg_buffer)
-            
-            # Look for complete JPEG frames
-            frames_processed = 0
-            max_frames_per_packet = 5  # Prevent infinite loops
-            bytes_removed_from_start = 0  # Track how much we've removed from buffer start
-            
-            while frames_processed < max_frames_per_packet:
-                start_pos = buffer.find(self.mjpeg_start_marker)
-                if start_pos == -1:
-                    # No start marker found, keep only last part of buffer
-                    if len(buffer) > 2048:
-                        with self.buffer_lock:
-                            # Keep last 1024 bytes
-                            if len(self.mjpeg_buffer) > 1024:
-                                self.mjpeg_buffer = self.mjpeg_buffer[-1024:]
-                    break
-                
-                # Remove data before start marker from buffer
-                if start_pos > 0:
-                    bytes_removed_from_start += start_pos
-                    buffer = buffer[start_pos:]
-                
-                # Find end marker
-                end_pos = buffer.find(self.mjpeg_end_marker, 2)
-                if end_pos == -1:
-                    # No complete frame yet, wait for more data
-                    break
-                
-                # Extract complete JPEG frame
-                jpeg_data = buffer[:end_pos + 2]
-                frame_end_pos = end_pos + 2
-                
-                # Update buffer - remove processed data
-                bytes_removed_from_start += frame_end_pos
-                buffer = buffer[frame_end_pos:]
-                
-                # Validate JPEG data size and content
-                if len(jpeg_data) < 100:  # Skip very small frames
-                    continue
-                
-                # Additional validation: check for reasonable JPEG size
-                if len(jpeg_data) > 10 * 1024 * 1024:  # 10MB limit per frame
-                    logger.debug(f"JPEG frame too large: {len(jpeg_data)} bytes, skipping")
-                    continue
-                
-                # Submit frame decoding to thread pool for parallel processing
-                if self.executor and not self.stop_event.is_set():
-                    future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
-                    # Store future with timestamp for processing
-                    try:
-                        self.frame_queue.put_nowait((future, receive_time))
-                    except Exception:
-                        # Queue full, skip this frame to maintain real-time performance
-                        pass
+                frames_processed = 0
+                consumed = 0
+                while frames_processed < 5:
+                    start_pos = buffer.find(self.mjpeg_start_marker, consumed)
+                    if start_pos == -1:
+                        if consumed == 0 and len(buffer) > 2048:
+                            del self.mjpeg_buffer[:-1024]
+                        break
+
+                    end_pos = buffer.find(self.mjpeg_end_marker, start_pos + 2)
+                    if end_pos == -1:
+                        if consumed == 0 and start_pos > 1024 and len(buffer) > 2048:
+                            del self.mjpeg_buffer[:start_pos - 1024]
+                        break
+
+                    jpeg_data = buffer[start_pos:end_pos + 2]
+                    consumed = end_pos + 2
                     frames_processed += 1
-            
-            # Update actual buffer in lock - remove all processed data at once
-            if bytes_removed_from_start > 0:
-                with self.buffer_lock:
-                    if bytes_removed_from_start <= len(self.mjpeg_buffer):
-                        self.mjpeg_buffer = self.mjpeg_buffer[bytes_removed_from_start:]
-                
+
+                    if len(jpeg_data) < 100:
+                        continue
+                    if len(jpeg_data) > 10 * 1024 * 1024:
+                        logger.debug(f"JPEG frame too large: {len(jpeg_data)} bytes, skipping")
+                        continue
+
+                    if self.executor and not self.stop_event.is_set():
+                        # Keep only the newest pending decode; stale frames are useless for aim.
+                        while self.frame_queue.qsize() >= 2:
+                            try:
+                                self.frame_queue.get_nowait()[0].cancel()
+                            except Exception:
+                                break
+                        future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
+                        try:
+                            self.frame_queue.put_nowait((future, receive_time))
+                        except Exception:
+                            pass
+
+                if consumed:
+                    del self.mjpeg_buffer[:consumed]
+
         except Exception as e:
             logger.error(f"Error processing MJPEG data: {e}", exc_info=True)
             # Clear buffer on error to prevent corruption
@@ -558,7 +533,8 @@ class OBS_UDP_Receiver:
         """
         try:
             with self.frame_lock:
-                self.current_frame = frame.copy()
+                # Decoded frame is freshly allocated and owned here; no copy needed.
+                self.current_frame = frame
             
             # Update decoding FPS counter
             with self.processing_lock:
@@ -621,7 +597,8 @@ class OBS_UDP_Receiver:
             Current frame or None if no frame available
         """
         with self.frame_lock:
-            return self.current_frame.copy() if self.current_frame is not None else None
+            # Owner replaces the whole array on each frame; readers never mutate it in place.
+            return self.current_frame
     
     def get_performance_stats(self) -> dict:
         """

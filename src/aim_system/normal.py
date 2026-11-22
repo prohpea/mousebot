@@ -972,6 +972,13 @@ def process_normal_mode(
     aim_enabled_sec = getattr(config, "enableaim_sec", False)
     selected_btn_sec = getattr(config, "selected_mouse_button_sec", None)
     activation_type_sec = getattr(config, "aimbot_activation_type_sec", "hold_enable")
+
+    # Sample activation every frame so toggle edges are not missed when no target is in FOV.
+    main_activation_active = (
+        check_aimbot_activation(selected_btn, activation_type, is_sec=False)
+        if aim_enabled and selected_btn is not None
+        else False
+    )
     
     center_x = frame.xres / 2.0
     center_y = frame.yres / 2.0
@@ -1004,7 +1011,7 @@ def process_normal_mode(
 
             # === 鍎厛铏曠悊 Main Aimbot ===
             if distance_to_center <= main_fov:
-                if aim_enabled and selected_btn is not None and check_aimbot_activation(selected_btn, activation_type, is_sec=False):
+                if main_activation_active:
                     try:
                         aim_type = getattr(config, "aim_type", "head")
                         aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
