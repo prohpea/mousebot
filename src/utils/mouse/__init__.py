@@ -66,60 +66,74 @@ def _normalize_keyboard_api_name(mode: str) -> str:
 _DEFAULT_BACKEND_CAPABILITIES = {
     "keyboard_output": False,
     "keyboard_state": False,
+    "trigger_strafe_ui": False,
 }
 
 _BACKEND_CAPABILITIES = {
     "Serial": {
         "keyboard_output": True,
         "keyboard_state": False,
+        "trigger_strafe_ui": False,
     },
     "Arduino": {
         "keyboard_output": False,
         "keyboard_state": False,
+        "trigger_strafe_ui": False,
     },
     "SendInput": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "Net": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "KmboxA": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "MakV2": {
         "keyboard_output": True,
         "keyboard_state": False,
+        "trigger_strafe_ui": False,
     },
     "MakcuController": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "MakV2Binary": {
         "keyboard_output": True,
         "keyboard_state": False,
+        "trigger_strafe_ui": False,
     },
     "MakxdMakAPI": {
         "keyboard_output": True,
         "keyboard_state": False,
+        "trigger_strafe_ui": False,
     },
     "MakAPI": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "DHZ": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "Ferrum": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
     "Medius": {
         "keyboard_output": True,
         "keyboard_state": True,
+        "trigger_strafe_ui": True,
     },
 }
 
@@ -140,6 +154,10 @@ def supports_keyboard_output(mode: str = None) -> bool:
 def supports_keyboard_state(mode: str = None) -> bool:
     selected = _resolve_keyboard_backend(mode)
     return bool(get_backend_capabilities(selected).get("keyboard_state", False))
+
+
+def supports_trigger_strafe_ui(mode: str = None) -> bool:
+    return bool(get_backend_capabilities(mode).get("trigger_strafe_ui", False))
 
 
 def _get_selected_backend_from_config() -> str:
@@ -968,6 +986,13 @@ def get_button_press_seq(idx: int) -> int:
         return 0
     if state.active_backend == "Medius":
         return MediusAPI.get_button_press_seq(idx)
+    if state.active_backend in {"Serial", "MakV2", "MakV2Binary", "MakxdMakAPI"}:
+        try:
+            idx = int(idx)
+        except Exception:
+            return 0
+        with state.button_states_lock:
+            return int(state.button_press_seq.get(idx, 0))
     return 0
 
 

@@ -1,6 +1,6 @@
-﻿"""
+"""
 鐬勬簴绠楁硶瑾垮害鍣?
-铏曠悊鎵€鏈夌瀯婧栨ā寮忎笅鐨?Aimbot 閭忚集
+铏曠悊鎵€鏈夌瀯婧栨ā寮忎笅鐨?Aimbot 鍜?Triggerbot 閭忚集
 鏀寔 Normal, Silent, NCAF, WindMouse, Bezier 浜旂ó妯″紡
 """
 import math
@@ -12,7 +12,9 @@ import time
 from src.utils.config import config
 from src.utils.debug_logger import log_move, log_print
 from src.utils.activation import check_aimbot_activation, get_active_aim_fov
+from .Triggerbot import process_triggerbot
 from .RCS import process_rcs, check_y_release
+from .MagnetTrigger import process_magnet_trigger
 from .mode_dispatcher import dispatch as dispatch_aim_mode
 from . import mode_abcurves
 
@@ -947,9 +949,11 @@ def process_normal_mode(
     img,
     tracker,
     targets_sec=None,
+    targets_trigger=None,
+    trigger_img=None,
 ):
     """
-    涓荤瀯婧栬搴﹀櫒锛圡ain Aimbot + Sec Aimbot锛?
+    涓荤瀯婧栬搴﹀櫒锛圡ain Aimbot + Sec Aimbot + Triggerbot锛?
     Main Aimbot 鍜?Sec Aimbot 鍚勮嚜浣跨敤鐛ㄧ珛鐨?Operation Mode
     鍎厛绱氾細Main Aimbot > Sec Aimbot
     
@@ -959,9 +963,12 @@ def process_normal_mode(
         img: BGR 鍦栧儚
         tracker: AimTracker 瀵︿緥
         targets_sec: 鍓嚜鐬勭洰妯欏垪琛紙None 鏅傚洖閫€鐐?targets_main锛?
+        targets_trigger: Triggerbot 鐩鍒楄〃锛圢one 鏅傚洖閫€鐐?targets_main锛?
     """
     if targets_sec is None:
         targets_sec = targets_main
+    if targets_trigger is None:
+        targets_trigger = targets_main
 
     # Main Aimbot 閰嶇疆
     aim_enabled = getattr(config, "enableaim", False)
@@ -972,13 +979,6 @@ def process_normal_mode(
     aim_enabled_sec = getattr(config, "enableaim_sec", False)
     selected_btn_sec = getattr(config, "selected_mouse_button_sec", None)
     activation_type_sec = getattr(config, "aimbot_activation_type_sec", "hold_enable")
-
-    # Sample activation every frame so toggle edges are not missed when no target is in FOV.
-    main_activation_active = (
-        check_aimbot_activation(selected_btn, activation_type, is_sec=False)
-        if aim_enabled and selected_btn is not None
-        else False
-    )
     
     center_x = frame.xres / 2.0
     center_y = frame.yres / 2.0
@@ -998,6 +998,19 @@ def process_normal_mode(
         tracker.rcs_rapid_click_threshold
     )
     
+    # Evaluate activation every frame so toggle / press-to-enable state updates
+    # even when no target is currently detected or inside FOV.
+    main_activation_ready = bool(
+        aim_enabled
+        and selected_btn is not None
+        and check_aimbot_activation(selected_btn, activation_type, is_sec=False)
+    )
+    sec_activation_ready = bool(
+        aim_enabled_sec
+        and selected_btn_sec is not None
+        and check_aimbot_activation(selected_btn_sec, activation_type_sec, is_sec=True)
+    )
+
     # 铏曠悊 Aimbot锛堝劒鍏堢礆锛歁ain > Sec锛?
     main_fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
     sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
@@ -1010,42 +1023,41 @@ def process_normal_mode(
             distance_to_center = math.hypot(cx - center_x, cy - center_y)
 
             # === 鍎厛铏曠悊 Main Aimbot ===
-            if distance_to_center <= main_fov:
-                if main_activation_active:
-                    try:
-                        aim_type = getattr(config, "aim_type", "head")
-                        aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
-                        aim_offsetY = float(getattr(config, "aim_offsetY", tracker.aim_offsetY))
-                        
-                        dx = (cx + aim_offsetX) - center_x
-                        dy = (cy + aim_offsetY) - center_y
-                        
-                        # Nearest 妯″紡
-                        if aim_type == "nearest" and head_y_min is not None and body_y_max is not None:
-                            if head_y_min < body_y_max:
-                                target_y = cy + aim_offsetY
-                                if head_y_min <= target_y <= body_y_max:
-                                    dy = 0
-                        
-                        # RCS 鏁村悎
-                        if rcs_active:
-                            dy = 0
-                        
-                        # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
-                        if check_y_release():
-                            dy = 0
-                        
-                        # 鏍规摎 Main 妯″紡瑾垮害
-                        if not getattr(tracker, "_was_main_aimbot_active", False):
-                            if hasattr(tracker, "begin_live_aim_session"):
-                                tracker.begin_live_aim_session(mode_main, dx, dy)
-                        if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=False):
-                            _pause_mode_in_stop_fov(tracker, is_sec=False)
-                        else:
-                            _dispatch_aimbot(dx, dy, distance_to_center, mode_main, tracker, is_sec=False)
-                        main_aimbot_active = True
-                    except Exception as e:
-                        log_print(f"[Main Aimbot error] {e}")
+            if distance_to_center <= main_fov and main_activation_ready:
+                try:
+                    aim_type = getattr(config, "aim_type", "head")
+                    aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
+                    aim_offsetY = float(getattr(config, "aim_offsetY", tracker.aim_offsetY))
+                    
+                    dx = (cx + aim_offsetX) - center_x
+                    dy = (cy + aim_offsetY) - center_y
+                    
+                    # Nearest 妯″紡
+                    if aim_type == "nearest" and head_y_min is not None and body_y_max is not None:
+                        if head_y_min < body_y_max:
+                            target_y = cy + aim_offsetY
+                            if head_y_min <= target_y <= body_y_max:
+                                dy = 0
+                    
+                    # RCS 鏁村悎
+                    if rcs_active:
+                        dy = 0
+                    
+                    # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
+                    if check_y_release():
+                        dy = 0
+                    
+                    # 鏍规摎 Main 妯″紡瑾垮害
+                    if not getattr(tracker, "_was_main_aimbot_active", False):
+                        if hasattr(tracker, "begin_live_aim_session"):
+                            tracker.begin_live_aim_session(mode_main, dx, dy)
+                    if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=False):
+                        _pause_mode_in_stop_fov(tracker, is_sec=False)
+                    else:
+                        _dispatch_aimbot(dx, dy, distance_to_center, mode_main, tracker, is_sec=False)
+                    main_aimbot_active = True
+                except Exception as e:
+                    log_print(f"[Main Aimbot error] {e}")
     
     # === 濡傛灉 Main Aimbot 鏈暉鍕曪紝鍢楄│ Sec Aimbot ===
     if not main_aimbot_active:
@@ -1061,42 +1073,71 @@ def process_normal_mode(
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
         if cx is not None and cy is not None:
             distance_to_center_sec = math.hypot(cx - center_x, cy - center_y)
-            if distance_to_center_sec <= sec_fov:
-                if aim_enabled_sec and selected_btn_sec is not None and check_aimbot_activation(selected_btn_sec, activation_type_sec, is_sec=True):
-                    try:
-                        aim_type_sec = getattr(config, "aim_type_sec", "head")
-                        aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
-                        aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
-                        
-                        dx = (cx + aim_offsetX_sec) - center_x
-                        dy = (cy + aim_offsetY_sec) - center_y
-                        
-                        # Nearest 妯″紡
-                        if aim_type_sec == "nearest" and head_y_min is not None and body_y_max is not None:
-                            if head_y_min < body_y_max:
-                                target_y = cy + aim_offsetY_sec
-                                if head_y_min <= target_y <= body_y_max:
-                                    dy = 0
-                        
-                        # RCS 鏁村悎
-                        if rcs_active:
-                            dy = 0
-                        
-                        # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
-                        if check_y_release():
-                            dy = 0
-                        
-                        # 鏍规摎 Sec 妯″紡瑾垮害
-                        if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=True):
-                            _pause_mode_in_stop_fov(tracker, is_sec=True)
-                        else:
-                            _dispatch_aimbot(dx, dy, distance_to_center_sec, mode_sec, tracker, is_sec=True)
-                        sec_aimbot_active = True
-                    except Exception as e:
-                        log_print(f"[Sec Aimbot error] {e}")
+            if distance_to_center_sec <= sec_fov and sec_activation_ready:
+                try:
+                    aim_type_sec = getattr(config, "aim_type_sec", "head")
+                    aim_offsetX_sec = float(getattr(config, "aim_offsetX_sec", tracker.aim_offsetX_sec))
+                    aim_offsetY_sec = float(getattr(config, "aim_offsetY_sec", tracker.aim_offsetY_sec))
+                    
+                    dx = (cx + aim_offsetX_sec) - center_x
+                    dy = (cy + aim_offsetY_sec) - center_y
+                    
+                    # Nearest 妯″紡
+                    if aim_type_sec == "nearest" and head_y_min is not None and body_y_max is not None:
+                        if head_y_min < body_y_max:
+                            target_y = cy + aim_offsetY_sec
+                            if head_y_min <= target_y <= body_y_max:
+                                dy = 0
+                    
+                    # RCS 鏁村悎
+                    if rcs_active:
+                        dy = 0
+                    
+                    # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
+                    if check_y_release():
+                        dy = 0
+                    
+                    # 鏍规摎 Sec 妯″紡瑾垮害
+                    if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=True):
+                        _pause_mode_in_stop_fov(tracker, is_sec=True)
+                    else:
+                        _dispatch_aimbot(dx, dy, distance_to_center_sec, mode_sec, tracker, is_sec=True)
+                    sec_aimbot_active = True
+                except Exception as e:
+                    log_print(f"[Sec Aimbot error] {e}")
 
     if not sec_aimbot_active:
         mode_abcurves.reset(tracker, is_sec=True)
         _clear_stop_fov_state(tracker, is_sec=True)
         _clear_locked_target(tracker, is_sec=True)
+
+    magnet_enabled = bool(getattr(config, "enable_magnet_trigger", False))
+    if magnet_enabled:
+        try:
+            process_magnet_trigger(
+                frame=frame,
+                source_img=trigger_img,
+                tracker=tracker,
+                targets=targets_trigger,
+                center_x=center_x,
+                center_y=center_y,
+                aimbot_active=(main_aimbot_active or sec_aimbot_active),
+            )
+        except Exception as e:
+            log_print("[Magnet Trigger error]", e)
+    else:
+        # 铏曠悊 Triggerbot锛堢劇璜栨槸鍚︽湁鐩閮芥渻鍩疯锛?
+        try:
+            status = process_triggerbot(
+                frame, img, tracker.model, tracker.controller,
+                tracker.tbdelay_min, tracker.tbdelay_max,
+                tracker.tbhold_min, tracker.tbhold_max,
+                tracker.tbcooldown_min, tracker.tbcooldown_max,
+                tracker.tbburst_count_min, tracker.tbburst_count_max,
+                tracker.tbburst_interval_min, tracker.tbburst_interval_max,
+                targets=targets_trigger,
+                source_img=trigger_img,
+            )
+        except Exception as e:
+            log_print("[Triggerbot error]", e)
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 CaptureCardGStreamer module.
 Pure GStreamer capture path using ctypes (Windows).
 """

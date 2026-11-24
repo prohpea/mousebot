@@ -8,6 +8,7 @@ DEFAULT_LANGUAGE = "en"
 LANGUAGE_NAMES = {
     "en": "English",
     "zh-CN": "简体中文",
+    "vi": "Tiếng Việt",
 }
 
 
@@ -77,6 +78,8 @@ class I18n:
             return "en"
         if lowered in ("zh", "zh-cn", "zh-hans", "cn", "chs", "simplified chinese", "简体中文"):
             return "zh-CN"
+        if lowered in ("vi", "vi-vn", "vn", "vietnamese", "tiếng việt", "tieng viet"):
+            return "vi"
         for item_code, display in self.available():
             if item_code.lower() == lowered or display == raw:
                 return item_code

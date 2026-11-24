@@ -1,9 +1,12 @@
 import cv2
+import os
 import socket
+import struct
 import threading
 import time
 import asyncio
 import numpy as np
+from pathlib import Path
 from typing import Optional, Callable, Tuple, Awaitable
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
@@ -11,10 +14,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Optional TurboJPEG for faster CPU JPEG decode
+# Optional TurboJPEG for faster CPU JPEG decode (prefer bundled turbojpeg.dll for portability)
+_jpeg = None
 try:
     from turbojpeg import TurboJPEG, TJPF_BGR
-    _jpeg = TurboJPEG()
+
+    _dll_candidates = []
+    try:
+        from src.utils.app_paths import get_bundle_dir
+        _dll_candidates.append(get_bundle_dir() / "turbojpeg.dll")
+    except Exception:
+        pass
+    _dll_candidates.append(Path(__file__).resolve().parents[2] / "turbojpeg.dll")
+    _dll_candidates.append(Path(r"C:\libjpeg-turbo64\bin\turbojpeg.dll"))
+
+    for _cand in _dll_candidates:
+        if _cand.is_file():
+            try:
+                _jpeg = TurboJPEG(str(_cand))
+                break
+            except Exception:
+                pass
+    if _jpeg is None:
+        _jpeg = TurboJPEG()
 except Exception:
     _jpeg = None
 
@@ -73,7 +95,6 @@ class OBS_UDP_Receiver:
         self.last_processing_time = time.time()
         self.processing_counter = 0
         self.receive_delay = 0.0
-        self.decode_delay = 0.0
         self.processing_delay = 0.0
         self.decoding_fps = 0.0
         self.decoding_counter = 0
@@ -85,6 +106,13 @@ class OBS_UDP_Receiver:
         self.mjpeg_start_marker = b'\xff\xd8'  # JPEG start marker
         self.mjpeg_end_marker = b'\xff\xd9'    # JPEG end marker
         self.max_buffer_size = 2 * 1024 * 1024  # 2MB limit
+
+        # xUDP fragmented-frame reassembly state (8-byte header: <IHH total_size, frag_idx, total_frags)
+        self._frag_timeout_sec = 0.015
+        self._frag_total_size = 0
+        self._frag_total_count = 0
+        self._frag_chunks = {}
+        self._frag_started_at = 0.0
         
         logger.info(f"OBS_UDP_Receiver initialized: {ip}:{port}, max_workers={self.max_workers}")
     
@@ -298,6 +326,7 @@ class OBS_UDP_Receiver:
             # Clear buffer
             with self.buffer_lock:
                 self.mjpeg_buffer.clear()
+            self._reset_fragment_assembly()
             
             # Clear current frame
             with self.frame_lock:
@@ -361,6 +390,57 @@ class OBS_UDP_Receiver:
         
         logger.info("Frame processing loop ended")
     
+    def _reset_fragment_assembly(self):
+        self._frag_chunks.clear()
+        self._frag_total_size = 0
+        self._frag_total_count = 0
+        self._frag_started_at = 0.0
+
+    def _submit_jpeg_frame(self, jpeg_data: bytes, receive_time: float) -> bool:
+        if len(jpeg_data) < 100 or len(jpeg_data) > 10 * 1024 * 1024:
+            return False
+        if self.executor and not self.stop_event.is_set():
+            future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
+            try:
+                self.frame_queue.put_nowait((future, receive_time))
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _try_reassemble_xudp_fragment(self, data: bytes, receive_time: float) -> Tuple[bool, Optional[bytes]]:
+        """Handle xUDP 8-byte fragmented packets (<IHH: total_size, frag_idx, total_frags)."""
+        if not data or len(data) < 8:
+            return False, None
+        total_size, frag_idx, total_frags = struct.unpack_from("<IHH", data)
+        if not (65000 < total_size < 10_000_000 and 1 < total_frags <= 1000 and frag_idx < total_frags):
+            return False, None
+
+        now = time.perf_counter()
+        if self._frag_chunks and (now - self._frag_started_at > self._frag_timeout_sec):
+            self._reset_fragment_assembly()
+
+        if (
+            self._frag_total_size != total_size
+            or self._frag_total_count != total_frags
+            or frag_idx in self._frag_chunks
+        ):
+            self._reset_fragment_assembly()
+            self._frag_total_size = total_size
+            self._frag_total_count = total_frags
+            self._frag_started_at = now
+
+        if not self._frag_chunks:
+            self._frag_started_at = now
+        self._frag_chunks[frag_idx] = data[8:]
+
+        if len(self._frag_chunks) == self._frag_total_count:
+            assembled = b"".join(self._frag_chunks[i] for i in range(self._frag_total_count))
+            self._reset_fragment_assembly()
+            return True, assembled
+
+        return True, None
+
     def _process_mjpeg_data(self, data: bytes, receive_time: float):
         """
         Process incoming MJPEG data and extract frames with improved error handling
@@ -370,50 +450,88 @@ class OBS_UDP_Receiver:
             receive_time: Timestamp when data was received
         """
         try:
+            # Handle xUDP fragmented frames cleanly before raw MJPEG buffering.
+            is_frag, assembled = self._try_reassemble_xudp_fragment(data, receive_time)
+            if is_frag:
+                if assembled is not None:
+                    self._submit_jpeg_frame(assembled, receive_time)
+                return
+
+            # Add data to buffer with lock for thread safety
             with self.buffer_lock:
                 self.mjpeg_buffer.extend(data)
-                if len(self.mjpeg_buffer) > self.max_buffer_size:
-                    logger.debug(f"MJPEG buffer too large ({len(self.mjpeg_buffer)} bytes), clearing")
+                
+                # Prevent buffer from growing too large
+                buffer_len = len(self.mjpeg_buffer)
+                if buffer_len > self.max_buffer_size:
+                    logger.debug(f"MJPEG buffer too large ({buffer_len} bytes), clearing")
                     self.mjpeg_buffer.clear()
                     return
-
-                # One snapshot for searching, index-based walk to avoid repeated slice copies.
+                
+                # Work with local copy of buffer for processing
                 buffer = bytes(self.mjpeg_buffer)
-                frames_processed = 0
-                consumed = 0
-                while frames_processed < 5:
-                    start_pos = buffer.find(self.mjpeg_start_marker, consumed)
-                    if start_pos == -1:
-                        if consumed == 0 and len(buffer) > 2048:
-                            del self.mjpeg_buffer[:-1024]
-                        break
-
-                    end_pos = buffer.find(self.mjpeg_end_marker, start_pos + 2)
-                    if end_pos == -1:
-                        if consumed == 0 and start_pos > 1024 and len(buffer) > 2048:
-                            del self.mjpeg_buffer[:start_pos - 1024]
-                        break
-
-                    jpeg_data = buffer[start_pos:end_pos + 2]
-                    consumed = end_pos + 2
+            
+            # Look for complete JPEG frames
+            frames_processed = 0
+            max_frames_per_packet = 5  # Prevent infinite loops
+            bytes_removed_from_start = 0  # Track how much we've removed from buffer start
+            
+            while frames_processed < max_frames_per_packet:
+                start_pos = buffer.find(self.mjpeg_start_marker)
+                if start_pos == -1:
+                    # No start marker found, keep only last part of buffer
+                    if len(buffer) > 2048:
+                        with self.buffer_lock:
+                            # Keep last 1024 bytes
+                            if len(self.mjpeg_buffer) > 1024:
+                                self.mjpeg_buffer = self.mjpeg_buffer[-1024:]
+                    break
+                
+                # Remove data before start marker from buffer
+                if start_pos > 0:
+                    bytes_removed_from_start += start_pos
+                    buffer = buffer[start_pos:]
+                
+                # Find end marker
+                end_pos = buffer.find(self.mjpeg_end_marker, 2)
+                if end_pos == -1:
+                    # No complete frame yet, wait for more data
+                    break
+                
+                # Extract complete JPEG frame
+                jpeg_data = buffer[:end_pos + 2]
+                frame_end_pos = end_pos + 2
+                
+                # Update buffer - remove processed data
+                bytes_removed_from_start += frame_end_pos
+                buffer = buffer[frame_end_pos:]
+                
+                # Validate JPEG data size and content
+                if len(jpeg_data) < 100:  # Skip very small frames
+                    continue
+                
+                # Additional validation: check for reasonable JPEG size
+                if len(jpeg_data) > 10 * 1024 * 1024:  # 10MB limit per frame
+                    logger.debug(f"JPEG frame too large: {len(jpeg_data)} bytes, skipping")
+                    continue
+                
+                # Submit frame decoding to thread pool for parallel processing
+                if self.executor and not self.stop_event.is_set():
+                    future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
+                    # Store future with timestamp for processing
+                    try:
+                        self.frame_queue.put_nowait((future, receive_time))
+                    except Exception:
+                        # Queue full, skip this frame to maintain real-time performance
+                        pass
                     frames_processed += 1
-
-                    if len(jpeg_data) < 100:
-                        continue
-                    if len(jpeg_data) > 10 * 1024 * 1024:
-                        logger.debug(f"JPEG frame too large: {len(jpeg_data)} bytes, skipping")
-                        continue
-
-                    if self.executor and not self.stop_event.is_set():
-                        future = self.executor.submit(self._decode_jpeg_frame, jpeg_data, receive_time)
-                        try:
-                            self.frame_queue.put_nowait((future, receive_time))
-                        except Exception:
-                            pass  # Queue full: drop this frame to stay real-time.
-
-                if consumed:
-                    del self.mjpeg_buffer[:consumed]
-
+            
+            # Update actual buffer in lock - remove all processed data at once
+            if bytes_removed_from_start > 0:
+                with self.buffer_lock:
+                    if bytes_removed_from_start <= len(self.mjpeg_buffer):
+                        self.mjpeg_buffer = self.mjpeg_buffer[bytes_removed_from_start:]
+                
         except Exception as e:
             logger.error(f"Error processing MJPEG data: {e}", exc_info=True)
             # Clear buffer on error to prevent corruption
@@ -432,7 +550,6 @@ class OBS_UDP_Receiver:
             Decoded frame as numpy array or None if failed
         """
         try:
-            decode_start = time.perf_counter()
             # Validate JPEG data length
             if len(jpeg_data) < 100:  # Minimum reasonable JPEG size
                 return None
@@ -476,8 +593,6 @@ class OBS_UDP_Receiver:
             if self._is_frame_corrupted(frame):
                 return None
             
-            # Decode delay excludes network/queue time already included in receive_delay.
-            self.decode_delay = (time.perf_counter() - decode_start) * 1000
             # Calculate receive delay
             self.receive_delay = (time.time() - receive_time) * 1000  # Convert to ms
             return frame
@@ -492,30 +607,16 @@ class OBS_UDP_Receiver:
     @staticmethod
     def _is_frame_corrupted(frame: np.ndarray) -> bool:
         """
-        Fast corruption check using sampling instead of full array scan
-        
-        Args:
-            frame: Frame to check
-            
-        Returns:
-            True if frame appears corrupted
+        Validate basic frame structure without rejecting valid dark / contrast-crushed
+        xUDP frames (where corners and center can legitimately be pure black).
         """
         try:
+            if frame is None or frame.size == 0 or frame.ndim < 2:
+                return True
             h, w = frame.shape[:2]
-            # Sample corners and center instead of checking entire frame
-            sample_points = [
-                frame[0, 0], frame[0, -1], frame[-1, 0], frame[-1, -1],
-                frame[h//2, w//2]
-            ]
-            # Check if all samples are the same (uniform frame)
-            if len(set(tuple(sample) for sample in sample_points)) == 1:
-                return True
-            # Check if all samples are zero
-            if all(np.all(sample == 0) for sample in sample_points):
-                return True
-            return False
+            return h < 10 or w < 10
         except Exception:
-            return True  # Assume corrupted if check fails
+            return True
     
     def _update_frame(self, frame: np.ndarray, receive_time: float):
         """
@@ -527,8 +628,7 @@ class OBS_UDP_Receiver:
         """
         try:
             with self.frame_lock:
-                # Decoded frame is freshly allocated and owned here; no copy needed.
-                self.current_frame = frame
+                self.current_frame = frame.copy()
             
             # Update decoding FPS counter
             with self.processing_lock:
@@ -591,7 +691,6 @@ class OBS_UDP_Receiver:
             Current frame or None if no frame available
         """
         with self.frame_lock:
-            # Callers draw overlays on the returned frame, so never hand out the stored one.
             return self.current_frame.copy() if self.current_frame is not None else None
     
     def get_performance_stats(self) -> dict:
@@ -615,7 +714,6 @@ class OBS_UDP_Receiver:
             'decoding_fps': decoding_fps,
             'target_fps': self.target_fps,
             'receive_delay_ms': self.receive_delay,
-            'decode_delay_ms': self.decode_delay,
             'processing_delay_ms': processing_delay,
             'is_connected': self.is_connected,
             'is_receiving': self.is_receiving,

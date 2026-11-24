@@ -6,7 +6,7 @@ Supports mouse-button and keyboard-key bindings.
 import threading
 
 from src.utils.config import config
-from src.utils.mouse import is_button_pressed
+from src.utils.mouse import get_button_press_seq, get_key_press_seq, is_button_pressed
 from src.utils.mouse import is_key_pressed as backend_is_key_pressed
 
 # Global activation runtime state
@@ -15,12 +15,16 @@ _activation_states = {
         "toggle_state": False,
         "use_enable_state": False,
         "last_button_state": False,
+        "last_press_seq": None,
+        "last_binding": None,
         "lock": threading.Lock(),
     },
     "sec": {
         "toggle_state": False,
         "use_enable_state": False,
         "last_button_state": False,
+        "last_press_seq": None,
+        "last_binding": None,
         "lock": threading.Lock(),
     },
 }
@@ -32,6 +36,11 @@ _ads_states = {
         "lock": threading.Lock(),
     },
     "sec": {
+        "toggle_state": False,
+        "last_button_state": False,
+        "lock": threading.Lock(),
+    },
+    "trigger": {
         "toggle_state": False,
         "last_button_state": False,
         "lock": threading.Lock(),
@@ -74,6 +83,21 @@ def is_binding_pressed(binding) -> bool:
         except Exception:
             return False
     return _is_keyboard_pressed(binding)
+
+
+def _get_binding_press_seq(binding) -> int:
+    normalized_idx = _normalize_button_idx(binding)
+    if normalized_idx is not None:
+        try:
+            return int(get_button_press_seq(normalized_idx))
+        except Exception:
+            return 0
+    if binding is None:
+        return 0
+    try:
+        return int(get_key_press_seq(binding))
+    except Exception:
+        return 0
 
 
 def _to_positive_float(value, fallback):
@@ -135,6 +159,22 @@ def get_active_aim_fov(is_sec: bool = False, fallback: float = 0.0) -> float:
     return ads_fov
 
 
+def get_active_trigger_fov(fallback: float = 0.0) -> float:
+    """Resolve runtime Trigger FOV with ADS override when Trigger ADS key is active."""
+    base_fallback = max(float(fallback), 1.0)
+    base_fov = _to_positive_float(getattr(config, "tbfovsize", base_fallback), base_fallback)
+    ads_enabled = bool(getattr(config, "trigger_ads_fov_enabled", False))
+    ads_key = getattr(config, "trigger_ads_key", "")
+    ads_key_type = getattr(config, "trigger_ads_key_type", "hold")
+    ads_fov = _to_positive_float(getattr(config, "trigger_ads_fovsize", base_fov), base_fov)
+
+    if not ads_enabled:
+        return base_fov
+    if not _is_ads_trigger_active(is_binding_pressed(ads_key), ads_key_type, state_key="trigger"):
+        return base_fov
+    return ads_fov
+
+
 def check_aimbot_activation(button_idx, activation_type: str, is_sec: bool = False) -> bool:
     """
     Check if aimbot should be active for current frame.
@@ -148,26 +188,46 @@ def check_aimbot_activation(button_idx, activation_type: str, is_sec: bool = Fal
         bool: True if active.
     """
     current_pressed = bool(is_binding_pressed(button_idx))
+    current_seq = _get_binding_press_seq(button_idx)
+    mode = str(activation_type or "hold_enable").strip().lower()
 
     key = "sec" if is_sec else "main"
     state = _activation_states[key]
 
     with state["lock"]:
-        last_pressed = state["last_button_state"]
+        last_binding = state.get("last_binding")
+        if last_binding is not None and last_binding != button_idx:
+            state["last_button_state"] = False
+            state["last_press_seq"] = current_seq
 
-        if activation_type == "hold_enable":
+        last_pressed = bool(state["last_button_state"])
+        last_seq = state.get("last_press_seq")
+
+        if last_seq is None:
+            press_count = 1 if (not last_pressed and current_pressed) else 0
+        elif current_seq > int(last_seq):
+            press_count = current_seq - int(last_seq)
+        elif current_seq == int(last_seq) and current_seq > 0:
+            press_count = 0
+        else:
+            press_count = 1 if (not last_pressed and current_pressed) else 0
+
+        state["last_binding"] = button_idx
+        state["last_press_seq"] = current_seq
+
+        if mode == "hold_enable":
             result = current_pressed
 
-        elif activation_type == "hold_disable":
+        elif mode == "hold_disable":
             result = not current_pressed
 
-        elif activation_type == "toggle":
-            if not last_pressed and current_pressed:
+        elif mode == "toggle":
+            if press_count % 2 == 1:
                 state["toggle_state"] = not state["toggle_state"]
             result = state["toggle_state"]
 
-        elif activation_type == "use_enable":
-            if not last_pressed and current_pressed:
+        elif mode == "use_enable":
+            if press_count % 2 == 1:
                 state["use_enable_state"] = not state["use_enable_state"]
             result = state["use_enable_state"]
 
@@ -179,30 +239,10 @@ def check_aimbot_activation(button_idx, activation_type: str, is_sec: bool = Fal
     return result
 
 
-def get_aimbot_activation_state(is_sec: bool = False) -> bool:
-    """Read current activation state without mutating toggle edge detection."""
-    key = "sec" if is_sec else "main"
-    state = _activation_states[key]
-    activation_type = str(
-        getattr(
-            config,
-            "aimbot_activation_type_sec" if is_sec else "aimbot_activation_type",
-            "hold_enable",
-        )
-    ).strip().lower()
-
-    if activation_type in ("hold_enable", "hold_disable"):
-        binding = getattr(
-            config,
-            "selected_mouse_button_sec" if is_sec else "selected_mouse_button",
-            None,
-        )
-        pressed = is_binding_pressed(binding)
-        return not pressed if activation_type == "hold_disable" else pressed
-
+def get_aimbot_toggle_state() -> bool:
+    """Read Main Aimbot runtime toggle state without mutating it."""
+    state = _activation_states["main"]
     with state["lock"]:
-        if activation_type == "use_enable":
-            return bool(state["use_enable_state"])
         return bool(state["toggle_state"])
 
 
@@ -214,3 +254,5 @@ def reset_activation_state(is_sec: bool = False):
         state["toggle_state"] = False
         state["use_enable_state"] = False
         state["last_button_state"] = False
+        state["last_press_seq"] = None
+        state["last_binding"] = None

@@ -4,6 +4,7 @@ makcu = None
 makcu_lock = threading.Lock()
 
 button_states = {i: False for i in range(5)}
+button_press_seq = {i: 0 for i in range(5)}
 button_states_lock = threading.Lock()
 
 is_connected = False

@@ -131,10 +131,14 @@ datas = [
     ("configs/default_cvm.json", "configs"),
 ]
 
+import os
+
 binaries = [
     ("src/utils/mouse/API/kmboxA/pyd/kmA.cp311-win_amd64.pyd", "src/utils/mouse/API/kmboxA/pyd"),
     ("src/utils/mouse/API/Net/dll/kmNet.cp311-win_amd64.pyd", "src/utils/mouse/API/Net/dll"),
 ]
+if os.path.exists("turbojpeg.dll"):
+    binaries.append(("turbojpeg.dll", "."))
 
 hiddenimports = [
     "PIL._tkinter_finder",
@@ -166,6 +170,9 @@ hiddenimports = [
     "src.utils.mouse.SerialAPI",
     "src.utils.mouse.keycodes",
     "src.utils.mouse.state",
+    "src.utils.network_feedback",
+    "src.utils.preview_throttle",
+    "src.ui_components",
     "src.capture.CaptureCard",
     "src.capture.CaptureCardGStreamer",
     "src.capture.OBS_UDP",
@@ -173,8 +180,11 @@ hiddenimports = [
     "src.capture.ndi",
     "src.capture.obs_teleport_capture",
     "src.aim_system.Bezier",
+    "src.aim_system.MagnetTrigger",
     "src.aim_system.NCAF",
     "src.aim_system.RCS",
+    "src.aim_system.RGBTrigger",
+    "src.aim_system.Triggerbot",
     "src.aim_system.abcurves_controller",
     "src.aim_system.anti_smoke_detector",
     "src.aim_system.mode_abcurves",
@@ -189,6 +199,7 @@ hiddenimports = [
     "src.aim_system.normal",
     "src.aim_system.silent",
     "src.aim_system.target_smoother",
+    "src.aim_system.trigger_strafe_helper",
     "src.aim_system.windmouse_smooth",
 ]
 

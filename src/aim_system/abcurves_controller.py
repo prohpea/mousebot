@@ -792,8 +792,8 @@ def simulate_abcurves_preview_path(
         dz_enabled = bool(getattr(config, "deadzone_fov_enabled", False))
         dz_size = float(getattr(config, "deadzone_fovsize", 6.0))
 
-    sens = float(getattr(config, "in_game_sens", 0.35))
-    dpi = float(getattr(config, "mouse_dpi", 800))
+    sens = float(getattr(config, "in_game_sens", 0.23))
+    dpi = float(getattr(config, "mouse_dpi", 1100))
     kernel_backend = str(getattr(config, "abcurves_kernel_backend", "numpy") or "numpy").strip().lower()
     chosen_kernel = "numpy" if kernel_backend not in ("numpy", "numba") else "numpy"
     counts_per_px_x, counts_per_px_y = _compute_counts_per_px(sens, dpi, x_speed, y_speed)

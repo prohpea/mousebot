@@ -1,4 +1,4 @@
-﻿import ctypes
+import ctypes
 import multiprocessing
 import os
 import sys
@@ -37,7 +37,7 @@ except Exception:
 
 from src.utils.config import config
 from src.utils.mouse import Mouse, is_button_pressed
-from src.utils.activation import get_active_aim_fov, get_aimbot_activation_state
+from src.utils.activation import get_active_aim_fov, get_active_trigger_fov, get_aimbot_toggle_state
 from src.utils.detection import load_model, perform_detection
 from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
@@ -59,12 +59,12 @@ class AimTracker:
     RAW_STREAM_NDI_WINDOW = "NDI Raw Stream"
     RAW_STREAM_UDP_WINDOW = "UDP Raw Stream"
 
-    def __init__(self, app, target_fps=80):
+    def __init__(self, app, target_fps=144):
         """
         鍒濆鍖?AimTracker
         
         Args:
-            app: 鎳夌敤绋嬪紡瀵︿緥锛岄渶瑕佸寘鍚?capture 灞€э紙CaptureService锛?            target_fps: 鐩骞€鐜囷紝榛樿獚鐐?80 FPS
+            app: 鎳夌敤绋嬪紡瀵︿緥锛岄渶瑕佸寘鍚?capture 灞€э紙CaptureService锛?            target_fps: 鐩骞€鐜囷紝榛樿獚鐐?144 FPS
         """
         self.app = app
         # --- Params (avec valeurs fallback) ---
@@ -72,7 +72,7 @@ class AimTracker:
         self.normal_y_speed = float(getattr(config, "normal_y_speed", 0.5))
         self.normalsmooth = float(getattr(config, "normalsmooth", 10))
         self.normalsmoothfov = float(getattr(config, "normalsmoothfov", 10))
-        self.mouse_dpi = float(getattr(config, "mouse_dpi", 800))
+        self.mouse_dpi = float(getattr(config, "mouse_dpi", 1100))
         self.fovsize = float(getattr(config, "fovsize", 300))
         self.ads_fov_enabled = bool(getattr(config, "ads_fov_enabled", False))
         self.ads_fovsize = float(getattr(config, "ads_fovsize", self.fovsize))
@@ -81,6 +81,29 @@ class AimTracker:
         self.deadzone_stop_delay_min_ms = float(getattr(config, "deadzone_stop_delay_min_ms", 15.0))
         self.deadzone_stop_delay_max_ms = float(getattr(config, "deadzone_stop_delay_max_ms", 45.0))
         self.ads_key = getattr(config, "ads_key", "Right Mouse Button")
+        self.tbfovsize = float(getattr(config, "tbfovsize", 70))
+        self.trigger_ads_fov_enabled = bool(getattr(config, "trigger_ads_fov_enabled", False))
+        self.trigger_ads_fovsize = float(getattr(config, "trigger_ads_fovsize", self.tbfovsize))
+        self.trigger_ads_key = getattr(config, "trigger_ads_key", "Right Mouse Button")
+        self.trigger_ads_key_type = getattr(config, "trigger_ads_key_type", "hold")
+        # Triggerbot delay range
+        self.tbdelay_min = float(getattr(config, "tbdelay_min", 0.08))
+        self.tbdelay_max = float(getattr(config, "tbdelay_max", 0.15))
+        # Triggerbot hold range
+        self.tbhold_min = float(getattr(config, "tbhold_min", 40))
+        self.tbhold_max = float(getattr(config, "tbhold_max", 60))
+        # Triggerbot 閫ｇ櫦瑷疆锛堢瘎鍦嶏級
+        self.tbcooldown_min = float(getattr(config, "tbcooldown_min", 0.0))
+        self.tbcooldown_max = float(getattr(config, "tbcooldown_max", 0.0))
+        self.tbburst_count_min = int(getattr(config, "tbburst_count_min", 1))
+        self.tbburst_count_max = int(getattr(config, "tbburst_count_max", 1))
+        self.tbburst_interval_min = float(getattr(config, "tbburst_interval_min", 0.0))
+        self.tbburst_interval_max = float(getattr(config, "tbburst_interval_max", 0.0))
+        self.trigger_roi_size = int(getattr(config, "trigger_roi_size", 8))
+        self.trigger_min_pixels = int(getattr(config, "trigger_min_pixels", 4))
+        self.trigger_min_ratio = float(getattr(config, "trigger_min_ratio", 0.03))
+        self.trigger_confirm_frames = int(getattr(config, "trigger_confirm_frames", 2))
+        # 娉ㄦ剰锛歭ast_tb_click_time 鐝惧湪鐢?Triggerbot.py 涓殑鍏ㄥ眬鐙€鎱嬬鐞?        
         # RCS (Recoil Control System) 瑷疆
         self.rcs_pull_speed = int(getattr(config, "rcs_pull_speed", 10))
         self.rcs_activation_delay = int(getattr(config, "rcs_activation_delay", 100))
@@ -92,11 +115,12 @@ class AimTracker:
         self.silent_move_delay = float(getattr(config, "silent_move_delay", 500.0))
         self.silent_return_delay = float(getattr(config, "silent_return_delay", 500.0))
         self.last_silent_click_time = 0  # 鐢ㄦ柤杩借工鏈€寰屼竴娆￠枊妲嶆檪闁?
-        self.in_game_sens = float(getattr(config, "in_game_sens", 0.235))
+        self.in_game_sens = float(getattr(config, "in_game_sens", 0.23))
         self.color = getattr(config, "color", "yellow")
         self.mode = getattr(config, "mode", "ABCurves")
         self.mode_sec = getattr(config, "mode_sec", "ABCurves")
         self.selected_mouse_button = getattr(config, "selected_mouse_button", 3)
+        self.selected_tb_btn= getattr(config, "selected_tb_btn", 3)
         self.max_speed = float(getattr(config, "max_speed", 1000.0))
 
         # --- Main Aimbot Offset & Aim Type ---
@@ -130,6 +154,11 @@ class AimTracker:
             self.RAW_STREAM_NDI_WINDOW: False,
             self.RAW_STREAM_UDP_WINDOW: False,
         }
+        self._debug_window_visible = {
+            "MASK": False,
+            "Detection": False,
+        }
+        self._current_masked_buttons = set()
         self.move_queue = queue.Queue(maxsize=50)
         self._move_batch_size = 4
         self._move_batch_small_step = 3.0
@@ -387,27 +416,36 @@ class AimTracker:
         铏曠悊鎸夐垥閬僵閭忚集
         
         鏍规摎閰嶇疆姹哄畾鏄惁閹栧畾鐗瑰畾鐨勬粦榧犳寜閳曪紝闃叉鍦ㄧ瀯婧栨檪瑾よЦ銆?        """
-        # 濡傛灉鏈暉鐢?Button Mask锛岃В閹栨墍鏈夋寜閳?
+        if not hasattr(self, "_current_masked_buttons"):
+            self._current_masked_buttons = set()
+
+        # Only send unlock commands when transitioning from active masks to disabled
+        # to avoid flooding the serial/hardware bus every frame.
         if not getattr(config, "button_mask_enabled", False):
-            try:
-                from src.utils.mouse import unlock_all_locks
-                unlock_all_locks()
-            except Exception as e:
-                pass
+            if self._current_masked_buttons:
+                try:
+                    from src.utils.mouse import unlock_all_locks
+                    unlock_all_locks()
+                except Exception:
+                    pass
+                self._current_masked_buttons.clear()
             return
         
-        # 妾㈡煡鏄惁鏈変换浣?aimbot 姝ｅ湪閬嬭
         aimbot_running = (
             getattr(config, "enableaim", False) or 
-            getattr(config, "enableaim_sec", False)
+            getattr(config, "enableaim_sec", False) or 
+            getattr(config, "enabletb", False) or
+            getattr(config, "enable_magnet_trigger", False)
         )
         
         if not aimbot_running:
-            try:
-                from src.utils.mouse import unlock_all_locks
-                unlock_all_locks()
-            except Exception as e:
-                pass
+            if self._current_masked_buttons:
+                try:
+                    from src.utils.mouse import unlock_all_locks
+                    unlock_all_locks()
+                except Exception:
+                    pass
+                self._current_masked_buttons.clear()
             return
         
         # 妲嬪缓闇€瑕侀伄缃╃殑鎸夐垥闆嗗悎
@@ -454,7 +492,7 @@ class AimTracker:
         """
         绻＝ FOV锛堣閲庣瘎鍦嶏級鍦撳湀
         
-        鍦ㄥ湒鍍忎笂绻＝ Aimbot 鐨?FOV 绡勫湇鍦撳湀锛?        鐢ㄦ柤瑕栬鍖栭’绀虹瀯婧栧拰瑙哥櫦鍗€鍩熴€?        
+        鍦ㄥ湒鍍忎笂绻＝ Aimbot 鍜?Triggerbot 鐨?FOV 绡勫湇鍦撳湀锛?        鐢ㄦ柤瑕栬鍖栭’绀虹瀯婧栧拰瑙哥櫦鍗€鍩熴€?        
         Args:
             img: BGR 鍦栧儚闄ｅ垪
             frame: 瑕栭牷骞€鐗╀欢锛屽寘鍚В鏋愬害淇℃伅
@@ -479,6 +517,9 @@ class AimTracker:
                 near_r = int(getattr(config, "ncaf_near_radius", 50))
                 self._draw_dashed_circle(img, center_x, center_y, snap_r, (180, 180, 180), 1)
                 cv2.circle(img, (center_x, center_y), near_r, (255, 200, 100), 1)
+        if getattr(config, "enabletb", False):
+            tb_fov = int(get_active_trigger_fov(fallback=self.tbfovsize))
+            cv2.circle(img, (center_x, center_y), tb_fov, (255, 255, 255), 2)
 
     def _update_raw_stream_windows(self, raw_img):
         """Show or close raw-stream windows for NDI/UDP based on settings."""
@@ -514,19 +555,15 @@ class AimTracker:
                 pass
 
     def _close_raw_stream_windows(self):
-        """Close raw-stream windows."""
-        try:
-            if self._raw_stream_window_visible.get(self.RAW_STREAM_NDI_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_NDI_WINDOW)
-                self._raw_stream_window_visible[self.RAW_STREAM_NDI_WINDOW] = False
-        except Exception:
-            pass
-        try:
-            if self._raw_stream_window_visible.get(self.RAW_STREAM_UDP_WINDOW, False):
-                cv2.destroyWindow(self.RAW_STREAM_UDP_WINDOW)
-                self._raw_stream_window_visible[self.RAW_STREAM_UDP_WINDOW] = False
-        except Exception:
-            pass
+        """Close raw-stream and debug OpenCV windows if open."""
+        for win_map in (self._raw_stream_window_visible, getattr(self, "_debug_window_visible", {})):
+            for win_name in list(win_map.keys()):
+                try:
+                    if win_map.get(win_name, False):
+                        cv2.destroyWindow(win_name)
+                        win_map[win_name] = False
+                except Exception:
+                    win_map[win_name] = False
 
     def _filter_targets_with_anti_smoke(self, targets, target_bboxes, mask, frame_shape, detector):
         """Filter targets using nearest bbox contour checks from anti-smoke detector."""
@@ -614,6 +651,8 @@ class AimTracker:
             print(f"[Track] Invalid frame dimensions: {w}x{h}")
             return
         frame = FrameInfo(w, h)
+        # Keep an untouched frame for trigger detection to avoid UI overlays affecting trigger matches.
+        trigger_source_img = bgr_img.copy()
 
         try:
             detection_results, mask = perform_detection(self.model, bgr_img)
@@ -622,7 +661,14 @@ class AimTracker:
                 getattr(config, "show_opencv_mask", True) and 
                 mask is not None):
                 cv2.imshow("MASK", mask)
+                self._debug_window_visible["MASK"] = True
                 cv2.waitKey(1)
+            elif self._debug_window_visible.get("MASK", False):
+                try:
+                    cv2.destroyWindow("MASK")
+                except Exception:
+                    pass
+                self._debug_window_visible["MASK"] = False
         except Exception as e:
             print("[perform_detection error]", e)
             detection_results = []
@@ -732,6 +778,8 @@ class AimTracker:
                 frame,
                 bgr_img,
                 targets_sec=targets_sec,
+                targets_trigger=targets_all,
+                trigger_img=trigger_source_img,
             )
         except Exception as e:
             print("[Aim error]", e)
@@ -743,9 +791,16 @@ class AimTracker:
                 # 鍎寲绻＝锛氭坊鍔犳洿澶氳瑕轰俊鎭?
                 display_img = self._draw_enhanced_detection(bgr_img.copy(), targets_all, frame)
                 cv2.imshow("Detection", display_img)
+                self._debug_window_visible["Detection"] = True
                 cv2.waitKey(1)
             except Exception as e:
                 print(f"[OpenCV display error] {e}")
+        elif self._debug_window_visible.get("Detection", False):
+            try:
+                cv2.destroyWindow("Detection")
+            except Exception:
+                pass
+            self._debug_window_visible["Detection"] = False
     
     def _draw_enhanced_detection(self, img, targets, frame):
         """
@@ -812,6 +867,11 @@ class AimTracker:
                     self._draw_dashed_circle(img, center_x, center_y, snap_r_sec, (200, 100, 200), 1, dash_len=12)
                     cv2.circle(img, (center_x, center_y), near_r_sec, (200, 150, 255), 1)
         
+        # Triggerbot FOV
+        if getattr(config, "enabletb", False):
+            tb_fov = int(get_active_trigger_fov(fallback=self.tbfovsize))
+            cv2.circle(img, (center_x, center_y), tb_fov, (0, 165, 255), 2)
+        
         # 3. 绻＝鐩淇℃伅
         if targets:
             locked_t = getattr(self, "_active_locked_target_main", None)
@@ -870,31 +930,34 @@ class AimTracker:
         
         # Aimbot 鐙€鎱?
         if getattr(config, "show_aimbot_status", True):
-            main_enabled = bool(getattr(config, "enableaim", False))
-            main_on = main_enabled and get_aimbot_activation_state(False)
-            main_status = "ON" if main_on else ("OFF" if main_enabled else "DISABLED")
-            status_color = (0, 255, 0) if main_on else (0, 0, 255)
-            cv2.putText(img, f"Main Aim: {main_status}", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
-            y_offset += line_height
+            if getattr(config, "enableaim", False):
+                main_status = "ON" if getattr(config, "enableaim", False) else "OFF"
+                status_color = (0, 255, 0) if main_status == "ON" else (0, 0, 255)
+                cv2.putText(img, f"Main Aim: {main_status}", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
+                y_offset += line_height
 
-            # Badge góc phải: trạng thái toggle luôn nhìn thấy trên cửa sổ Detection.
-            badge_font = cv2.FONT_HERSHEY_SIMPLEX
-            badge_text = "MAIN ON" if main_on else "MAIN OFF"
-            (badge_w, badge_h), _ = cv2.getTextSize(badge_text, badge_font, 0.7, 2)
-            badge_x2 = img.shape[1] - 10
-            badge_x1 = badge_x2 - badge_w - 20
-            badge_y1, badge_y2 = 8, 8 + badge_h + 14
-            cv2.rectangle(img, (badge_x1, badge_y1), (badge_x2, badge_y2), status_color, -1)
-            cv2.putText(img, badge_text, (badge_x1 + 10, badge_y2 - 7),
-                       badge_font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-
+                if str(getattr(config, "aimbot_activation_type", "hold_enable")).strip().lower() == "toggle":
+                    toggle_on = get_aimbot_toggle_state()
+                    toggle_color = (0, 255, 0) if toggle_on else (0, 0, 255)
+                    cv2.putText(img, f"Toggle: {'ON' if toggle_on else 'OFF'}", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, toggle_color, 2, cv2.LINE_AA)
+                    y_offset += line_height
+            
             if getattr(config, "enableaim_sec", False):
                 sec_status = "ON" if getattr(config, "enableaim_sec", False) else "OFF"
                 status_color = (255, 0, 255) if sec_status == "ON" else (128, 128, 128)
                 cv2.putText(img, f"Sec Aim: {sec_status}", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
                 y_offset += line_height
+        
+        # Triggerbot 鐙€鎱?
+        if getattr(config, "show_triggerbot_status", True) and getattr(config, "enabletb", False):
+            tb_status = "ON" if getattr(config, "enabletb", False) else "OFF"
+            status_color = (0, 165, 255) if tb_status == "ON" else (128, 128, 128)
+            cv2.putText(img, f"Trigger: {tb_status}", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2, cv2.LINE_AA)
+            y_offset += line_height
         
         # 鐩鏁搁噺
         if getattr(config, "show_target_count", True):
@@ -1050,6 +1113,8 @@ class AimTracker:
         frame,
         img,
         targets_sec=None,
+        targets_trigger=None,
+        trigger_img=None,
     ):
         """
         铏曠悊鐬勬簴鍜岀Щ鍕曢倧杓?        
@@ -1059,6 +1124,8 @@ class AimTracker:
             frame: 瑕栭牷骞€鐗╀欢
             img: BGR 鍦栧儚闄ｅ垪
             targets_sec: Secondary Aimbot target list
+            targets_trigger: Triggerbot target list
+            trigger_img: Source frame for Triggerbot detection (without overlay drawings)
         """
         try:
             process_normal_mode(
@@ -1067,6 +1134,8 @@ class AimTracker:
                 img,
                 self,
                 targets_sec=targets_sec,
+                targets_trigger=targets_trigger,
+                trigger_img=trigger_img,
             )
         except Exception as e:
             print("[Aim dispatch error]", e)
@@ -1098,7 +1167,7 @@ if __name__ == "__main__":
         temp_app = TempApp(capture_service)
         
         # 鍓靛缓 AimTracker (use config value if available)
-        target_fps = getattr(config, "target_fps", 80)
+        target_fps = getattr(config, "target_fps", 144)
         tracker = AimTracker(app=temp_app, target_fps=target_fps)
         
         # 瑷疆澶栬

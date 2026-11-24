@@ -1,5 +1,5 @@
 {
-    "version": "2.10.2",
-    "release_date": "2026-06-14",
-    "changelog": "Defaulted keyboard hardware API to opt-in checkbox, improved capture card DShow buffer handling, and hardened Net/Ferrum hardware connection behavior."
+    "version": "2.11.0",
+    "release_date": "2026-11-24",
+    "changelog": "Standalone merge of CVM 2.10.2 and CVM-v2 1.2.1: adds isolated UDP network feedback module, async preview throttle, modern UI components and Vietnamese locale. Excluded from CVM-v2: recoil immunity, anti-tremor deadband/flip filter, sub-pixel carry, humanized burst/spray, visual toggle HUD banner and automatic beep wiring; core aim code from CVM is unchanged. Ships a minimal runtime/ venv; on another machine edit runtime/pyvenv.cfg home to a Python 3.11.9 install."
 }

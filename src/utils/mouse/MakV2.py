@@ -102,7 +102,11 @@ def _listener_loop():
                     for i in range(5):
                         m = 1 << i
                         if changed & m:
-                            state.button_states[i] = bool(v & m)
+                            now_pressed = bool(v & m)
+                            was_pressed = bool(state.button_states.get(i, False))
+                            state.button_states[i] = now_pressed
+                            if now_pressed and not was_pressed:
+                                state.button_press_seq[i] = state.button_press_seq.get(i, 0) + 1
                 state.last_button_mask = v
         except Exception:
             time.sleep(0.001)

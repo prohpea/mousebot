@@ -205,15 +205,15 @@ def log_move(dx: float, dy: float, source: str = "Aimbot"):
     )
 
 
-def log_click(source: str = "Aimbot"):
+def log_click(source: str = "Triggerbot"):
     _emit(LOG_TYPE_INFO, "Click (press + release)", source=source, log_type=LOG_TYPE_CLICK)
 
 
-def log_press(source: str = "Aimbot"):
+def log_press(source: str = "Triggerbot"):
     _emit(LOG_TYPE_INFO, "Press", source=source, log_type=LOG_TYPE_PRESS)
 
 
-def log_release(source: str = "Aimbot"):
+def log_release(source: str = "Triggerbot"):
     _emit(LOG_TYPE_INFO, "Release", source=source, log_type=LOG_TYPE_RELEASE)
 
 

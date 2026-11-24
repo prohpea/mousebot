@@ -67,48 +67,6 @@ THEME_PRESETS = {
         "FONT_BOLD": ("Roboto", 11, "bold"),
         "FONT_TITLE": ("Roboto", 18, "bold"),
     },
-    "studio": {
-        "COLOR_BG": "#F5F7FB",
-        "COLOR_SIDEBAR": "#FFFFFF",
-        "COLOR_SURFACE": "#FFFFFF",
-        "COLOR_ACCENT": "#2563EB",
-        "COLOR_ACCENT_HOVER": "#1D4ED8",
-        "COLOR_TEXT": "#172033",
-        "COLOR_TEXT_DIM": "#94A3B8",
-        "COLOR_BORDER": "#E6EBF3",
-        "COLOR_DANGER": "#DC2626",
-        "COLOR_SUCCESS": "#10B981",
-        "COLOR_WARNING": "#F59E0B",
-        "COLOR_NAV_ACTIVE_BG": "#EAF1FF",
-        "COLOR_NAV_HOVER_BG": "#F1F5FB",
-        "COLOR_MENU_GHOST": "#CBD5E1",
-        "FONT_MAIN": ("Segoe UI", 11),
-        "FONT_BOLD": ("Segoe UI", 11, "bold"),
-        "FONT_TITLE": ("Segoe UI", 18, "bold"),
-    },
-}
-
-_HARDWARE_THEME_DARK = {
-    "COLOR_HARDWARE_PANEL": "#202020",
-    "COLOR_HARDWARE_PANEL_BORDER": "#2E2E2E",
-    "COLOR_HARDWARE_INPUT_BG": "#2A2A2A",
-    "COLOR_HARDWARE_INPUT_BORDER": "#3A3A3A",
-    "COLOR_HARDWARE_INPUT_HOVER": "#454545",
-    "COLOR_HARDWARE_BUTTON_BG": "#262626",
-    "COLOR_HARDWARE_BUTTON_HOVER": "#343434",
-    "COLOR_HARDWARE_BUTTON_TEXT": "#F2F2F2",
-    "COLOR_HARDWARE_DROPDOWN_BG": "#242424",
-}
-_HARDWARE_THEME_STUDIO = {
-    "COLOR_HARDWARE_PANEL": "#F8FAFD",
-    "COLOR_HARDWARE_PANEL_BORDER": "#E6EBF3",
-    "COLOR_HARDWARE_INPUT_BG": "#FFFFFF",
-    "COLOR_HARDWARE_INPUT_BORDER": "#DDE5F0",
-    "COLOR_HARDWARE_INPUT_HOVER": "#EAF1FF",
-    "COLOR_HARDWARE_BUTTON_BG": "#F1F5FB",
-    "COLOR_HARDWARE_BUTTON_HOVER": "#E2E8F0",
-    "COLOR_HARDWARE_BUTTON_TEXT": "#172033",
-    "COLOR_HARDWARE_DROPDOWN_BG": "#FFFFFF",
 }
 
 
@@ -116,12 +74,20 @@ def _apply_theme_preset(theme_name):
     theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["classic"])
     for key, value in theme.items():
         globals()[key] = value
-    globals().update(
-        _HARDWARE_THEME_STUDIO if theme_name == "studio" else _HARDWARE_THEME_DARK
-    )
 
 
 _apply_theme_preset("classic")
+
+# Hardware API 專用 accent colors / 跟主題一致的灰階層次
+COLOR_HARDWARE_PANEL = "#202020"
+COLOR_HARDWARE_PANEL_BORDER = "#2E2E2E"
+COLOR_HARDWARE_INPUT_BG = "#2A2A2A"
+COLOR_HARDWARE_INPUT_BORDER = "#3A3A3A"
+COLOR_HARDWARE_INPUT_HOVER = "#454545"
+COLOR_HARDWARE_BUTTON_BG = "#262626"
+COLOR_HARDWARE_BUTTON_HOVER = "#343434"
+COLOR_HARDWARE_BUTTON_TEXT = "#F2F2F2"
+COLOR_HARDWARE_DROPDOWN_BG = "#242424"
 
 CVM_CONFIG_COMMENT_KEY = "_comment"
 CVM_CONFIG_COMMENT_VALUE = "This is CVM colorBot config."
@@ -239,6 +205,24 @@ ADS_KEY_TYPE_VALUE_TO_DISPLAY = {
     str(value).lower(): display for display, value in ADS_KEY_TYPE_DISPLAY_TO_VALUE.items()
 }
 
+TRIGGER_TYPE_DISPLAY = {
+    "current": "Classic Trigger",
+    "rgb": "RGB Trigger",
+}
+
+RGB_TRIGGER_PROFILE_DISPLAY = {
+    "red": "Red",
+    "yellow": "Yellow",
+    "purple": "Purple",
+    "custom": "Custom",
+}
+
+TRIGGER_STRAFE_MODE_DISPLAY = {
+    "off": "Off",
+    "auto": "Auto Strafe",
+    "manual_wait": "Manual Wait",
+}
+
 AIM_MODE_DISPLAY_TO_VALUE = {
     "ABCurves": "ABCurves",
     "Normal": "Normal",
@@ -261,20 +245,14 @@ class ViewerApp(ctk.CTk):
         
         # --- Window setup ---
         self.title("CVM colorBot")
-        self.geometry("1120x780")
+        self.geometry("1280x950")
         self._window_icon_photo = None
         self._hicon_big = None
         self._hicon_small = None
         self._apply_window_icon()
-        self._ui_style = str(getattr(config, "ui_style", "classic") or "classic").strip().lower()
-        if self._ui_style not in ("classic", "neon", "studio"):
-            self._ui_style = "classic"
-        self._legacy_ui_mode = self._ui_style == "classic"
-        config.ui_style = self._ui_style
-        config.legacy_ui_mode = self._legacy_ui_mode
+        self._legacy_ui_mode = bool(getattr(config, "legacy_ui_mode", True))
         config.language = i18n.set_language(getattr(config, "language", "en"))
-        ctk.set_appearance_mode("Light" if self._ui_style == "studio" else "Dark")
-        _apply_theme_preset(self._ui_style)
+        _apply_theme_preset("classic" if self._legacy_ui_mode else "neon")
         
         # 注意: 若啟用 overrideredirect(True)，系統框線與 taskbar 行為可能不同
         # If you need normal window decorations, keep it commented out.
@@ -430,10 +408,7 @@ class ViewerApp(ctk.CTk):
             scrollbar_button_color=COLOR_BORDER,
             scrollbar_button_hover_color=COLOR_ACCENT
         )
-        if self._ui_style == "studio":
-            self.content_frame.grid(row=1, column=1, sticky="nsew", padx=(12, 18), pady=14)
-        else:
-            self.content_frame.grid(row=1, column=1, sticky="nsew", padx=24, pady=20)
+        self.content_frame.grid(row=1, column=1, sticky="nsew", padx=24, pady=20)
         
         self._show_general_tab()
 
@@ -539,9 +514,6 @@ class ViewerApp(ctk.CTk):
 
     def _build_sidebar(self):
         """建立側邊欄：navigation + status widgets。"""
-        if self._ui_style == "studio":
-            self._build_studio_sidebar()
-            return
         sidebar_width = 165 if self._legacy_ui_mode else 250
         self.sidebar = ctk.CTkFrame(self, width=sidebar_width, fg_color=COLOR_SIDEBAR, corner_radius=0)
         self.sidebar.grid(row=1, column=0, sticky="ns")
@@ -585,6 +557,8 @@ class ViewerApp(ctk.CTk):
                 ("General", self._show_general_tab),
                 ("Main Aimbot", self._show_aimbot_tab),
                 ("Sec Aimbot", self._show_sec_aimbot_tab),
+                ("Trigger", self._show_tb_tab),
+                ("Magnet Trigger", self._show_magnet_trigger_tab),
                 ("RCS", self._show_rcs_tab),
                 ("Config", self._show_config_tab),
                 ("Debug", self._show_debug_tab),
@@ -601,6 +575,10 @@ class ViewerApp(ctk.CTk):
             self._add_nav_item(nav_container, "Main Aimbot", self._show_aimbot_tab, icon=">")
             self._add_nav_item(nav_container, "Sec Aimbot", self._show_sec_aimbot_tab, icon=">")
             self._add_nav_item(nav_container, "RCS", self._show_rcs_tab, icon=">")
+
+            self._add_sidebar_group_label(nav_container, "Trigger")
+            self._add_nav_item(nav_container, "Trigger", self._show_tb_tab, icon=">")
+            self._add_nav_item(nav_container, "Magnet Trigger", self._show_magnet_trigger_tab, icon=">")
 
             self._add_sidebar_group_label(nav_container, "Miscellaneous")
             self._add_nav_item(nav_container, "Config", self._show_config_tab, icon=">")
@@ -752,98 +730,6 @@ class ViewerApp(ctk.CTk):
             corner_radius=8
         )
         self.settings_btn.pack(fill="x", pady=(8, 0))
-
-    def _build_studio_sidebar(self):
-        """Studio Workspace 側邊欄：依任務分組 + Getting started + START。"""
-        self.sidebar = ctk.CTkFrame(self, width=210, fg_color=COLOR_SIDEBAR, corner_radius=0)
-        self.sidebar.grid(row=1, column=0, sticky="ns")
-        self.sidebar.grid_propagate(False)
-        ctk.CTkFrame(self.sidebar, width=1, fg_color=COLOR_BORDER).pack(side="right", fill="y")
-
-        brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        brand.pack(fill="x", padx=18, pady=(16, 8))
-        ctk.CTkLabel(brand, text="CVM", font=("Segoe UI", 20, "bold"),
-                     text_color="#111C33", anchor="w").pack(anchor="w")
-        ctk.CTkLabel(brand, text="colorBot · studio", font=FONT_MAIN,
-                     text_color=COLOR_TEXT_DIM, anchor="w").pack(anchor="w")
-
-        nav = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        nav.pack(fill="x", padx=14)
-        self.nav_buttons = {}
-        self.nav_indicators = {}
-
-        def group(text):
-            ctk.CTkLabel(nav, text=text, font=("Segoe UI", 9, "bold"),
-                         text_color=COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-
-        def item(key, label, icon, command):
-            btn = ctk.CTkButton(
-                nav, text=f"  {icon}   {label}", anchor="w", height=30,
-                fg_color="transparent", hover_color=COLOR_NAV_HOVER_BG,
-                text_color=COLOR_TEXT, font=FONT_MAIN, corner_radius=9,
-                command=lambda: self._handle_nav_click(key, command),
-            )
-            btn.pack(fill="x", pady=1)
-            self.nav_buttons[key] = btn
-
-        group("WORKSPACE")
-        item("General", "General", "⌂", self._show_general_tab)
-        item("Config", "Configuration", "▤", self._show_config_tab)
-        item("Debug", "Debug & logs", "➤", self._show_debug_tab)
-        group("AIM")
-        item("Main Aimbot", "Main Aimbot", "⌖", self._show_aimbot_tab)
-        item("Sec Aimbot", "Secondary Aimbot", "◎", self._show_sec_aimbot_tab)
-        item("RCS", "RCS", "⚡", self._show_rcs_tab)
-
-        tools = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        tools.pack(side="bottom", fill="x", padx=14, pady=(0, 4))
-        self.ui_style_btn = ctk.CTkButton(
-            tools, text=t("UI Style: {style}", style=t("Studio")), height=24,
-            fg_color="transparent", hover_color=COLOR_NAV_HOVER_BG,
-            text_color=COLOR_TEXT_DIM, font=FONT_MAIN, anchor="w",
-            corner_radius=8, command=self._toggle_ui_style,
-        )
-        self.ui_style_btn.pack(fill="x", pady=1)
-        self.theme_btn = ctk.CTkButton(
-            tools, text=t("Dark Mode") if ctk.get_appearance_mode() == "Light" else t("Light Mode"),
-            height=24, fg_color="transparent", hover_color=COLOR_NAV_HOVER_BG,
-            text_color=COLOR_TEXT_DIM, font=FONT_MAIN, anchor="w",
-            corner_radius=8, command=self._toggle_theme,
-        )
-        self.theme_btn.pack(fill="x", pady=1)
-        self.settings_btn = ctk.CTkButton(
-            tools, text=t("Settings"), height=24, fg_color="transparent",
-            hover_color=COLOR_NAV_HOVER_BG, text_color=COLOR_TEXT_DIM,
-            font=FONT_MAIN, anchor="w", corner_radius=8,
-            command=self._open_settings_window,
-        )
-        self.settings_btn.pack(fill="x", pady=1)
-
-        setup = ctk.CTkFrame(self.sidebar, fg_color="#F7F9FD", corner_radius=12,
-                             border_width=1, border_color=COLOR_BORDER)
-        setup.pack(side="bottom", fill="x", padx=14, pady=(6, 8))
-        ctk.CTkLabel(setup, text=t("Getting started"), font=FONT_BOLD,
-                     text_color="#1E293B", anchor="w").pack(fill="x", padx=12, pady=(10, 0))
-        ctk.CTkLabel(setup, text=t("2 of 3 steps complete"), font=FONT_MAIN,
-                     text_color=COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=12, pady=(2, 0))
-        progress = ctk.CTkProgressBar(setup, height=5, fg_color="#E2E8F0",
-                                      progress_color=COLOR_ACCENT, corner_radius=3)
-        progress.pack(fill="x", padx=12, pady=(8, 6))
-        progress.set(0.66)
-        for step_text in ("Hardware API connected", "Capture source selected", "Start the engine"):
-            ctk.CTkLabel(setup, text=f"✓  {t(step_text)}" if step_text != "Start the engine"
-                         else f"○  {t(step_text)}", font=FONT_MAIN,
-                         text_color=COLOR_SUCCESS if step_text != "Start the engine" else COLOR_TEXT_DIM,
-                         anchor="w").pack(fill="x", padx=12, pady=1)
-        self.runtime_btn = ctk.CTkButton(
-            setup, text=t("START ENGINE"), command=self._toggle_runtime,
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            text_color="white", font=FONT_BOLD, height=34, corner_radius=9,
-        )
-        self.runtime_btn.pack(fill="x", padx=12, pady=(10, 10))
-        self._refresh_runtime_button()
-
-        self._set_nav_active(self._active_tab_name)
 
     def _set_status_indicator(self, text, text_color=COLOR_TEXT_DIM):
         if not hasattr(self, "status_indicator") or not self.status_indicator.winfo_exists():
@@ -1286,12 +1172,8 @@ class ViewerApp(ctk.CTk):
                 if indicator is not None:
                     indicator.configure(fg_color=COLOR_ACCENT)
             else:
-                if self._ui_style == "studio":
-                    inactive_bg, inactive_border = "transparent", COLOR_BORDER
-                elif self._legacy_ui_mode:
-                    inactive_bg, inactive_border = "transparent", COLOR_BORDER
-                else:
-                    inactive_bg, inactive_border = "#081425", "#0E223A"
+                inactive_bg = "transparent" if self._legacy_ui_mode else "#081425"
+                inactive_border = COLOR_BORDER if self._legacy_ui_mode else "#0E223A"
                 btn.configure(text_color=COLOR_TEXT, fg_color=inactive_bg, border_color=inactive_border)
                 if indicator is not None:
                     indicator.configure(fg_color="transparent")
@@ -1324,21 +1206,14 @@ class ViewerApp(ctk.CTk):
     def _toggle_theme(self):
         if ctk.get_appearance_mode() == "Dark":
             ctk.set_appearance_mode("Light")
-            label = t("Light Mode")
+            self.theme_btn.configure(text=t("Light Mode"))
         else:
             ctk.set_appearance_mode("Dark")
-            label = t("Dark Mode")
-        if hasattr(self, "theme_btn") and self.theme_btn.winfo_exists():
-            self.theme_btn.configure(text=label)
+            self.theme_btn.configure(text=t("Dark Mode"))
 
     def _toggle_ui_style(self):
-        order = ("classic", "neon", "studio")
-        current = order.index(self._ui_style) if getattr(self, "_ui_style", None) in order else 0
-        self._ui_style = order[(current + 1) % len(order)]
-        self._legacy_ui_mode = self._ui_style == "classic"
-        config.ui_style = self._ui_style
-        config.legacy_ui_mode = self._legacy_ui_mode
-        ctk.set_appearance_mode("Light" if self._ui_style == "studio" else "Dark")
+        self._legacy_ui_mode = not self._legacy_ui_mode
+        config.legacy_ui_mode = bool(self._legacy_ui_mode)
         self._rebuild_layout_for_ui_style()
 
     def _rebuild_layout_for_ui_style(self):
@@ -1353,8 +1228,7 @@ class ViewerApp(ctk.CTk):
                 except Exception:
                     pass
 
-        _apply_theme_preset(self._ui_style)
-        ctk.set_appearance_mode("Light" if self._ui_style == "studio" else "Dark")
+        _apply_theme_preset("classic" if self._legacy_ui_mode else "neon")
         self.configure(fg_color=COLOR_BG)
         self._build_layout()
 
@@ -1362,6 +1236,8 @@ class ViewerApp(ctk.CTk):
             "General": self._show_general_tab,
             "Main Aimbot": self._show_aimbot_tab,
             "Sec Aimbot": self._show_sec_aimbot_tab,
+            "Trigger": self._show_tb_tab,
+            "Magnet Trigger": self._show_magnet_trigger_tab,
             "RCS": self._show_rcs_tab,
             "Config": self._show_config_tab,
             "Debug": self._show_debug_tab,
@@ -1378,12 +1254,7 @@ class ViewerApp(ctk.CTk):
     def _show_general_tab(self):
         self._active_tab_name = "General"
         self._clear_content()
-        if self._ui_style == "studio":
-            self._studio_grid_sections = 2
-            self._add_studio_header("General", "Connect hardware and choose your video source")
-            self._add_studio_banner()
-        else:
-            self._add_title("General")
+        self._add_title("General")
         self._ignore_settings_events = True
 
         # -- HARDWARE API (collapsible) --
@@ -1624,7 +1495,7 @@ class ViewerApp(ctk.CTk):
         
         # In-Game Sensitivity (闋愯ō 0.235, 绡勫湇 0.1-20)
         self._add_slider_in_frame(sec_settings, "In-Game Sensitivity", "in_game_sens", 0.1, 20, 
-                        float(getattr(config, "in_game_sens", 0.235)), 
+                        float(getattr(config, "in_game_sens", 0.23)), 
                         self._on_config_in_game_sens_changed, is_float=True)
         
         self._add_spacer_in_frame(sec_settings)
@@ -1646,10 +1517,7 @@ class ViewerApp(ctk.CTk):
             self.content_frame, "Custom HSV", initially_open=True, auto_pack=False
         )
         if current_color == "custom":
-            if getattr(self, "_studio_grid_sections", None) is not None:
-                self.custom_hsv_container.grid(row=7, column=0, columnspan=2, sticky="ew", pady=6, padx=6)
-            else:
-                self.custom_hsv_container.pack(fill="x", pady=(5, 0))
+            self.custom_hsv_container.pack(fill="x", pady=(5, 0))
         self._hsv_preview_btn_frame = ctk.CTkFrame(self.custom_hsv_section, fg_color="transparent")
         self._hsv_preview_btn_frame.pack(fill="x", pady=(0, 8))
         ctk.CTkButton(
@@ -1879,78 +1747,6 @@ class ViewerApp(ctk.CTk):
             )
             btn_switch.grid(row=row, column=col, sticky="w", padx=5, pady=6)
             self._checkbox_vars[key] = var
-
-        if self._ui_style == "studio":
-            self._arrange_studio_general(
-                [sec_hardware, sec_capture, sec_settings, sec_detection, sec_mouse_lock, sec_button_mask]
-            )
-
-    def _add_studio_header(self, title, subtitle):
-        head = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        left = ctk.CTkFrame(head, fg_color="transparent")
-        left.pack(side="left", fill="x")
-        ctk.CTkLabel(left, text=t(title), font=FONT_TITLE, text_color="#111C33", anchor="w").pack(anchor="w")
-        ctk.CTkLabel(left, text=t(subtitle), font=FONT_MAIN, text_color=COLOR_TEXT_DIM, anchor="w").pack(anchor="w", pady=(2, 0))
-        right = ctk.CTkFrame(head, fg_color="transparent")
-        right.pack(side="right")
-        profile = str(getattr(config, "active_config_name", "") or getattr(config, "config_name", "") or "Default")
-        pill = ctk.CTkFrame(right, fg_color="white", corner_radius=8, border_width=1, border_color=COLOR_BORDER)
-        ctk.CTkLabel(pill, text=f"●  {profile}", font=FONT_MAIN, text_color="#52627A").pack(padx=10, pady=6)
-        pill.pack(side="left", padx=6)
-        lang = ctk.CTkFrame(right, fg_color="white", corner_radius=8, border_width=1, border_color=COLOR_BORDER)
-        ctk.CTkLabel(lang, text="EN  ▾", font=FONT_MAIN, text_color="#52627A").pack(padx=10, pady=6)
-        lang.pack(side="left", padx=6)
-
-    def _add_studio_banner(self):
-        banner = ctk.CTkFrame(self.content_frame, fg_color="#EFF5FF", corner_radius=11,
-                              border_width=1, border_color="#D7E5FF")
-        banner.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 14))
-        ctk.CTkLabel(banner, text="i", width=28, height=28, fg_color=COLOR_ACCENT,
-                     text_color="white", corner_radius=8, font=FONT_BOLD).pack(side="left", padx=(12, 10), pady=10)
-        msg = ctk.CTkFrame(banner, fg_color="transparent")
-        msg.pack(side="left", fill="x")
-        ctk.CTkLabel(msg, text=t("Almost ready"), font=FONT_BOLD, text_color="#1E3A8A", anchor="w").pack(anchor="w")
-        ctk.CTkLabel(msg, text=t("Hardware and capture are connected. Start the engine to go live."),
-                     font=FONT_MAIN, text_color="#5C7395", anchor="w").pack(anchor="w")
-        ctk.CTkButton(banner, text=t("Finish setup →"), fg_color="transparent", hover_color="#DCE8FF",
-                      text_color=COLOR_ACCENT, font=FONT_BOLD, command=self._open_settings_window).pack(side="right", padx=14)
-
-    def _arrange_studio_general(self, sections):
-        cards = [s.master for s in sections if s is not None and s.master is not None]
-        self.content_frame.grid_columnconfigure(0, weight=1)
-        self.content_frame.grid_columnconfigure(1, weight=1)
-        for card, row, col, span in (
-            (cards[0], 2, 0, 1), (cards[1], 2, 1, 1), (cards[3], 3, 0, 2),
-        ):
-            card.grid(row=row, column=col, columnspan=span, sticky="nsew", pady=6, padx=6)
-        for card, row in ((cards[2], 4), (cards[4], 5), (cards[5], 6)):
-            card.grid(row=row, column=0, sticky="ew", pady=6, padx=6)
-        self._add_studio_perf_card(4, 1)
-        self._studio_grid_sections = None
-
-    def _add_studio_perf_card(self, row, col):
-        card = ctk.CTkFrame(self.content_frame, fg_color=COLOR_SURFACE, corner_radius=13,
-                            border_width=1, border_color=COLOR_BORDER)
-        card.grid(row=row, column=col, rowspan=3, sticky="nsew", pady=6, padx=6)
-        ctk.CTkLabel(card, text=t("Performance"), font=FONT_BOLD,
-                     text_color="#1E293B", anchor="w").pack(fill="x", padx=16, pady=(14, 2))
-        ctk.CTkLabel(card, text=t("Live pipeline health"), font=FONT_MAIN,
-                     text_color=COLOR_TEXT_DIM, anchor="w").pack(fill="x", padx=16, pady=(0, 10))
-        stats = ctk.CTkFrame(card, fg_color="transparent")
-        stats.pack(fill="x", padx=14, pady=(0, 14))
-        for i in range(4):
-            stats.grid_columnconfigure(i, weight=1)
-        for i, (name, attr) in enumerate((("FPS", "fps_label"), ("Decode", "decode_delay_label"),
-                                          ("Delay", "total_delay_label"), ("Targets", "target_count_label"))):
-            cell = ctk.CTkFrame(stats, fg_color="#F7F9FD", corner_radius=9)
-            cell.grid(row=0, column=i, sticky="ew", padx=3)
-            ctk.CTkLabel(cell, text=t(name), font=("Segoe UI", 9), text_color=COLOR_TEXT_DIM,
-                         anchor="w").pack(fill="x", padx=10, pady=(8, 0))
-            label = ctk.CTkLabel(cell, text="--", font=("Segoe UI", 18, "bold"),
-                                 text_color=COLOR_SUCCESS if i == 0 else "#1E293B", anchor="w")
-            label.pack(fill="x", padx=10, pady=(2, 8))
-            setattr(self, attr, label)
 
     def _update_mouse_api_ui(self):
         """鏍规摎閬告搰鐨勬粦榧?API 鏇存柊 Hardware API 鍗€濉娿€?"""
@@ -2555,6 +2351,8 @@ class ViewerApp(ctk.CTk):
         else:
             self.saved_mouse_api = "Serial"
         config.mouse_api = self.saved_mouse_api
+        if not self._supports_trigger_strafe_ui(self.saved_mouse_api):
+            config.trigger_strafe_mode = "off"
         self.saved_auto_connect_mouse_api = bool(getattr(config, "auto_connect_mouse_api", self.saved_auto_connect_mouse_api))
         self.saved_serial_auto_switch_4m = bool(
             getattr(config, "serial_auto_switch_4m", self.saved_serial_auto_switch_4m)
@@ -2593,6 +2391,9 @@ class ViewerApp(ctk.CTk):
         self._update_keyboard_api_ui()
         self._update_hardware_status_ui()
 
+        if str(getattr(self, "_active_tab_name", "")) == "Trigger":
+            self._show_tb_tab()
+
     def _on_keyboard_api_enabled_changed(self):
         if getattr(self, "_ignore_settings_events", False):
             return
@@ -2615,6 +2416,9 @@ class ViewerApp(ctk.CTk):
             self._set_status_indicator("Status: Keyboard API disabled; mouse-only input active", COLOR_TEXT_DIM)
         self._update_keyboard_api_ui()
         self._update_hardware_status_ui()
+
+        if str(getattr(self, "_active_tab_name", "")) == "Trigger":
+            self._show_tb_tab()
 
     def _update_keyboard_api_ui(self):
         if not hasattr(self, "keyboard_content_frame") or not self.keyboard_content_frame.winfo_exists():
@@ -3735,7 +3539,7 @@ class ViewerApp(ctk.CTk):
         ctk.CTkLabel(fps_limit_frame, text="Target FPS", font=FONT_MAIN, text_color=COLOR_TEXT).pack(side="left")
         self.fps_limit_entry = ctk.CTkEntry(fps_limit_frame, fg_color=COLOR_SURFACE, border_width=0, text_color=COLOR_TEXT, width=150)
         self.fps_limit_entry.pack(side="right")
-        target_fps = str(getattr(config, "target_fps", 80))
+        target_fps = str(getattr(config, "target_fps", 144))
         self.fps_limit_entry.insert(0, target_fps)
         self.fps_limit_entry.bind("<KeyRelease>", self._on_fps_limit_changed)
         self.fps_limit_entry.bind("<FocusOut>", self._on_fps_limit_changed)
@@ -5445,6 +5249,365 @@ class ViewerApp(ctk.CTk):
             ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(current_ads_key_type_sec, "Hold")
         )
 
+    def _show_tb_tab(self):
+        self._active_tab_name = "Trigger"
+        self._clear_content()
+        self._add_title("Triggerbot")
+
+        current_trigger_type = str(getattr(config, "trigger_type", "current")).strip().lower()
+        if current_trigger_type not in TRIGGER_TYPE_DISPLAY:
+            current_trigger_type = "current"
+            config.trigger_type = current_trigger_type
+
+        sec_core = self._create_collapsible_section(self.content_frame, "Core", initially_open=True)
+        self.var_enabletb = tk.BooleanVar(value=getattr(config, "enabletb", False))
+        self._add_switch_in_frame(sec_core, "Enable Triggerbot", self.var_enabletb, self._on_enabletb_changed)
+        self._checkbox_vars["enabletb"] = self.var_enabletb
+
+        self.trigger_type_option = self._add_option_row_in_frame(
+            sec_core,
+            "Trigger Type",
+            list(TRIGGER_TYPE_DISPLAY.values()),
+            self._on_trigger_type_selected,
+        )
+        self._option_widgets["trigger_type"] = self.trigger_type_option
+        self.trigger_type_option.set(TRIGGER_TYPE_DISPLAY.get(current_trigger_type, "Classic Trigger"))
+
+        if current_trigger_type == "rgb":
+            sec_rgb = self._create_collapsible_section(self.content_frame, "RGB Parameters", initially_open=True)
+
+            self._add_slider_in_frame(
+                sec_rgb,
+                "FOV Size",
+                "tbfovsize",
+                1,
+                300,
+                float(getattr(config, "tbfovsize", 70)),
+                self._on_tbfovsize_changed,
+            )
+            self._add_trigger_ads_fov_controls_in_frame(sec_rgb)
+
+            self.rgb_color_profile_option = self._add_option_row_in_frame(
+                sec_rgb,
+                "RGB Preset",
+                list(RGB_TRIGGER_PROFILE_DISPLAY.values()),
+                self._on_rgb_color_profile_selected,
+            )
+            self._option_widgets["rgb_color_profile"] = self.rgb_color_profile_option
+            current_rgb_profile = str(getattr(config, "rgb_color_profile", "purple")).strip().lower()
+            if current_rgb_profile not in RGB_TRIGGER_PROFILE_DISPLAY:
+                current_rgb_profile = "purple"
+                config.rgb_color_profile = "purple"
+            self.rgb_color_profile_option.set(
+                RGB_TRIGGER_PROFILE_DISPLAY.get(current_rgb_profile, "Purple")
+            )
+
+            # Custom RGB Settings (collapsible, only show when custom is selected)
+            self.custom_rgb_section, self.custom_rgb_container = self._create_collapsible_section(
+                sec_rgb, "Custom RGB", initially_open=True, auto_pack=False
+            )
+            if current_rgb_profile == "custom":
+                self.custom_rgb_container.pack(fill="x", pady=(5, 0))
+
+            # R, G, B sliders
+            self._add_slider_in_frame(
+                self.custom_rgb_section,
+                "R",
+                "rgb_custom_r",
+                0,
+                255,
+                int(getattr(config, "rgb_custom_r", 161)),
+                lambda v: self._on_rgb_custom_changed("rgb_custom_r", v),
+            )
+            self._add_slider_in_frame(
+                self.custom_rgb_section,
+                "G",
+                "rgb_custom_g",
+                0,
+                255,
+                int(getattr(config, "rgb_custom_g", 69)),
+                lambda v: self._on_rgb_custom_changed("rgb_custom_g", v),
+            )
+            self._add_slider_in_frame(
+                self.custom_rgb_section,
+                "B",
+                "rgb_custom_b",
+                0,
+                255,
+                int(getattr(config, "rgb_custom_b", 163)),
+                lambda v: self._on_rgb_custom_changed("rgb_custom_b", v),
+            )
+
+            # Color preview frame
+            preview_frame = ctk.CTkFrame(self.custom_rgb_section, fg_color="transparent")
+            preview_frame.pack(fill="x", pady=(10, 5))
+            
+            ctk.CTkLabel(
+                preview_frame,
+                text="Color Preview",
+                font=FONT_MAIN,
+                text_color=COLOR_TEXT
+            ).pack(side="left")
+            
+            # Calculate initial RGB color hex
+            r = max(0, min(255, int(getattr(config, "rgb_custom_r", 161))))
+            g = max(0, min(255, int(getattr(config, "rgb_custom_g", 69))))
+            b = max(0, min(255, int(getattr(config, "rgb_custom_b", 163))))
+            initial_color_hex = f"#{r:02x}{g:02x}{b:02x}"
+            
+            # Color preview box
+            self.rgb_color_preview = ctk.CTkFrame(
+                preview_frame,
+                width=100,
+                height=30,
+                corner_radius=4,
+                fg_color=initial_color_hex,
+                border_width=1,
+                border_color=COLOR_BORDER
+            )
+            self.rgb_color_preview.pack(side="right", padx=(10, 0))
+
+            self._add_range_slider_in_frame(
+                sec_rgb,
+                "Delay Range (s)",
+                "rgb_tbdelay",
+                0.0,
+                1.0,
+                float(getattr(config, "rgb_tbdelay_min", 0.08)),
+                float(getattr(config, "rgb_tbdelay_max", 0.15)),
+                self._on_rgb_tbdelay_range_changed,
+                is_float=True,
+            )
+            self._add_range_slider_in_frame(
+                sec_rgb,
+                "Hold Range (ms)",
+                "rgb_tbhold",
+                5,
+                500,
+                float(getattr(config, "rgb_tbhold_min", 40)),
+                float(getattr(config, "rgb_tbhold_max", 60)),
+                self._on_rgb_tbhold_range_changed,
+                is_float=False,
+            )
+            self._add_range_slider_in_frame(
+                sec_rgb,
+                "Cooldown Range (s)",
+                "rgb_tbcooldown",
+                0.0,
+                5.0,
+                float(getattr(config, "rgb_tbcooldown_min", 0.0)),
+                float(getattr(config, "rgb_tbcooldown_max", 0.0)),
+                self._on_rgb_tbcooldown_range_changed,
+                is_float=True,
+            )
+        else:
+            sec_params = self._create_collapsible_section(self.content_frame, "Parameters", initially_open=True)
+            self._add_slider_in_frame(
+                sec_params,
+                "FOV Size",
+                "tbfovsize",
+                1,
+                300,
+                float(getattr(config, "tbfovsize", 70)),
+                self._on_tbfovsize_changed,
+            )
+            self._add_trigger_ads_fov_controls_in_frame(sec_params)
+            self._add_range_slider_in_frame(
+                sec_params,
+                "Delay Range (s)",
+                "tbdelay",
+                0.0,
+                1.0,
+                float(getattr(config, "tbdelay_min", 0.08)),
+                float(getattr(config, "tbdelay_max", 0.15)),
+                self._on_tbdelay_range_changed,
+                is_float=True,
+            )
+            self._add_range_slider_in_frame(
+                sec_params,
+                "Hold Range (ms)",
+                "tbhold",
+                5,
+                500,
+                float(getattr(config, "tbhold_min", 40)),
+                float(getattr(config, "tbhold_max", 60)),
+                self._on_tbhold_range_changed,
+                is_float=False,
+            )
+
+            sec_conditions = self._create_collapsible_section(
+                self.content_frame,
+                "Trigger Conditions",
+                initially_open=False,
+            )
+            self._add_slider_in_frame(
+                sec_conditions,
+                "Min Pixels",
+                "trigger_min_pixels",
+                1,
+                200,
+                int(getattr(config, "trigger_min_pixels", 4)),
+                self._on_trigger_min_pixels_changed,
+                is_float=False,
+            )
+            self._add_slider_in_frame(
+                sec_conditions,
+                "Min Ratio",
+                "trigger_min_ratio",
+                0.0,
+                1.0,
+                float(getattr(config, "trigger_min_ratio", 0.03)),
+                self._on_trigger_min_ratio_changed,
+                is_float=True,
+            )
+            self._add_slider_in_frame(
+                sec_conditions,
+                "Confirm Frames",
+                "trigger_confirm_frames",
+                1,
+                10,
+                int(getattr(config, "trigger_confirm_frames", 2)),
+                self._on_trigger_confirm_frames_changed,
+                is_float=False,
+            )
+
+            sec_burst = self._create_collapsible_section(self.content_frame, "Burst Settings", initially_open=False)
+            self._add_range_slider_in_frame(
+                sec_burst,
+                "Cooldown Range (s)",
+                "tbcooldown",
+                0.0,
+                5.0,
+                float(getattr(config, "tbcooldown_min", 0.0)),
+                float(getattr(config, "tbcooldown_max", 0.0)),
+                self._on_tbcooldown_range_changed,
+                is_float=True,
+            )
+            self._add_range_slider_in_frame(
+                sec_burst,
+                "Burst Count Range",
+                "tbburst_count",
+                1,
+                10,
+                int(getattr(config, "tbburst_count_min", 1)),
+                int(getattr(config, "tbburst_count_max", 1)),
+                self._on_tbburst_count_range_changed,
+                is_float=False,
+            )
+            self._add_range_slider_in_frame(
+                sec_burst,
+                "Burst Interval Range (ms)",
+                "tbburst_interval",
+                0,
+                500,
+                float(getattr(config, "tbburst_interval_min", 0.0)),
+                float(getattr(config, "tbburst_interval_max", 0.0)),
+                self._on_tbburst_interval_range_changed,
+                is_float=True,
+            )
+
+        sec_activation = self._create_collapsible_section(self.content_frame, "Activation", initially_open=False)
+        current_tb_btn = self._ads_binding_to_display(getattr(config, "selected_tb_btn", 3))
+        self.tb_key_bind_button = self._add_bind_capture_row_in_frame(
+            sec_activation,
+            "Keybind",
+            current_tb_btn,
+            self._start_trigger_key_capture,
+        )
+
+        trigger_activation_types = ["Hold to Enable", "Hold to Disable", "Toggle"]
+        self.trigger_activation_type_option = self._add_option_row_in_frame(
+            sec_activation,
+            "Trigger Mode",
+            trigger_activation_types,
+            self._on_trigger_activation_type_selected,
+        )
+        self._option_widgets["trigger_activation_type"] = self.trigger_activation_type_option
+        current_trigger_activation_type = str(
+            getattr(config, "trigger_activation_type", "hold_enable")
+        ).strip().lower()
+        trigger_activation_display = {
+            "hold_enable": "Hold to Enable",
+            "hold_disable": "Hold to Disable",
+            "toggle": "Toggle",
+        }
+        self.trigger_activation_type_option.set(
+            trigger_activation_display.get(current_trigger_activation_type, "Hold to Enable")
+        )
+
+        current_trigger_ads_key = self._ads_binding_to_display(
+            getattr(config, "trigger_ads_key", "Right Mouse Button")
+        )
+        self.trigger_ads_key_bind_button = self._add_bind_capture_row_in_frame(
+            sec_activation,
+            "ADS Keybind",
+            current_trigger_ads_key,
+            self._start_trigger_ads_key_capture,
+        )
+        self.trigger_ads_key_type_option = self._add_option_row_in_frame(
+            sec_activation,
+            "ADS Key Type",
+            list(ADS_KEY_TYPE_DISPLAY_TO_VALUE.keys()),
+            self._on_trigger_ads_key_type_selected,
+        )
+        self._option_widgets["trigger_ads_key_type"] = self.trigger_ads_key_type_option
+        current_trigger_ads_key_type = str(
+            getattr(config, "trigger_ads_key_type", "hold")
+        ).strip().lower()
+        self.trigger_ads_key_type_option.set(
+            ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(current_trigger_ads_key_type, "Hold")
+        )
+
+        if self._supports_trigger_strafe_ui():
+            sec_strafe_helper = self._create_collapsible_section(
+                self.content_frame,
+                "Strafe Helper",
+                initially_open=False,
+            )
+            self.trigger_strafe_mode_option = self._add_option_row_in_frame(
+                sec_strafe_helper,
+                "Mode",
+                list(TRIGGER_STRAFE_MODE_DISPLAY.values()),
+                self._on_trigger_strafe_mode_selected,
+            )
+            self._option_widgets["trigger_strafe_mode"] = self.trigger_strafe_mode_option
+            current_strafe_mode = str(getattr(config, "trigger_strafe_mode", "off")).strip().lower()
+            if current_strafe_mode not in TRIGGER_STRAFE_MODE_DISPLAY:
+                current_strafe_mode = "off"
+                config.trigger_strafe_mode = "off"
+            self.trigger_strafe_mode_option.set(
+                TRIGGER_STRAFE_MODE_DISPLAY.get(current_strafe_mode, "Off")
+            )
+
+            if current_strafe_mode == "auto":
+                self._add_slider_in_frame(
+                    sec_strafe_helper,
+                    "Auto Lead (ms)",
+                    "trigger_strafe_auto_lead_ms",
+                    0,
+                    50,
+                    int(getattr(config, "trigger_strafe_auto_lead_ms", 8)),
+                    self._on_trigger_strafe_auto_lead_ms_changed,
+                    is_float=False,
+                )
+            elif current_strafe_mode == "manual_wait":
+                self._add_slider_in_frame(
+                    sec_strafe_helper,
+                    "Neutral Wait (ms)",
+                    "trigger_strafe_manual_neutral_ms",
+                    0,
+                    300,
+                    int(getattr(config, "trigger_strafe_manual_neutral_ms", 0)),
+                    self._on_trigger_strafe_manual_neutral_ms_changed,
+                    is_float=False,
+                )
+        else:
+            config.trigger_strafe_mode = "off"
+
+    def _show_magnet_trigger_tab(self):
+        from src.ui_tabs.magnet_trigger_tab import build_magnet_trigger_tab
+
+        build_magnet_trigger_tab(self)
 
     def _show_rcs_tab(self):
         """椤ず RCS 瑷疆妯欑堡"""
@@ -5824,23 +5987,11 @@ class ViewerApp(ctk.CTk):
         Returns:
             tuple: (content_frame, container) 濡傛灉 auto_pack=False锛屽惁鍓囧彧杩斿洖 content_frame
         """
-        _studio = getattr(self, "_ui_style", "classic") == "studio"
-        container = ctk.CTkFrame(
-            parent,
-            fg_color=COLOR_SURFACE if _studio else "transparent",
-            corner_radius=13 if _studio else 0,
-            border_width=1 if _studio else 0,
-            border_color=COLOR_BORDER,
-        )
+        container = ctk.CTkFrame(parent, fg_color="transparent")
         if auto_pack:
-            if getattr(self, "_studio_grid_sections", None) is not None:
-                row = self._studio_grid_sections
-                self._studio_grid_sections += 1
-                container.grid(row=row, column=0, columnspan=2, sticky="ew", pady=6, padx=6)
-            else:
-                container.pack(fill="x", pady=(6, 0) if _studio else (5, 0), padx=6 if _studio else 0)
-
-        content = ctk.CTkFrame(container, fg_color=COLOR_SURFACE if _studio else "transparent")
+            container.pack(fill="x", pady=(5, 0))
+        
+        content = ctk.CTkFrame(container, fg_color="transparent")
 
         cache_key = self._get_collapsible_state_key(title, state_key=state_key)
         initial_open_state = self._collapsible_section_states.get(cache_key, initially_open)
@@ -5853,21 +6004,20 @@ class ViewerApp(ctk.CTk):
             fg_color=COLOR_SURFACE,
             corner_radius=8,
             height=32,
-            border_width=0 if _studio else 1,
+            border_width=1,
             border_color=COLOR_BORDER,
         )
-        header.pack(fill="x", padx=(6, 0) if _studio else 0, pady=(4, 0) if _studio else 0)
+        header.pack(fill="x")
         header.pack_propagate(False)
-
+        
         arrow_label = ctk.CTkLabel(
-            header, text=arrow_text, font=FONT_MAIN if _studio else ("Consolas", 10),
-            text_color=COLOR_ACCENT, width=20
+            header, text=arrow_text, font=("Consolas", 10), text_color=COLOR_ACCENT,
+            width=20
         )
         arrow_label.pack(side="left", padx=(8, 0))
-
+        
         title_label = ctk.CTkLabel(
-            header, text=heading(title), font=FONT_BOLD if _studio else ("Consolas", 10, "bold"),
-            text_color=COLOR_TEXT
+            header, text=heading(title), font=("Consolas", 10, "bold"), text_color=COLOR_TEXT
         )
         title_label.pack(side="left", padx=(4, 0))
         
@@ -6736,6 +6886,32 @@ class ViewerApp(ctk.CTk):
                 is_float=False,
             )
 
+    def _add_trigger_ads_fov_controls_in_frame(self, parent):
+        enabled_key = "trigger_ads_fov_enabled"
+        slider_key = "trigger_ads_fovsize"
+        fallback_fov = getattr(config, "tbfovsize", 70)
+
+        self.var_trigger_ads_fov_enabled = tk.BooleanVar(
+            value=bool(getattr(config, enabled_key, False))
+        )
+        self._add_switch_in_frame(
+            parent,
+            "Enable Trigger ADS FOV",
+            self.var_trigger_ads_fov_enabled,
+            self._on_trigger_ads_fov_enabled_changed,
+        )
+        self._checkbox_vars[enabled_key] = self.var_trigger_ads_fov_enabled
+
+        if self.var_trigger_ads_fov_enabled.get():
+            self._add_slider_in_frame(
+                parent,
+                "Trigger ADS FOV Size",
+                slider_key,
+                1,
+                300,
+                float(getattr(config, slider_key, fallback_fov)),
+                self._on_trigger_ads_fovsize_changed,
+            )
 
     def _add_pid_preview_section(self, is_sec=False):
         state_key = "pid_preview_sec" if is_sec else "pid_preview_main"
@@ -6817,7 +6993,7 @@ class ViewerApp(ctk.CTk):
         fov = max(1.0, fov)
         max_output = max(0.1, abs(max_output))
         avg_speed = max(0.1, (x_speed + y_speed) / 2.0)
-        target_fps = float(getattr(config, "target_fps", 80) or 80)
+        target_fps = float(getattr(config, "target_fps", 144) or 144)
         dt = 1.0 / max(1.0, target_fps)
         plant_gain = max(0.06, min(0.35, 14.0 / max(14.0, fov)))
         err = max(8.0, min(fov * 0.6, 220.0))
@@ -7121,8 +7297,8 @@ class ViewerApp(ctk.CTk):
 
         from src.aim_system.abcurves_controller import _compute_counts_per_px
 
-        sens = float(getattr(config, "in_game_sens", 0.35))
-        dpi = float(getattr(config, "mouse_dpi", 800))
+        sens = float(getattr(config, "in_game_sens", 0.23))
+        dpi = float(getattr(config, "mouse_dpi", 1100))
         rec_lower = rec_mode.strip().lower()
         if rec_lower in ("abcurves", "ab curves"):
             sx = float(getattr(config, "abcurves_x_speed_sec" if is_sec else "abcurves_x_speed", 1.0))
@@ -7461,6 +7637,46 @@ class ViewerApp(ctk.CTk):
         self._set_bind_button_text(button, "Press key...")
         self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
+    def _start_trigger_key_capture(self):
+        config_key = "selected_tb_btn"
+        tracker_key = "selected_tb_btn"
+        button = getattr(self, "tb_key_bind_button", None)
+        if button is None:
+            return
+
+        self._cancel_binding_capture()
+        self._ensure_medius_connected_for_capture()
+
+        candidates, keyboard_supported = self._get_binding_capture_candidates()
+        if not keyboard_supported:
+            self._log_config("Current Input API does not expose keyboard state; capture supports mouse buttons only.")
+        if not self._is_input_backend_connected() and self._normalize_mouse_api_name(getattr(config, "mouse_api", "")) != "Medius":
+            self._log_config("Input API is not connected; key capture may timeout.")
+
+        prev_states = {binding: bool(self._is_binding_pressed_by_backend(binding)) for binding in candidates}
+        prev_seqs = {binding: int(self._get_binding_press_seq(binding)) for binding in candidates}
+        restore_binding = getattr(config, config_key, 3)
+        restore_text = self._ads_binding_to_display(restore_binding)
+
+        ctx = {
+            "id": int(getattr(self, "_binding_capture_id", 0)) + 1,
+            "config_key": config_key,
+            "tracker_key": tracker_key,
+            "binding_kind": "trigger",
+            "log_label": "Trigger Key",
+            "button": button,
+            "restore_text": restore_text,
+            "candidates": candidates,
+            "prev_states": prev_states,
+            "prev_seqs": prev_seqs,
+            "started_at": time.monotonic(),
+            "arm_at": time.monotonic() + 0.35,
+            "timeout_sec": 10.0,
+        }
+        self._binding_capture_id = ctx["id"]
+        self._binding_capture_ctx = ctx
+        self._set_bind_button_text(button, "Press key...")
+        self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
     def _start_ads_key_capture(self, is_sec=False):
         key_name = "ads_key_sec" if is_sec else "ads_key"
@@ -7503,6 +7719,46 @@ class ViewerApp(ctk.CTk):
         self._set_bind_button_text(button, "Press key...")
         self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
+    def _start_trigger_ads_key_capture(self):
+        config_key = "trigger_ads_key"
+        tracker_key = "trigger_ads_key"
+        button = getattr(self, "trigger_ads_key_bind_button", None)
+        if button is None:
+            return
+
+        self._cancel_binding_capture()
+        self._ensure_medius_connected_for_capture()
+
+        candidates, keyboard_supported = self._get_binding_capture_candidates()
+        if not keyboard_supported:
+            self._log_config("Current Input API does not expose keyboard state; capture supports mouse buttons only.")
+        if not self._is_input_backend_connected() and self._normalize_mouse_api_name(getattr(config, "mouse_api", "")) != "Medius":
+            self._log_config("Input API is not connected; key capture may timeout.")
+
+        prev_states = {binding: bool(self._is_binding_pressed_by_backend(binding)) for binding in candidates}
+        prev_seqs = {binding: int(self._get_binding_press_seq(binding)) for binding in candidates}
+        restore_binding = getattr(config, config_key, "Right Mouse Button")
+        restore_text = self._ads_binding_to_display(restore_binding)
+
+        ctx = {
+            "id": int(getattr(self, "_binding_capture_id", 0)) + 1,
+            "config_key": config_key,
+            "tracker_key": tracker_key,
+            "binding_kind": "trigger_ads",
+            "log_label": "Trigger ADS Key",
+            "button": button,
+            "restore_text": restore_text,
+            "candidates": candidates,
+            "prev_states": prev_states,
+            "prev_seqs": prev_seqs,
+            "started_at": time.monotonic(),
+            "arm_at": time.monotonic() + 0.35,
+            "timeout_sec": 10.0,
+        }
+        self._binding_capture_id = ctx["id"]
+        self._binding_capture_ctx = ctx
+        self._set_bind_button_text(button, "Press key...")
+        self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
     def _start_rcs_key_capture(self):
         config_key = "rcs_keybind"
@@ -7542,6 +7798,43 @@ class ViewerApp(ctk.CTk):
         self._set_bind_button_text(button, "Press key...")
         self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
+    def _start_magnet_key_capture(self):
+        config_key = "magnet_keybind"
+        button = getattr(self, "magnet_key_bind_button", None)
+        if button is None:
+            return
+
+        self._cancel_binding_capture()
+        self._ensure_medius_connected_for_capture()
+
+        candidates, keyboard_supported = self._get_binding_capture_candidates()
+        if not keyboard_supported:
+            self._log_config("Current Input API does not expose keyboard state; capture supports mouse buttons only.")
+
+        prev_states = {binding: bool(self._is_binding_pressed_by_backend(binding)) for binding in candidates}
+        prev_seqs = {binding: int(self._get_binding_press_seq(binding)) for binding in candidates}
+        restore_binding = getattr(config, config_key, 0)
+        restore_text = self._ads_binding_to_display(restore_binding)
+
+        ctx = {
+            "id": int(getattr(self, "_binding_capture_id", 0)) + 1,
+            "config_key": config_key,
+            "tracker_key": None,
+            "binding_kind": "aim",
+            "log_label": "Magnet Key",
+            "button": button,
+            "restore_text": restore_text,
+            "candidates": candidates,
+            "prev_states": prev_states,
+            "prev_seqs": prev_seqs,
+            "started_at": time.monotonic(),
+            "arm_at": time.monotonic() + 0.35,
+            "timeout_sec": 10.0,
+        }
+        self._binding_capture_id = ctx["id"]
+        self._binding_capture_ctx = ctx
+        self._set_bind_button_text(button, "Press key...")
+        self.after(30, lambda capture_id=ctx["id"]: self._poll_binding_capture(capture_id))
 
     def _poll_binding_capture(self, capture_id):
         ctx = getattr(self, "_binding_capture_ctx", None)
@@ -7582,7 +7875,7 @@ class ViewerApp(ctk.CTk):
             config_key = str(ctx.get("config_key", "ads_key"))
             tracker_key = ctx.get("tracker_key")
             binding_kind = str(ctx.get("binding_kind", "ads")).strip().lower()
-            if binding_kind == "aim":
+            if binding_kind in {"aim", "trigger"}:
                 stored_value = self._normalize_aim_binding_for_config(selected_binding)
             else:
                 stored_value = selected_binding
@@ -7637,6 +7930,34 @@ class ViewerApp(ctk.CTk):
             self.tracker.deadzone_stop_delay_min_ms = getattr(config, "deadzone_stop_delay_min_ms", 15.0)
             self.tracker.deadzone_stop_delay_max_ms = getattr(config, "deadzone_stop_delay_max_ms", 45.0)
             self.tracker.ads_key = getattr(config, "ads_key", "Right Mouse Button")
+            self.tracker.tbfovsize = config.tbfovsize
+            self.tracker.trigger_ads_fov_enabled = getattr(config, "trigger_ads_fov_enabled", False)
+            self.tracker.trigger_ads_fovsize = getattr(config, "trigger_ads_fovsize", config.tbfovsize)
+            self.tracker.trigger_ads_key = getattr(config, "trigger_ads_key", "Right Mouse Button")
+            self.tracker.trigger_ads_key_type = getattr(config, "trigger_ads_key_type", "hold")
+            self.tracker.selected_tb_btn = config.selected_tb_btn
+            self.tracker.trigger_type = getattr(config, "trigger_type", "current")
+            self.tracker.tbdelay_min = config.tbdelay_min
+            self.tracker.tbdelay_max = config.tbdelay_max
+            self.tracker.tbhold_min = config.tbhold_min
+            self.tracker.tbhold_max = config.tbhold_max
+            self.tracker.tbcooldown_min = config.tbcooldown_min
+            self.tracker.tbcooldown_max = config.tbcooldown_max
+            self.tracker.rgb_tbdelay_min = getattr(config, "rgb_tbdelay_min", 0.08)
+            self.tracker.rgb_tbdelay_max = getattr(config, "rgb_tbdelay_max", 0.15)
+            self.tracker.rgb_tbhold_min = getattr(config, "rgb_tbhold_min", 40)
+            self.tracker.rgb_tbhold_max = getattr(config, "rgb_tbhold_max", 60)
+            self.tracker.rgb_tbcooldown_min = getattr(config, "rgb_tbcooldown_min", 0.0)
+            self.tracker.rgb_tbcooldown_max = getattr(config, "rgb_tbcooldown_max", 0.0)
+            self.tracker.rgb_color_profile = getattr(config, "rgb_color_profile", "purple")
+            self.tracker.tbburst_count_min = config.tbburst_count_min
+            self.tracker.tbburst_count_max = config.tbburst_count_max
+            self.tracker.tbburst_interval_min = config.tbburst_interval_min
+            self.tracker.tbburst_interval_max = config.tbburst_interval_max
+            self.tracker.trigger_roi_size = getattr(config, "trigger_roi_size", 8)
+            self.tracker.trigger_min_pixels = getattr(config, "trigger_min_pixels", 4)
+            self.tracker.trigger_min_ratio = getattr(config, "trigger_min_ratio", 0.03)
+            self.tracker.trigger_confirm_frames = getattr(config, "trigger_confirm_frames", 2)
             self.tracker.switch_confirm_frames = getattr(config, "switch_confirm_frames", 3)
             self.tracker.ema_alpha = getattr(config, "ema_alpha", 0.35)
             if hasattr(self.tracker, "_target_smoother"):
@@ -7658,7 +7979,7 @@ class ViewerApp(ctk.CTk):
             self.tracker.selected_mouse_button_sec = config.selected_mouse_button_sec
             
             # Update target FPS
-            target_fps = getattr(config, "target_fps", 80)
+            target_fps = getattr(config, "target_fps", 144)
             if hasattr(self.tracker, 'set_target_fps'):
                 self.tracker.set_target_fps(target_fps)
             else:
@@ -7728,6 +8049,62 @@ class ViewerApp(ctk.CTk):
                             k,
                             ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(str(v).strip().lower(), "Hold"),
                         )
+                    elif k == "trigger_ads_key_type":
+                        self._set_option_value(
+                            k,
+                            ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(str(v).strip().lower(), "Hold"),
+                        )
+                    elif k == "trigger_type":
+                        trigger_type_display = {
+                            "current": "Classic Trigger",
+                            "rgb": "RGB Trigger",
+                        }
+                        self._set_option_value(k, trigger_type_display.get(str(v).lower(), "Classic Trigger"))
+                    elif k == "rgb_color_profile":
+                        rgb_profile_display = {
+                            "red": "Red",
+                            "yellow": "Yellow",
+                            "purple": "Purple",
+                            "custom": "Custom",
+                        }
+                        self._set_option_value(k, rgb_profile_display.get(str(v).lower(), "Purple"))
+                    elif k == "trigger_activation_type":
+                        trigger_activation_display = {
+                            "hold_enable": "Hold to Enable",
+                            "hold_disable": "Hold to Disable",
+                            "toggle": "Toggle",
+                        }
+                        self._set_option_value(k, trigger_activation_display.get(str(v), "Hold to Enable"))
+                    elif k == "magnet_activation_type":
+                        magnet_activation_display = {
+                            "hold_enable": "Hold to Enable",
+                            "hold_disable": "Hold to Disable",
+                            "toggle": "Toggle",
+                        }
+                        self._set_option_value(k, magnet_activation_display.get(str(v), "Hold to Enable"))
+                    elif k == "magnet_mode":
+                        self._set_option_value(k, self._aim_mode_value_to_display(v))
+                    elif k == "magnet_trigger_type":
+                        trigger_display = {
+                            "current": "Classic Trigger",
+                            "rgb": "RGB Trigger",
+                        }
+                        self._set_option_value(k, trigger_display.get(str(v).strip().lower(), "Classic Trigger"))
+                    elif k == "magnet_rgb_color_profile":
+                        rgb_display = {
+                            "red": "Red",
+                            "yellow": "Yellow",
+                            "purple": "Purple",
+                            "custom": "Custom",
+                        }
+                        self._set_option_value(k, rgb_display.get(str(v).strip().lower(), "Purple"))
+                    elif k == "trigger_strafe_mode":
+                        strafe_mode_display = {
+                            "off": "Off",
+                            "auto": "Auto Strafe",
+                            "manual_wait": "Manual Wait",
+                        }
+                        self._set_option_value(k, strafe_mode_display.get(str(v), "Off"))
                     elif k in ("mode", "mode_sec"):
                         self._set_option_value(k, self._aim_mode_value_to_display(v))
                     elif k in ("abcurves_commitment_ms", "abcurves_commitment_ms_sec"):
@@ -7739,12 +8116,18 @@ class ViewerApp(ctk.CTk):
                     self._set_bind_button_text(self.aim_key_bind_button, self._ads_binding_to_display(v))
                 elif k == "selected_mouse_button_sec" and hasattr(self, "aim_key_bind_button_sec"):
                     self._set_bind_button_text(self.aim_key_bind_button_sec, self._ads_binding_to_display(v))
+                elif k == "selected_tb_btn" and hasattr(self, "tb_key_bind_button"):
+                    self._set_bind_button_text(self.tb_key_bind_button, self._ads_binding_to_display(v))
                 elif k == "ads_key" and hasattr(self, "ads_key_bind_button"):
                     self._set_bind_button_text(self.ads_key_bind_button, self._ads_binding_to_display(v))
                 elif k == "ads_key_sec" and hasattr(self, "ads_key_bind_button_sec"):
                     self._set_bind_button_text(self.ads_key_bind_button_sec, self._ads_binding_to_display(v))
+                elif k == "trigger_ads_key" and hasattr(self, "trigger_ads_key_bind_button"):
+                    self._set_bind_button_text(self.trigger_ads_key_bind_button, self._ads_binding_to_display(v))
                 elif k == "rcs_keybind" and hasattr(self, "rcs_key_bind_button"):
                     self._set_bind_button_text(self.rcs_key_bind_button, self._ads_binding_to_display(v))
+                elif k == "magnet_keybind" and hasattr(self, "magnet_key_bind_button"):
+                    self._set_bind_button_text(self.magnet_key_bind_button, self._ads_binding_to_display(v))
 
                 if k == "serial_auto_switch_4m":
                     self.saved_serial_auto_switch_4m = bool(v)
@@ -7758,6 +8141,8 @@ class ViewerApp(ctk.CTk):
                     self.show_mode_var.set(v)
                 elif k == "show_aimbot_status" and hasattr(self, "show_aimbot_status_var"):
                     self.show_aimbot_status_var.set(v)
+                elif k == "show_triggerbot_status" and hasattr(self, "show_triggerbot_status_var"):
+                    self.show_triggerbot_status_var.set(v)
                 elif k == "show_target_count" and hasattr(self, "show_target_count_var"):
                     self.show_target_count_var.set(v)
                 elif k == "show_crosshair" and hasattr(self, "show_crosshair_var"):
@@ -7783,6 +8168,22 @@ class ViewerApp(ctk.CTk):
                         self.udp_fov_slider.set(v)
                     self._update_udp_fov_info()
 
+            if str(getattr(self, "_active_tab_name", "")) == "Trigger":
+                if (
+                    "trigger_type" in data
+                    or "trigger_strafe_mode" in data
+                    or "mouse_api" in data
+                    or "selected_tb_btn" in data
+                    or "trigger_ads_fov_enabled" in data
+                    or "trigger_ads_key" in data
+                    or "trigger_ads_key_type" in data
+                ):
+                    if not self._supports_trigger_strafe_ui(getattr(config, "mouse_api", "Medius")):
+                        config.trigger_strafe_mode = "off"
+                    self._show_tb_tab()
+            if str(getattr(self, "_active_tab_name", "")) == "Magnet Trigger":
+                if any(str(key).startswith("magnet_") for key in data):
+                    self._show_magnet_trigger_tab()
             if str(getattr(self, "_active_tab_name", "")) == "Main Aimbot":
                 if (
                     "mode" in data
@@ -8927,6 +9328,15 @@ class ViewerApp(ctk.CTk):
             return "MAK API"
         return self._normalize_mouse_api_name(raw)
 
+    def _supports_trigger_strafe_ui(self, mode=None) -> bool:
+        selected_mode = mode if mode is not None else getattr(config, "mouse_api", "Medius")
+        try:
+            from src.utils import mouse as mouse_backend
+
+            return bool(mouse_backend.supports_trigger_strafe_ui(selected_mode))
+        except Exception:
+            normalized = self._normalize_mouse_api_name(selected_mode)
+            return normalized in {"SendInput", "Net", "KmboxA", "DHZ", "Ferrum", "MakcuController", "Medius", "MakAPI"}
 
     def _supports_keyboard_state(self, mode=None) -> bool:
         if not bool(getattr(config, "keyboard_api_enabled", False)):
@@ -9216,9 +9626,6 @@ class ViewerApp(ctk.CTk):
 
     def _update_performance_stats(self):
         """鏇存柊鎬ц兘绲辫▓淇℃伅锛團PS 鍜屽欢閬诧級"""
-        if not hasattr(self, "fps_label") or not self.fps_label.winfo_exists():
-            self.after(500, self._update_performance_stats)
-            return
         try:
             if self.capture.mode == "UDP" and self.capture.is_connected():
                 # 寰?UDP receiver 鐛插彇鎬ц兘绲辫▓
@@ -9237,8 +9644,7 @@ class ViewerApp(ctk.CTk):
                     # 鏇存柊绺藉欢閬诧紙鎺ユ敹 + 瑙ｇ⒓ + 铏曠悊锛?
                     receive_delay = stats.get('receive_delay_ms', 0)
                     processing_delay = stats.get('processing_delay_ms', 0)
-                    # receive_delay already includes decode time; don't add decode_delay again.
-                    total_delay = receive_delay + processing_delay
+                    total_delay = receive_delay + decode_delay + processing_delay
                     self.total_delay_label.configure(text=f"Delay: {total_delay:.1f} ms")
             elif self.capture.mode == "Teleport" and self.capture.is_connected():
                 receiver = None
@@ -9334,6 +9740,24 @@ class ViewerApp(ctk.CTk):
             config.deadzone_stop_delay_min_ms = getattr(self.tracker, "deadzone_stop_delay_min_ms", getattr(config, "deadzone_stop_delay_min_ms", 15.0))
             config.deadzone_stop_delay_max_ms = getattr(self.tracker, "deadzone_stop_delay_max_ms", getattr(config, "deadzone_stop_delay_max_ms", 45.0))
             config.ads_key = getattr(self.tracker, "ads_key", getattr(config, "ads_key", "Right Mouse Button"))
+            config.tbfovsize = self.tracker.tbfovsize
+            config.trigger_ads_fov_enabled = getattr(
+                self.tracker, "trigger_ads_fov_enabled", getattr(config, "trigger_ads_fov_enabled", False)
+            )
+            config.trigger_ads_fovsize = getattr(
+                self.tracker, "trigger_ads_fovsize", getattr(config, "trigger_ads_fovsize", config.tbfovsize)
+            )
+            config.trigger_ads_key = getattr(
+                self.tracker, "trigger_ads_key", getattr(config, "trigger_ads_key", "Right Mouse Button")
+            )
+            config.trigger_ads_key_type = getattr(
+                self.tracker, "trigger_ads_key_type", getattr(config, "trigger_ads_key_type", "hold")
+            )
+            config.selected_tb_btn = getattr(self.tracker, "selected_tb_btn", getattr(config, "selected_tb_btn", 3))
+            config.tbdelay_min = self.tracker.tbdelay_min
+            config.tbdelay_max = self.tracker.tbdelay_max
+            config.tbhold_min = self.tracker.tbhold_min
+            config.tbhold_max = self.tracker.tbhold_max
             config.in_game_sens = self.tracker.in_game_sens
             config.mouse_dpi = self.tracker.mouse_dpi
             
@@ -9366,6 +9790,14 @@ class ViewerApp(ctk.CTk):
             self.tracker.stop()
         except Exception as e:
             log_print(f"[UI] Tracker stop error: {e}")
+
+        # Release any firmware button/axis locks and disconnect mouse hardware safely
+        try:
+            from src.utils.mouse import disconnect_all, unlock_all_locks
+            unlock_all_locks()
+            disconnect_all()
+        except Exception as e:
+            log_print(f"[UI] Mouse cleanup error: {e}")
         
         # 娓呯悊鎹曠嵅鏈嶅嫏
         try: 
@@ -9447,6 +9879,165 @@ class ViewerApp(ctk.CTk):
     def _on_aim_type_selected(self, val):
         config.aim_type = val
     
+    def _on_tbdelay_range_changed(self, min_val, max_val):
+        """Triggerbot Delay 绡勫湇鏀硅畩"""
+        config.tbdelay_min = min_val
+        config.tbdelay_max = max_val
+        if hasattr(self, 'tracker'):
+            self.tracker.tbdelay_min = min_val
+            self.tracker.tbdelay_max = max_val
+    
+    def _on_tbhold_range_changed(self, min_val, max_val):
+        """Triggerbot Hold 绡勫湇鏀硅畩"""
+        config.tbhold_min = min_val
+        config.tbhold_max = max_val
+        if hasattr(self, 'tracker'):
+            self.tracker.tbhold_min = min_val
+            self.tracker.tbhold_max = max_val
+
+    def _on_rgb_tbdelay_range_changed(self, min_val, max_val):
+        config.rgb_tbdelay_min = min_val
+        config.rgb_tbdelay_max = max_val
+        if hasattr(self, "tracker"):
+            self.tracker.rgb_tbdelay_min = min_val
+            self.tracker.rgb_tbdelay_max = max_val
+
+    def _on_rgb_tbhold_range_changed(self, min_val, max_val):
+        config.rgb_tbhold_min = min_val
+        config.rgb_tbhold_max = max_val
+        if hasattr(self, "tracker"):
+            self.tracker.rgb_tbhold_min = min_val
+            self.tracker.rgb_tbhold_max = max_val
+
+    def _on_rgb_tbcooldown_range_changed(self, min_val, max_val):
+        config.rgb_tbcooldown_min = min_val
+        config.rgb_tbcooldown_max = max_val
+        if hasattr(self, "tracker"):
+            self.tracker.rgb_tbcooldown_min = min_val
+            self.tracker.rgb_tbcooldown_max = max_val
+    
+
+    def _on_trigger_roi_size_changed(self, val):
+        config.trigger_roi_size = int(val)
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_roi_size = int(val)
+
+    def _on_trigger_min_pixels_changed(self, val):
+        config.trigger_min_pixels = int(val)
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_min_pixels = int(val)
+
+    def _on_trigger_min_ratio_changed(self, val):
+        config.trigger_min_ratio = float(val)
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_min_ratio = float(val)
+
+    def _on_trigger_confirm_frames_changed(self, val):
+        config.trigger_confirm_frames = int(val)
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_confirm_frames = int(val)
+
+    def _on_tbcooldown_range_changed(self, min_val, max_val):
+        """Triggerbot Cooldown 绡勫湇鏀硅畩"""
+        config.tbcooldown_min = min_val
+        config.tbcooldown_max = max_val
+        if hasattr(self, 'tracker'):
+            self.tracker.tbcooldown_min = min_val
+            self.tracker.tbcooldown_max = max_val
+    
+    def _on_tbburst_count_range_changed(self, min_val, max_val):
+        """Triggerbot Burst Count 绡勫湇鏀硅畩"""
+        config.tbburst_count_min = int(min_val)
+        config.tbburst_count_max = int(max_val)
+        if hasattr(self, 'tracker'):
+            self.tracker.tbburst_count_min = int(min_val)
+            self.tracker.tbburst_count_max = int(max_val)
+    
+    def _on_tbburst_interval_range_changed(self, min_val, max_val):
+        """Triggerbot Burst Interval 绡勫湇鏀硅畩"""
+        config.tbburst_interval_min = min_val
+        config.tbburst_interval_max = max_val
+        if hasattr(self, 'tracker'):
+            self.tracker.tbburst_interval_min = min_val
+            self.tracker.tbburst_interval_max = max_val
+    
+    def _on_tbfovsize_changed(self, val): 
+        config.tbfovsize = val
+        self.tracker.tbfovsize = val
+
+    def _on_trigger_ads_fov_enabled_changed(self):
+        config.trigger_ads_fov_enabled = self.var_trigger_ads_fov_enabled.get()
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_ads_fov_enabled = config.trigger_ads_fov_enabled
+        if str(getattr(self, "_active_tab_name", "")) == "Trigger":
+            self._show_tb_tab()
+
+    def _on_trigger_ads_fovsize_changed(self, val):
+        config.trigger_ads_fovsize = val
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_ads_fovsize = val
+
+    def _on_trigger_ads_key_type_selected(self, val):
+        config.trigger_ads_key_type = ADS_KEY_TYPE_DISPLAY_TO_VALUE.get(str(val), "hold")
+        if hasattr(self, "tracker"):
+            self.tracker.trigger_ads_key_type = config.trigger_ads_key_type
+        self._log_config(f"Trigger ADS Key Type: {val}")
+
+    def _on_enable_magnet_trigger_changed(self):
+        config.enable_magnet_trigger = self.var_enable_magnet_trigger.get()
+
+    def _on_magnet_fov_changed(self, val):
+        config.magnet_fov = float(val)
+
+    def _on_magnet_pull_x_changed(self, val):
+        config.magnet_pull_x = float(val)
+
+    def _on_magnet_pull_y_changed(self, val):
+        config.magnet_pull_y = float(val)
+
+    def _on_magnet_fire_radius_changed(self, val):
+        config.magnet_fire_radius = float(val)
+
+    def _on_magnet_cooldown_ms_changed(self, val):
+        config.magnet_cooldown_ms = float(val)
+
+    def _on_magnet_activation_type_selected(self, val):
+        activation_map = {
+            "Hold to Enable": "hold_enable",
+            "Hold to Disable": "hold_disable",
+            "Toggle": "toggle",
+        }
+        config.magnet_activation_type = activation_map.get(str(val), "hold_enable")
+        self._log_config(f"Magnet Trigger Mode: {val}")
+
+    def _on_magnet_mode_selected(self, val):
+        config.magnet_mode = self._aim_mode_display_to_value(val)
+        if str(getattr(self, "_active_tab_name", "")) == "Magnet Trigger":
+            self._show_magnet_trigger_tab()
+
+    def _on_magnet_trigger_type_selected(self, val):
+        trigger_map = {
+            "Classic Trigger": "current",
+            "RGB Trigger": "rgb",
+        }
+        config.magnet_trigger_type = trigger_map.get(str(val), "current")
+        if str(getattr(self, "_active_tab_name", "")) == "Magnet Trigger":
+            self._show_magnet_trigger_tab()
+
+    def _on_magnet_rgb_color_profile_selected(self, val):
+        profile_map = {
+            "Red": "red",
+            "Yellow": "yellow",
+            "Purple": "purple",
+            "Custom": "custom",
+        }
+        config.magnet_rgb_color_profile = profile_map.get(str(val), "purple")
+        if str(getattr(self, "_active_tab_name", "")) == "Magnet Trigger":
+            self._show_magnet_trigger_tab()
+
+    def _on_tbhold_changed(self, val):
+        config.tbhold = val
+        self.tracker.tbhold = val
     
     def _on_enableaim_changed(self): 
         config.enableaim = self.var_enableaim.get()
@@ -9509,6 +10100,8 @@ class ViewerApp(ctk.CTk):
         if hasattr(self.tracker, 'anti_smoke_detector'):
             self.tracker.anti_smoke_detector.set_enabled(config.anti_smoke_enabled)
     
+    def _on_enabletb_changed(self): 
+        config.enabletb = self.var_enabletb.get()
     
     def _on_enablercs_changed(self):
         """RCS 闁嬮棞鏀硅畩"""
@@ -9555,19 +10148,12 @@ class ViewerApp(ctk.CTk):
         is_custom = current_color == "custom"
 
         if hasattr(self, 'custom_hsv_container'):
-            _studio = self._ui_style == "studio" and self._active_tab_name == "General"
             if is_custom:
                 if not self.custom_hsv_container.winfo_ismapped():
-                    if _studio:
-                        self.custom_hsv_container.grid(row=7, column=0, columnspan=2, sticky="ew", pady=6, padx=6)
-                    else:
-                        self.custom_hsv_container.pack(fill="x", pady=(5, 0))
+                    self.custom_hsv_container.pack(fill="x", pady=(5, 0))
             else:
                 if self.custom_hsv_container.winfo_ismapped():
-                    if _studio:
-                        self.custom_hsv_container.grid_remove()
-                    else:
-                        self.custom_hsv_container.pack_forget()
+                    self.custom_hsv_container.pack_forget()
 
     def _on_custom_hsv_changed(self, key, val):
         """Custom HSV 鍊兼敼璁婃檪鐨勫洖瑾?"""
@@ -9579,6 +10165,45 @@ class ViewerApp(ctk.CTk):
                 self.tracker.model, self.tracker.class_names = reload_model()
                 log_print(f"[UI] Custom HSV updated: {key} = {int(val)}")
     
+    def _update_custom_rgb_visibility(self):
+        """Show or hide Custom RGB section based on selected RGB profile."""
+        current_rgb_profile = str(getattr(config, "rgb_color_profile", "purple")).strip().lower()
+        is_custom = current_rgb_profile == "custom"
+
+        if hasattr(self, 'custom_rgb_container'):
+            if is_custom:
+                if not self.custom_rgb_container.winfo_ismapped():
+                    self.custom_rgb_container.pack(fill="x", pady=(5, 0))
+            else:
+                if self.custom_rgb_container.winfo_ismapped():
+                    self.custom_rgb_container.pack_forget()
+    
+    def _get_rgb_color_hex(self):
+        """Get current RGB color as hex string."""
+        r = max(0, min(255, int(getattr(config, "rgb_custom_r", 161))))
+        g = max(0, min(255, int(getattr(config, "rgb_custom_g", 69))))
+        b = max(0, min(255, int(getattr(config, "rgb_custom_b", 163))))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    
+    def _update_rgb_color_preview(self):
+        """Update RGB color preview box."""
+        if hasattr(self, "rgb_color_preview"):
+            try:
+                color_hex = self._get_rgb_color_hex()
+                self.rgb_color_preview.configure(fg_color=color_hex)
+            except Exception as e:
+                log_print(f"[UI] Failed to update RGB color preview: {e}")
+    
+    def _on_rgb_custom_changed(self, key, val):
+        """Custom RGB 值改變時的回調"""
+        setattr(config, key, int(val))
+        # 確保值在有效範圍內
+        setattr(config, key, max(0, min(255, int(val))))
+        if hasattr(self, "tracker"):
+            self.tracker.rgb_color_profile = config.rgb_color_profile
+        # Update color preview
+        self._update_rgb_color_preview()
+        log_print(f"[UI] Custom RGB updated: {key} = {int(val)}")
     
     def _open_hsv_preview(self):
         """Abre a janela de preview HSV em tempo real."""
@@ -10077,6 +10702,79 @@ class ViewerApp(ctk.CTk):
         config.aimbot_activation_type = activation_type_map.get(val, "hold_enable")
         self._log_config(f"Aim Activation Type: {val}")
 
+    def _on_trigger_type_selected(self, val):
+        trigger_type_map = {
+            "Classic Trigger": "current",
+            "Current": "current",
+            "RGB Trigger": "rgb",
+        }
+        new_trigger_type = trigger_type_map.get(val, "current")
+        old_trigger_type = str(getattr(config, "trigger_type", "current")).strip().lower()
+        config.trigger_type = new_trigger_type
+        self._log_config(f"Trigger Type: {val}")
+        # Rebuild tab to show mode-specific controls immediately.
+        if new_trigger_type != old_trigger_type:
+            self._show_tb_tab()
+
+    def _on_rgb_color_profile_selected(self, val):
+        rgb_profile_map = {
+            "Red": "red",
+            "Yellow": "yellow",
+            "Purple": "purple",
+            "Custom": "custom",
+        }
+        config.rgb_color_profile = rgb_profile_map.get(val, "purple")
+        # Reuse the same global custom HSV profile used by main color selection.
+        if config.rgb_color_profile == "custom":
+            config.color = "custom"
+            if hasattr(self, "tracker"):
+                self.tracker.color = "custom"
+        if hasattr(self, "tracker"):
+            self.tracker.rgb_color_profile = config.rgb_color_profile
+        self._log_config(f"RGB Preset: {val}")
+        # Update Custom RGB section visibility
+        self._update_custom_rgb_visibility()
+
+    def _on_tb_button_selected(self, val):
+        for k, name in BUTTONS.items():
+            if name == val:
+                config.selected_tb_btn = k
+                self._log_config(f"Trigger Key: {val}")
+                break
+
+    def _on_trigger_activation_type_selected(self, val):
+        trigger_activation_map = {
+            "Hold to Enable": "hold_enable",
+            "Hold to Disable": "hold_disable",
+            "Toggle": "toggle",
+            # backward compatibility for older saved labels
+            "按下啟用": "hold_enable",
+            "按下禁用": "hold_disable",
+            "切換": "toggle",
+        }
+        config.trigger_activation_type = trigger_activation_map.get(val, "hold_enable")
+        self._log_config(f"Trigger Mode: {val}")
+
+    def _on_trigger_strafe_mode_selected(self, val):
+        trigger_strafe_mode_map = {
+            "Off": "off",
+            "Auto Strafe": "auto",
+            "Manual Wait": "manual_wait",
+        }
+        selected_mode = trigger_strafe_mode_map.get(str(val), "off")
+        if selected_mode != "off" and not self._supports_trigger_strafe_ui():
+            selected_mode = "off"
+        old_mode = str(getattr(config, "trigger_strafe_mode", "off")).strip().lower()
+        config.trigger_strafe_mode = selected_mode
+        self._log_config(f"Trigger Strafe Mode: {val}")
+        if selected_mode != old_mode and str(getattr(self, "_active_tab_name", "")) == "Trigger":
+            self._show_tb_tab()
+
+    def _on_trigger_strafe_auto_lead_ms_changed(self, val):
+        config.trigger_strafe_auto_lead_ms = int(val)
+
+    def _on_trigger_strafe_manual_neutral_ms_changed(self, val):
+        config.trigger_strafe_manual_neutral_ms = int(val)
     
     # Mouse Input Debug Callbacks
     def _on_debug_mouse_input_changed(self):
@@ -10561,10 +11259,13 @@ class SettingsWindow(ctk.CTkToplevel):
             "show_opencv_windows": getattr(config, "show_opencv_windows", True),
             "show_opencv_mask": getattr(config, "show_opencv_mask", True),
             "show_opencv_detection": getattr(config, "show_opencv_detection", True),
+            "show_opencv_roi": getattr(config, "show_opencv_roi", True),
+            "show_opencv_triggerbot_mask": getattr(config, "show_opencv_triggerbot_mask", True),
             "show_ndi_raw_stream_window": getattr(config, "show_ndi_raw_stream_window", False),
             "show_udp_raw_stream_window": getattr(config, "show_udp_raw_stream_window", False),
             "show_mode_text": getattr(config, "show_mode_text", True),
             "show_aimbot_status": getattr(config, "show_aimbot_status", True),
+            "show_triggerbot_status": getattr(config, "show_triggerbot_status", True),
             "show_target_count": getattr(config, "show_target_count", True),
             "show_crosshair": getattr(config, "show_crosshair", True),
             "show_distance_text": getattr(config, "show_distance_text", True)
@@ -10642,7 +11343,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self.show_opencv_detection_var = tk.BooleanVar(value=self.temp_settings["show_opencv_detection"])
         self._add_grid_switch(opencv_grid_frame, "Detection", self.show_opencv_detection_var, 0, 1)
         
+        self.show_opencv_roi_var = tk.BooleanVar(value=self.temp_settings["show_opencv_roi"])
+        self._add_grid_switch(opencv_grid_frame, "ROI", self.show_opencv_roi_var, 1, 0)
         
+        self.show_opencv_triggerbot_mask_var = tk.BooleanVar(value=self.temp_settings["show_opencv_triggerbot_mask"])
+        self._add_grid_switch(opencv_grid_frame, "Triggerbot Mask", self.show_opencv_triggerbot_mask_var, 1, 1)
 
         self.show_ndi_raw_stream_var = tk.BooleanVar(value=self.temp_settings["show_ndi_raw_stream_window"])
         self._add_grid_switch(opencv_grid_frame, "NDI Raw Stream", self.show_ndi_raw_stream_var, 2, 0)
@@ -10669,6 +11374,8 @@ class SettingsWindow(ctk.CTkToplevel):
         self.show_aimbot_status_var = tk.BooleanVar(value=self.temp_settings["show_aimbot_status"])
         self._add_grid_switch(grid_frame, "Aim Status", self.show_aimbot_status_var, 0, 1)
         
+        self.show_triggerbot_status_var = tk.BooleanVar(value=self.temp_settings["show_triggerbot_status"])
+        self._add_grid_switch(grid_frame, "Trigger Status", self.show_triggerbot_status_var, 1, 0)
         
         self.show_target_count_var = tk.BooleanVar(value=self.temp_settings["show_target_count"])
         self._add_grid_switch(grid_frame, "Target Count", self.show_target_count_var, 1, 1)
@@ -10764,10 +11471,13 @@ class SettingsWindow(ctk.CTkToplevel):
             "show_opencv_windows": self.show_opencv_var.get(),
             "show_opencv_mask": self.show_opencv_mask_var.get(),
             "show_opencv_detection": self.show_opencv_detection_var.get(),
+            "show_opencv_roi": self.show_opencv_roi_var.get(),
+            "show_opencv_triggerbot_mask": self.show_opencv_triggerbot_mask_var.get(),
             "show_ndi_raw_stream_window": self.show_ndi_raw_stream_var.get(),
             "show_udp_raw_stream_window": self.show_udp_raw_stream_var.get(),
             "show_mode_text": self.show_mode_var.get(),
             "show_aimbot_status": self.show_aimbot_status_var.get(),
+            "show_triggerbot_status": self.show_triggerbot_status_var.get(),
             "show_target_count": self.show_target_count_var.get(),
             "show_crosshair": self.show_crosshair_var.get(),
             "show_distance_text": self.show_distance_var.get(),
@@ -10811,10 +11521,13 @@ class SettingsWindow(ctk.CTkToplevel):
         config.show_opencv_windows = self.show_opencv_var.get()
         config.show_opencv_mask = self.show_opencv_mask_var.get()
         config.show_opencv_detection = self.show_opencv_detection_var.get()
+        config.show_opencv_roi = self.show_opencv_roi_var.get()
+        config.show_opencv_triggerbot_mask = self.show_opencv_triggerbot_mask_var.get()
         config.show_ndi_raw_stream_window = self.show_ndi_raw_stream_var.get()
         config.show_udp_raw_stream_window = self.show_udp_raw_stream_var.get()
         config.show_mode_text = self.show_mode_var.get()
         config.show_aimbot_status = self.show_aimbot_status_var.get()
+        config.show_triggerbot_status = self.show_triggerbot_status_var.get()
         config.show_target_count = self.show_target_count_var.get()
         config.show_crosshair = self.show_crosshair_var.get()
         config.show_distance_text = self.show_distance_var.get()

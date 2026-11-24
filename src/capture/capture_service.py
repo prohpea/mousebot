@@ -1,4 +1,4 @@
-﻿from src.utils.debug_logger import log_print
+from src.utils.debug_logger import log_print
 import numpy as np
 from .ndi import NDIManager
 import cv2

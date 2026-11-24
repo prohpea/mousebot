@@ -1,4 +1,5 @@
 @echo off
+setlocal
 cd /d "%~dp0"
 
 echo ========================================
@@ -6,11 +7,28 @@ echo    CVM colorBot Setup Script
 echo ========================================
 echo.
 
-:: Check if Python is installed
+if exist "runtime\Scripts\python.exe" (
+    echo [*] Checking bundled runtime\ environment...
+    "runtime\Scripts\python.exe" -c "import cv2, numpy, customtkinter, serial, abcurves_native; print('[OK] Bundled runtime verified: all core modules loaded.')"
+    if not errorlevel 1 (
+        echo.
+        echo ========================================
+        echo    Setup Complete! Ready to launch.
+        echo ========================================
+        echo.
+        echo Run run.bat to start CVM colorBot.
+        echo.
+        pause
+        exit /b 0
+    )
+    echo [WARN] Bundled runtime\ check failed, falling back to venv setup...
+    echo.
+)
+
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH
-    echo Please download and install from https://www.python.org/downloads/
+    echo Please install Python 3.11 from https://www.python.org/downloads/
     pause
     exit /b 1
 )
@@ -18,8 +36,7 @@ if errorlevel 1 (
 echo [*] Checking Python version...
 python --version
 
-:: Create virtual environment
-if exist "venv" (
+if exist "venv\Scripts\python.exe" (
     echo [*] Virtual environment already exists, skipping creation
 ) else (
     echo [*] Creating virtual environment...
@@ -32,23 +49,16 @@ if exist "venv" (
     echo [OK] Virtual environment created successfully
 )
 
-:: Activate virtual environment
-echo [*] Activating virtual environment...
-call venv\Scripts\activate
-if errorlevel 1 (
-    echo [ERROR] Failed to activate virtual environment
-    pause
-    exit /b 1
-)
-
-:: Upgrade pip
 echo [*] Upgrading pip...
-python -m pip install --upgrade pip --quiet
+"venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
 
-:: Install dependencies
-if exist requirements.txt (
+if exist "requirements.txt" (
     echo [*] Installing dependencies...
-    pip install -r requirements.txt --find-links wheels
+    if exist "wheels" (
+        "venv\Scripts\python.exe" -m pip install -r requirements.txt --find-links wheels
+    ) else (
+        "venv\Scripts\python.exe" -m pip install -r requirements.txt
+    )
     if errorlevel 1 (
         echo [ERROR] Failed to install dependencies
         pause
@@ -67,4 +77,3 @@ echo.
 echo You can now run run.bat to start the program
 echo.
 pause
-

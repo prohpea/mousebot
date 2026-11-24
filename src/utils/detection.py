@@ -23,51 +23,76 @@ def test():
     log_print("HSV conversion done")
 
 
+# Synchronized with OBS-xUDP-Plugin (VeloNet Color Correction v2.1):
+# - Purple (Color Enhancement ON): H[120,160], outline S>=190/V>=115, dimmed BG S<90
+# - Yellow (HSV_Color_Ranges.txt): H[20,30], S[100,255], V[100,255]
+# - Red (HSV_Color_Ranges.txt): dual wrap-around H[0,10] U H[160,180], S[100,255], V[20,255]
+XUDP_HSV_PRESETS = {
+    "yellow": (
+        (np.array([20, 100, 100], dtype=np.uint8), np.array([30, 255, 255], dtype=np.uint8)),
+    ),
+    "purple": (
+        (np.array([120, 188, 115], dtype=np.uint8), np.array([160, 255, 255], dtype=np.uint8)),
+    ),
+    "red": (
+        (np.array([0, 100, 20], dtype=np.uint8), np.array([10, 255, 255], dtype=np.uint8)),
+        (np.array([160, 100, 20], dtype=np.uint8), np.array([180, 255, 255], dtype=np.uint8)),
+    ),
+}
+
+
+def compute_hsv_mask(hsv_img, model):
+    """Build binary mask from an HSV image and loaded model (supports single or multi-range)."""
+    if model is None or hsv_img is None:
+        return None
+    if len(model) >= 3 and model[2]:
+        ranges = model[2]
+        mask = cv2.inRange(hsv_img, ranges[0][0], ranges[0][1])
+        for lower, upper in ranges[1:]:
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_img, lower, upper))
+        return mask
+    return cv2.inRange(hsv_img, model[0], model[1])
+
+
 def load_model(model_path=None):
     global _model, _class_names, HSV_MIN, HSV_MAX
     config.model_load_error = ""
 
     try:
-        log_print("Loading HSV parameters...")
-        # Wider HSV presets to better tolerate compression/lighting variance.
-        yellow = [18, 80, 80, 40, 255, 255]
-        purple = [120, 188, 115, 160, 255, 255]
-        red = [0, 95, 95, 4, 235, 255]
+        log_print("Loading HSV parameters (xUDP synced)...")
+        color_key = str(getattr(config, "color", "purple")).strip().lower()
 
-        if config.color == "yellow":
-            HSV_MIN = np.array([yellow[0], yellow[1], yellow[2]], dtype=np.uint8)
-            HSV_MAX = np.array([yellow[3], yellow[4], yellow[5]], dtype=np.uint8)
-            log_print("Loaded HSV for yellow")
-        elif config.color == "purple":
-            HSV_MIN = np.array([purple[0], purple[1], purple[2]], dtype=np.uint8)
-            HSV_MAX = np.array([purple[3], purple[4], purple[5]], dtype=np.uint8)
-            log_print("Loaded HSV for purple")
-        elif config.color == "red":
-            HSV_MIN = np.array([red[0], red[1], red[2]], dtype=np.uint8)
-            HSV_MAX = np.array([red[3], red[4], red[5]], dtype=np.uint8)
-            log_print("Loaded HSV for red")
-        elif config.color == "custom":
+        if color_key in XUDP_HSV_PRESETS:
+            ranges = XUDP_HSV_PRESETS[color_key]
+            HSV_MIN = ranges[0][0].copy()
+            HSV_MAX = ranges[0][1].copy()
+            if len(ranges) > 1:
+                _model = (HSV_MIN, HSV_MAX, tuple((lo.copy(), hi.copy()) for lo, hi in ranges))
+            else:
+                _model = (HSV_MIN, HSV_MAX)
+            log_print(f"Loaded xUDP HSV for {color_key}: MIN={HSV_MIN}, MAX={HSV_MAX}")
+        elif color_key == "custom":
             HSV_MIN = np.array(
                 [
-                    getattr(config, "custom_hsv_min_h", 0),
-                    getattr(config, "custom_hsv_min_s", 0),
-                    getattr(config, "custom_hsv_min_v", 0),
+                    getattr(config, "custom_hsv_min_h", 120),
+                    getattr(config, "custom_hsv_min_s", 188),
+                    getattr(config, "custom_hsv_min_v", 115),
                 ],
                 dtype=np.uint8,
             )
             HSV_MAX = np.array(
                 [
-                    getattr(config, "custom_hsv_max_h", 179),
+                    getattr(config, "custom_hsv_max_h", 160),
                     getattr(config, "custom_hsv_max_s", 255),
                     getattr(config, "custom_hsv_max_v", 255),
                 ],
                 dtype=np.uint8,
             )
+            _model = (HSV_MIN, HSV_MAX)
             log_print(f"Loaded custom HSV: MIN={HSV_MIN}, MAX={HSV_MAX}")
         else:
             raise ValueError(f"Unknown color {config.color}")
 
-        _model = (HSV_MIN, HSV_MAX)
         _class_names = {"color": "Target Color"}
         config.model_classes = list(_class_names.values())
         config.model_file_size = 0
@@ -257,6 +282,16 @@ def merge_close_rects(rects, centers, dist_threshold=None):
     return merged, merged_centers
 
 
+def triggerbot_detect(model, roi):
+    if model is None or roi is None:
+        return False
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = compute_hsv_mask(hsv_roi, model)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    return bool(np.any(mask > 0))
+
+
 def _stabilize_axis_edges(e1, e2, pe1, pe2, hold_count, shimmer_tol):
     """Damp stationary fragment shimmer along one axis while reacting immediately to real motion."""
     d1 = e1 - pe1
@@ -378,7 +413,7 @@ def perform_detection(model, image):
         return [], None
 
     hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    raw_mask = cv2.inRange(hsv_img, model[0], model[1])
+    raw_mask = compute_hsv_mask(hsv_img, model)
     mask = raw_mask.copy()
 
     # Reference-like morphology path (close + dilate) is the default because it
