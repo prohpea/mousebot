@@ -455,6 +455,12 @@ class Config:
         self.hsv_lighting_guard_enabled = False
         self.pinned_profiles = []
         self.profile_cycle_hotkey = "F8"
+        # --- Valorant + OBS_UDP Focused Upgrades ---
+        self.detection_anti_vfx_enabled = True
+        self.firing_deadzone_boost_enabled = True
+        self.firing_deadzone_boost_px = 2.5
+        self.firing_deadzone_window_ms = 200.0
+        self.obs_udp_fast_boot = True
         
         # --- Button Mask Settings ---
         self.button_mask_enabled = False  # 绺介枊闂?
@@ -913,6 +919,11 @@ class Config:
             "hsv_lighting_guard_enabled": getattr(self, "hsv_lighting_guard_enabled", False),
             "pinned_profiles": list(getattr(self, "pinned_profiles", []) or []),
             "profile_cycle_hotkey": getattr(self, "profile_cycle_hotkey", "F8"),
+            "detection_anti_vfx_enabled": getattr(self, "detection_anti_vfx_enabled", True),
+            "firing_deadzone_boost_enabled": getattr(self, "firing_deadzone_boost_enabled", True),
+            "firing_deadzone_boost_px": getattr(self, "firing_deadzone_boost_px", 2.5),
+            "firing_deadzone_window_ms": getattr(self, "firing_deadzone_window_ms", 200.0),
+            "obs_udp_fast_boot": getattr(self, "obs_udp_fast_boot", True),
         }
     
     def from_dict(self, data):

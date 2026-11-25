@@ -127,31 +127,42 @@ class CaptureService:
     绲变竴绠＄悊 NDI銆乁DP銆丆aptureCard銆丆aptureCardGStreamer銆丮SS 鍜?Teleport 妯″紡锛屾彁渚涚当涓€鐨勬帴鍙ｃ€?
     """
     def __init__(self):
-        self.mode = "UDP" # "NDI", "UDP", "Teleport", "CaptureCard", "CaptureCardGStreamer", or "MSS"
-        
-        # NDI
-        self.ndi = NDIManager()
-        
+        from src.utils.config import config as _cfg
+        initial_mode = str(getattr(_cfg, "capture_mode", "UDP") or "UDP")
+        fast_boot = bool(getattr(_cfg, "obs_udp_fast_boot", True)) and initial_mode == "UDP"
+
+        self.mode = initial_mode if initial_mode in ("NDI", "UDP", "Teleport", "CaptureCard", "CaptureCardGStreamer", "MSS") else "UDP"
+        self._fast_boot = fast_boot
+
+        # NDI (lazy when UDP fast boot is active)
+        self.ndi = None if fast_boot else NDIManager()
+
         # UDP
         self.udp_manager = OBS_UDP_Manager() if HAS_UDP else None
 
-        # Teleport
-        self.teleport_manager = OBSTeleportManager() if HAS_TELEPORT else None
-        
+        # Teleport (lazy when UDP fast boot is active)
+        self.teleport_manager = None if fast_boot else (OBSTeleportManager() if HAS_TELEPORT else None)
+
         # CaptureCard (OpenCV)
         self.capture_card_camera = None
-        
+
         # CaptureCard (GStreamer)
         self.capture_card_gstreamer_camera = None
-        
+
         # MSS
         self.mss_capture = None
-        
+
         self._ip = "127.0.0.1"
         self._port = 1234
         self._gstreamer_no_frame_last_log = 0.0
         self._io_lock = threading.RLock()
         self._mode_switch_job_id = 0
+
+    def _ensure_mode_manager(self, mode):
+        if mode == "NDI" and self.ndi is None:
+            self.ndi = NDIManager()
+        elif mode == "Teleport" and self.teleport_manager is None and HAS_TELEPORT:
+            self.teleport_manager = OBSTeleportManager()
 
     def set_mode(self, mode):
         """切換採集模式。採集卡釋放在背景執行，避免 UI 卡住。"""
@@ -162,6 +173,7 @@ class CaptureService:
             if self.mode != mode:
                 self.disconnect()
 
+            self._ensure_mode_manager(mode)
             self.mode = mode
 
     def get_frame_dimensions(self):

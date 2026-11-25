@@ -2696,16 +2696,24 @@ class ViewerApp(ctk.CTk):
             if len(hist) > 40:
                 del hist[:-40]
 
+        drop_delta = int(getattr(self, "_udp_recent_drop_delta", 0))
         if not connected:
             stream_color = "#64748B"
+            stream_txt = f"{mode}: {fps_val} FPS"
+        elif drop_delta > 0:
+            stream_color = "#FF3B5C"
+            stream_txt = f"NET DROP (+{drop_delta})"
         elif numeric_fps >= 120.0:
             stream_color = "#00F0FF"
+            stream_txt = f"{mode}: {fps_val} FPS"
         elif numeric_fps >= 60.0:
             stream_color = "#F59E0B"
+            stream_txt = f"{mode}: {fps_val} FPS"
         else:
             stream_color = "#FF3B5C"
+            stream_txt = f"{mode}: {fps_val} FPS"
 
-        stream_state = (f"{mode}: {fps_val} FPS", stream_color)
+        stream_state = (stream_txt, stream_color)
         if cache.get("stream") != stream_state and getattr(self, "hud_stream_metric", None) is not None:
             try:
                 if self.hud_stream_metric.winfo_exists():
@@ -11977,6 +11985,12 @@ class ViewerApp(ctk.CTk):
                     processing_delay = stats.get('processing_delay_ms', 0)
                     total_delay = receive_delay + decode_delay + processing_delay
                     self.total_delay_label.configure(text=f"Delay: {total_delay:.1f} ms")
+
+                    # Track xUDP LAN packet drops
+                    cur_drops = int(stats.get("reassembly_drops", 0) or 0)
+                    prev_drops = int(getattr(self, "_last_udp_reassembly_drops", cur_drops))
+                    self._last_udp_reassembly_drops = cur_drops
+                    self._udp_recent_drop_delta = max(0, cur_drops - prev_drops)
             elif self.capture.mode == "Teleport" and self.capture.is_connected():
                 receiver = None
                 if getattr(self.capture, "teleport_manager", None):

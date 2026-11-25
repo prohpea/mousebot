@@ -436,7 +436,8 @@ def _filter_false_positive_rects(rects, raw_mask):
     upright_on = bool(getattr(config, "detection_upright_filter_enabled", True))
     hollow_on = bool(getattr(config, "detection_hollow_filter_enabled", True))
     strict_noise_on = bool(getattr(config, "detection_disable_empty_fallback", True))
-    if not upright_on and not hollow_on and not strict_noise_on:
+    anti_vfx_on = bool(getattr(config, "detection_anti_vfx_enabled", True))
+    if not upright_on and not hollow_on and not strict_noise_on and not anti_vfx_on:
         return rects
 
     img_h, img_w = (raw_mask.shape[:2] if raw_mask is not None else (0, 0))
@@ -471,6 +472,30 @@ def _filter_false_positive_rects(rects, raw_mask):
                 box_area = max(1, (rx2 - rx1) * (ry2 - ry1))
                 raw_box_fill = float(max(0, raw_px)) / float(box_area)
                 if core_fill >= 0.55 and raw_box_fill >= 0.38:
+                    continue
+
+        # Valorant Anti-VFX filter: reject circular/square purple orbs (Reyna Leer, Astra Star, Omen Blind)
+        # and low ground-only ability strips while preserving upright human outline silhouettes.
+        if anti_vfx_on and raw_mask is not None and iw >= 16 and ih >= 22 and img_w > 0 and img_h > 0:
+            aspect = float(iw) / float(ih)
+            if 0.78 <= aspect <= 1.35 and ih <= 85:
+                cx1 = max(0, ix + int(round(iw * 0.25)))
+                cx2 = min(img_w, ix + int(round(iw * 0.75)))
+                cy1 = max(0, iy + int(round(ih * 0.25)))
+                cy2 = min(img_h, iy + int(round(ih * 0.75)))
+                c_area = max(0, cx2 - cx1) * max(0, cy2 - cy1)
+                if c_area >= 12:
+                    c_fill = float(cv2.countNonZero(raw_mask[cy1:cy2, cx1:cx2])) / float(c_area)
+                    if c_fill >= 0.35:
+                        continue
+            if iw >= 20 and ih >= 42:
+                top_y2 = min(img_h, ry1 + max(4, ih // 4))
+                bot_y1 = max(0, ry2 - max(4, ih // 4))
+                top_area = max(1, (rx2 - rx1) * max(1, top_y2 - ry1))
+                bot_area = max(1, (rx2 - rx1) * max(1, ry2 - bot_y1))
+                top_fill = float(cv2.countNonZero(raw_mask[ry1:top_y2, rx1:rx2])) / float(top_area)
+                bot_fill = float(cv2.countNonZero(raw_mask[bot_y1:ry2, rx1:rx2])) / float(bot_area)
+                if top_fill < 0.015 and bot_fill >= 0.28:
                     continue
 
         kept.append((ix, iy, iw, ih))

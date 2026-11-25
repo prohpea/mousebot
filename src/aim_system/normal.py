@@ -12,6 +12,7 @@ import time
 from src.utils.config import config
 from src.utils.debug_logger import log_move, log_print
 from src.utils.activation import check_aimbot_activation, get_active_aim_fov
+from src.utils.mouse import is_button_pressed
 from .mode_dispatcher import dispatch as dispatch_aim_mode
 from . import mode_abcurves
 
@@ -813,8 +814,12 @@ def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False):
     dispatch_aim_mode(dx, dy, distance_to_center, mode, tracker, is_sec=is_sec)
 
 
+_FIRING_BOOST_UNTIL = 0.0
+
+
 def _is_inside_stop_fov(dx: float, dy: float, is_sec: bool = False) -> bool:
     """Return True when Stop Aim FOV is enabled and aim offset is already inside it."""
+    global _FIRING_BOOST_UNTIL
     enabled_key = "deadzone_fov_enabled_sec" if is_sec else "deadzone_fov_enabled"
     size_key = "deadzone_fovsize_sec" if is_sec else "deadzone_fovsize"
     if not bool(getattr(config, enabled_key, False)):
@@ -823,6 +828,17 @@ def _is_inside_stop_fov(dx: float, dy: float, is_sec: bool = False) -> bool:
         radius = float(getattr(config, size_key, 0.0))
     except Exception:
         return False
+    if not is_sec and bool(getattr(config, "firing_deadzone_boost_enabled", True)):
+        now = time.perf_counter()
+        try:
+            if is_button_pressed(0):
+                win_s = max(0.05, min(0.5, float(getattr(config, "firing_deadzone_window_ms", 200.0)) * 0.001))
+                _FIRING_BOOST_UNTIL = now + win_s
+        except Exception:
+            pass
+        if now <= _FIRING_BOOST_UNTIL:
+            boost_px = max(0.0, min(8.0, float(getattr(config, "firing_deadzone_boost_px", 2.5))))
+            radius += boost_px
     if radius <= 0.0:
         return False
     return math.hypot(float(dx), float(dy)) <= radius

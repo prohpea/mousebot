@@ -94,6 +94,41 @@ class TestArchitectureUpgrades(unittest.TestCase):
         self.assertTrue(hasattr(ViewerApp, "_show_status_toast"))
         self.assertTrue(hasattr(ViewerApp, "_on_mouse_path_slot_selected"))
 
+    def test_valorant_anti_vfx_rejects_purple_orb_keeps_upright_outline(self):
+        from src.utils.detection import _filter_false_positive_rects
+        mask = np.zeros((200, 200), dtype=np.uint8)
+        # 1) Circular/square filled Reyna/Astra-style purple orb (32x32)
+        mask[20:52, 20:52] = 255
+        # 2) Upright Valorant agent thin outline (24x64, hollow interior)
+        mask[60:124, 100:103] = 255
+        mask[60:124, 121:124] = 255
+        mask[60:63, 100:124] = 255
+        kept = _filter_false_positive_rects([(20, 20, 32, 32), (100, 60, 24, 64)], mask)
+        self.assertEqual(kept, [(100, 60, 24, 64)])
+
+    def test_firing_deadzone_boost_expands_stop_radius_during_shot(self):
+        from unittest.mock import patch
+        from src.aim_system import normal
+        normal._FIRING_BOOST_UNTIL = 0.0
+        cfg = Config()
+        with patch.object(normal, "config", cfg), patch.object(normal, "is_button_pressed", return_value=True):
+            cfg.deadzone_fov_enabled = True
+            cfg.deadzone_fovsize = 2.5
+            cfg.firing_deadzone_boost_enabled = True
+            cfg.firing_deadzone_boost_px = 2.5
+            # 4.0px away: outside base 2.5px, inside boosted 5.0px
+            self.assertTrue(normal._is_inside_stop_fov(4.0, 0.0, is_sec=False))
+
+    def test_obs_udp_fast_boot_defers_non_udp_managers(self):
+        from src.capture.capture_service import CaptureService
+        svc = CaptureService()
+        if svc._fast_boot:
+            self.assertIsNone(svc.ndi)
+            self.assertIsNone(svc.teleport_manager)
+            svc.set_mode("NDI")
+            self.assertIsNotNone(svc.ndi)
+            svc.set_mode("UDP")
+
 
 if __name__ == "__main__":
     unittest.main()
