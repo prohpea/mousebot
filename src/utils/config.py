@@ -13,9 +13,11 @@ class Config:
         self.offsetY = 3
         
         # --- Aimbot Offsets ---
-        self.aim_offsetX = 0  # Aimbot 灏堢敤 X 鍋忕Щ
-        self.aim_offsetY = 0  # Aimbot 灏堢敤 Y 鍋忕Щ
-        self.aim_type = "head"  # Aimbot 鐬勬簴椤炲瀷: head, body, nearest
+        self.aim_offsetX = 0  # Aimbot 專用 X 偏移
+        self.aim_offsetY = 0  # Aimbot 專用 Y 偏移
+        self.aim_offset_distance_scaling = True  # Scale X/Y offsets by target bbox height for 50m+ accuracy
+        self.aim_offset_ref_height = 64.0  # Reference bbox height (px) where 100% offset applies (~25m on 320x320)
+        self.aim_type = "head"  # Aimbot 瞄準類型: head, body, nearest
 
         self.color = "purple"
         
@@ -49,8 +51,8 @@ class Config:
         
         # --- Custom HSV Settings ---
         self.custom_hsv_min_h = 120  # H min (0-179, synced with OBS-xUDP-Plugin Purple)
-        self.custom_hsv_min_s = 188  # S min (0-255, above dimmed BG S<90 & aligned with outline S>=190)
-        self.custom_hsv_min_v = 115  # V min (0-255, synced with OBS-xUDP-Plugin Purple)
+        self.custom_hsv_min_s = 95  # S min (0-255, retains 50m+ outline & stays above dimmed BG S<90)
+        self.custom_hsv_min_v = 90  # V min (0-255, synced with OBS-xUDP-Plugin Purple 50m+)
         self.custom_hsv_max_h = 160  # H max (0-179)
         self.custom_hsv_max_s = 255  # S max (0-255)
         self.custom_hsv_max_v = 255  # V max (0-255)
@@ -396,7 +398,7 @@ class Config:
         
         # --- Capture Settings ---
         self.udp_ip = detect_local_ipv4()
-        self.udp_port = "1234"
+        self.udp_port = "5000"
         self.teleport_host = ""
         self.teleport_port = "0"
         self.teleport_stream_key = ""
@@ -438,8 +440,13 @@ class Config:
         self.capture_offset_x = 0
         self.capture_offset_y = 0
         
-        # --- Processing FPS Limit ---
+        # --- Processing FPS Limit & Compute / UI Persistence ---
         self.target_fps = 144  # Target processing FPS (limits main loop frequency)
+        self.gpu_opencl_enabled = True
+        self.ui_style = "hud"
+        self.ui_simple_mode = False
+        self.update_skipped_version = ""
+        self.never_update = False
         
         # --- Button Mask Settings ---
         self.button_mask_enabled = False  # 绺介枊闂?
@@ -468,6 +475,8 @@ class Config:
             "offsetY": self.offsetY,
             "aim_offsetX": self.aim_offsetX,
             "aim_offsetY": self.aim_offsetY,
+            "aim_offset_distance_scaling": self.aim_offset_distance_scaling,
+            "aim_offset_ref_height": self.aim_offset_ref_height,
             "aim_type": self.aim_type,
             "color": self.color,
             
@@ -880,14 +889,37 @@ class Config:
             "mouse_lock_main_x": self.mouse_lock_main_x,
             "mouse_lock_main_y": self.mouse_lock_main_y,
             "mouse_lock_sec_x": self.mouse_lock_sec_x,
-            "mouse_lock_sec_y": self.mouse_lock_sec_y
+            "mouse_lock_sec_y": self.mouse_lock_sec_y,
+
+            # Processing / Compute / UI / Updater Persistence
+            "target_fps": self.target_fps,
+            "gpu_opencl_enabled": self.gpu_opencl_enabled,
+            "ui_style": self.ui_style,
+            "ui_simple_mode": self.ui_simple_mode,
+            "update_skipped_version": self.update_skipped_version,
+            "never_update": self.never_update,
         }
     
     def from_dict(self, data):
         """寰炲瓧鍏歌級鍏ラ厤缃?"""
+        if not isinstance(data, dict):
+            return
         for key, value in data.items():
-            if hasattr(self, key):
+            if not isinstance(key, str) or key.startswith("_"):
+                continue
+            if hasattr(self, key) and not callable(getattr(self, key)):
                 setattr(self, key, value)
+        # Clamp custom HSV bounds safely into uint8 OpenCV limits
+        for hk in ("custom_hsv_min_h", "custom_hsv_max_h"):
+            try:
+                setattr(self, hk, max(0, min(179, int(getattr(self, hk, 0)))))
+            except Exception:
+                setattr(self, hk, 120 if "min" in hk else 160)
+        for svk in ("custom_hsv_min_s", "custom_hsv_max_s", "custom_hsv_min_v", "custom_hsv_max_v"):
+            try:
+                setattr(self, svk, max(0, min(255, int(getattr(self, svk, 0)))))
+            except Exception:
+                setattr(self, svk, 95 if "min" in svk else 255)
         serial_mode = str(getattr(self, "serial_port_mode", "Auto")).strip().lower()
         self.serial_port_mode = "Manual" if serial_mode == "manual" else "Auto"
         keyboard_api = str(getattr(self, "keyboard_api", "Follow Mouse API")).strip()
@@ -1344,12 +1376,35 @@ class Config:
                 return str(get_app_dir() / filename)
         return filename
 
+    _save_lock = None
+
     def save_to_file(self, filename="config.json"):
-        """淇濆瓨閰嶇疆鍒版枃浠?"""
+        """淇濆瓨閰嶇疆鍒版枃浠?(atomic write)"""
         try:
+            import tempfile
+            import threading
+
+            if Config._save_lock is None:
+                Config._save_lock = threading.Lock()
             target = self._resolve_config_file(filename)
-            with open(target, 'w') as f:
-                json.dump(self.to_dict(), f, indent=4)
+            target_dir = os.path.dirname(target) or "."
+            os.makedirs(target_dir, exist_ok=True)
+            payload = self.to_dict()
+            with Config._save_lock:
+                fd, tmp_path = tempfile.mkstemp(prefix=".cfg_", suffix=".tmp", dir=target_dir)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, indent=4, ensure_ascii=False)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_path, target)
+                except Exception:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                    raise
         except Exception as e:
             log_print(f"[Config] Failed to save configuration: {e}")
     

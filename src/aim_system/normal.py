@@ -12,9 +12,6 @@ import time
 from src.utils.config import config
 from src.utils.debug_logger import log_move, log_print
 from src.utils.activation import check_aimbot_activation, get_active_aim_fov
-from .Triggerbot import process_triggerbot
-from .RCS import process_rcs, check_y_release
-from .MagnetTrigger import process_magnet_trigger
 from .mode_dispatcher import dispatch as dispatch_aim_mode
 from . import mode_abcurves
 
@@ -990,14 +987,7 @@ def process_normal_mode(
     mode_main = getattr(config, "mode", "ABCurves")
     mode_sec = getattr(config, "mode_sec", "ABCurves")
     
-    # 铏曠悊 RCS锛堟瘡骞€瑾跨敤锛屾鏌ユ槸鍚︽噳瑭插暉鍕曪級
-    rcs_active = process_rcs(
-        tracker.controller,
-        tracker.rcs_pull_speed,
-        tracker.rcs_activation_delay,
-        tracker.rcs_rapid_click_threshold
-    )
-    
+    # RCS / Trigger / Magnet Trigger removed per user configuration (zero per-frame overhead).
     # Evaluate activation every frame so toggle / press-to-enable state updates
     # even when no target is currently detected or inside FOV.
     main_activation_ready = bool(
@@ -1005,17 +995,19 @@ def process_normal_mode(
         and selected_btn is not None
         and check_aimbot_activation(selected_btn, activation_type, is_sec=False)
     )
-    sec_activation_ready = bool(
-        aim_enabled_sec
-        and selected_btn_sec is not None
-        and check_aimbot_activation(selected_btn_sec, activation_type_sec, is_sec=True)
-    )
+    sec_activation_ready = False
+    if aim_enabled_sec and selected_btn_sec is not None:
+        sec_activation_ready = bool(
+            check_aimbot_activation(selected_btn_sec, activation_type_sec, is_sec=True)
+        )
 
-    # 铏曠悊 Aimbot锛堝劒鍏堢礆锛歁ain > Sec锛?
     main_fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
-    sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
     best_target_main = _select_locked_target(targets_main, tracker, main_fov, is_sec=False)
-    best_target_sec = _select_locked_target(targets_sec, tracker, sec_fov, is_sec=True)
+    sec_fov = 0.0
+    best_target_sec = None
+    if aim_enabled_sec and targets_sec:
+        sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
+        best_target_sec = _select_locked_target(targets_sec, tracker, sec_fov, is_sec=True)
 
     if best_target_main:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_main)
@@ -1028,6 +1020,12 @@ def process_normal_mode(
                     aim_type = getattr(config, "aim_type", "head")
                     aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
                     aim_offsetY = float(getattr(config, "aim_offsetY", tracker.aim_offsetY))
+                    if getattr(config, "aim_offset_distance_scaling", True):
+                        scales = getattr(tracker, "_target_offset_scales", None)
+                        if isinstance(scales, dict) and scales:
+                            scale = float(scales.get((round(float(cx), 1), round(float(cy), 1)), 1.0))
+                            aim_offsetX *= scale
+                            aim_offsetY *= scale
                     
                     dx = (cx + aim_offsetX) - center_x
                     dy = (cy + aim_offsetY) - center_y
@@ -1038,14 +1036,6 @@ def process_normal_mode(
                             target_y = cy + aim_offsetY
                             if head_y_min <= target_y <= body_y_max:
                                 dy = 0
-                    
-                    # RCS 鏁村悎
-                    if rcs_active:
-                        dy = 0
-                    
-                    # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
-                    if check_y_release():
-                        dy = 0
                     
                     # 鏍规摎 Main 妯″紡瑾垮害
                     if not getattr(tracker, "_was_main_aimbot_active", False):
@@ -1089,14 +1079,6 @@ def process_normal_mode(
                             if head_y_min <= target_y <= body_y_max:
                                 dy = 0
                     
-                    # RCS 鏁村悎
-                    if rcs_active:
-                        dy = 0
-                    
-                    # Y 杌歌В閹栧姛鑳斤紙宸﹂嵉鎸変笅鏅傝В閹?Y 杌告帶鍒讹級
-                    if check_y_release():
-                        dy = 0
-                    
                     # 鏍规摎 Sec 妯″紡瑾垮害
                     if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=True):
                         _pause_mode_in_stop_fov(tracker, is_sec=True)
@@ -1110,34 +1092,4 @@ def process_normal_mode(
         mode_abcurves.reset(tracker, is_sec=True)
         _clear_stop_fov_state(tracker, is_sec=True)
         _clear_locked_target(tracker, is_sec=True)
-
-    magnet_enabled = bool(getattr(config, "enable_magnet_trigger", False))
-    if magnet_enabled:
-        try:
-            process_magnet_trigger(
-                frame=frame,
-                source_img=trigger_img,
-                tracker=tracker,
-                targets=targets_trigger,
-                center_x=center_x,
-                center_y=center_y,
-                aimbot_active=(main_aimbot_active or sec_aimbot_active),
-            )
-        except Exception as e:
-            log_print("[Magnet Trigger error]", e)
-    else:
-        # 铏曠悊 Triggerbot锛堢劇璜栨槸鍚︽湁鐩閮芥渻鍩疯锛?
-        try:
-            status = process_triggerbot(
-                frame, img, tracker.model, tracker.controller,
-                tracker.tbdelay_min, tracker.tbdelay_max,
-                tracker.tbhold_min, tracker.tbhold_max,
-                tracker.tbcooldown_min, tracker.tbcooldown_max,
-                tracker.tbburst_count_min, tracker.tbburst_count_max,
-                tracker.tbburst_interval_min, tracker.tbburst_interval_max,
-                targets=targets_trigger,
-                source_img=trigger_img,
-            )
-        except Exception as e:
-            log_print("[Triggerbot error]", e)
 

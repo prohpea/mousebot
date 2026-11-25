@@ -422,10 +422,45 @@ class StatusPill(ctk.CTkFrame):
             text_color=_TOKENS["COLOR_TEXT"],
         )
         self.text_label.pack(side="left")
+        self._last_text_state = (display, _TOKENS["COLOR_TEXT"])
+        self._last_dot_color = dot_color
+        self._last_frame_state = (_TOKENS["COLOR_CARD"], _TOKENS["COLOR_CARD_BORDER"])
 
-    def update_value(self, value: str, dot_color: str = None):
+    def update_value(
+        self,
+        value: str,
+        dot_color: str = None,
+        label: str = None,
+        fg_color: str = None,
+        border_color: str = None,
+        text_color: str = None,
+    ):
+        if label is not None:
+            self.label_prefix = label
         self.value_text = str(value)
-        display = f"{self.label_prefix}: {value}" if self.label_prefix else value
-        self.text_label.configure(text=display)
-        if dot_color:
+        display = f"{self.label_prefix}: {value}" if self.label_prefix else str(value)
+
+        next_text_state = (display, text_color or self._last_text_state[1])
+        if next_text_state != self._last_text_state:
+            lbl_cfg = {"text": display}
+            if text_color:
+                lbl_cfg["text_color"] = text_color
+            self.text_label.configure(**lbl_cfg)
+            self._last_text_state = next_text_state
+
+        if dot_color and dot_color != self._last_dot_color:
             self.dot.configure(text_color=dot_color)
+            self._last_dot_color = dot_color
+
+        next_fg = fg_color or self._last_frame_state[0]
+        next_border = border_color or self._last_frame_state[1]
+        next_frame_state = (next_fg, next_border)
+        if next_frame_state != self._last_frame_state:
+            frame_cfg = {}
+            if fg_color:
+                frame_cfg["fg_color"] = fg_color
+            if border_color:
+                frame_cfg["border_color"] = border_color
+            if frame_cfg:
+                self.configure(**frame_cfg)
+            self._last_frame_state = next_frame_state

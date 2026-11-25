@@ -10,9 +10,9 @@ import sys
 import requests
 from packaging import version as pkg_version
 
-# Repository URLs
-GITHUB_REPO = "https://raw.githubusercontent.com/asenyeroao-ct/CVM-colorBot/main"
-GITEE_REPO = "https://gitee.com/asenyeroao-ct/CVM-colorBot/raw/main"
+# Repository URLs (PC2 fork)
+GITHUB_REPO = "https://raw.githubusercontent.com/prohpea/mousebot/main"
+GITEE_REPO = ""
 
 # Timeout for requests (seconds)
 REQUEST_TIMEOUT = 5

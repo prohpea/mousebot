@@ -158,6 +158,8 @@ class AimTracker:
             "MASK": False,
             "Detection": False,
         }
+        self._last_udp_frame_seq = 0
+        self._target_offset_scales = {}
         self._current_masked_buttons = set()
         self.move_queue = queue.Queue(maxsize=50)
         self._move_batch_size = 4
@@ -223,38 +225,16 @@ class AimTracker:
         self._close_raw_stream_windows()
 
     def _sleep_precise(self, seconds: float):
-        """High-resolution sleep so 1 kHz ABCurves steps keep ~1 ms pacing on Windows."""
+        """High-resolution sleep (assumes 1ms timer period is scoped on _move_thread)."""
         if seconds <= 0:
             return
-        winmm = None
-        if sys.platform == "win32":
-            winmm = getattr(self, "_winmm", None)
-            if winmm is None:
-                try:
-                    import ctypes
-                    winmm = ctypes.windll.winmm
-                except Exception:
-                    winmm = False
-                self._winmm = winmm
-            if winmm:
-                try:
-                    winmm.timeBeginPeriod(1)
-                except Exception:
-                    winmm = None
-        try:
-            target_end = time.perf_counter() + seconds
-            if seconds > 0.002:
-                time.sleep(seconds - 0.0015)
-            while time.perf_counter() < target_end:
-                remaining = target_end - time.perf_counter()
-                if remaining > 0.0005:
-                    time.sleep(0)
-        finally:
-            if winmm:
-                try:
-                    winmm.timeEndPeriod(1)
-                except Exception:
-                    pass
+        target_end = time.perf_counter() + seconds
+        if seconds > 0.002:
+            time.sleep(seconds - 0.0015)
+        while time.perf_counter() < target_end:
+            remaining = target_end - time.perf_counter()
+            if remaining > 0.0005:
+                time.sleep(0)
 
     def begin_live_aim_session(self, mode_name: str, init_dx_px: float = 0.0, init_dy_px: float = 0.0) -> None:
         with self._live_path_lock:
@@ -296,14 +276,33 @@ class AimTracker:
             )
 
     def _process_move_queue(self):
-        """
-        铏曠悊绉诲嫊闅婂垪
-        
-        鍦ㄥ緦鍙扮窔绋嬩腑鎸佺簩寰炵Щ鍕曢殜鍒椾腑鐛插彇绉诲嫊鎸囦护涓﹀煼琛屻€?        鏀寔寤堕伈鎺у埗锛岀⒑淇濈Щ鍕曟搷浣滅殑骞虫粦鍩疯銆?        
-        閫欐槸涓€鍊嬬劇闄愬惊鐠帮紝鐩村埌绶氱▼琚祩姝€?        """
-        while not self._stop_event.is_set() or not self.move_queue.empty():
+        """Move queue worker with 1ms Windows timer period scoped once per thread lifecycle."""
+        winmm = None
+        if sys.platform == "win32":
             try:
-                item = self.move_queue.get(timeout=0.1)
+                import ctypes
+                winmm = ctypes.windll.winmm
+                winmm.timeBeginPeriod(1)
+            except Exception:
+                winmm = None
+        try:
+            self._run_move_queue_loop()
+        finally:
+            if winmm is not None:
+                try:
+                    winmm.timeEndPeriod(1)
+                except Exception:
+                    pass
+
+    def _run_move_queue_loop(self):
+        pending_exact_item = None
+        while not self._stop_event.is_set() or pending_exact_item is not None or not self.move_queue.empty():
+            try:
+                if pending_exact_item is not None:
+                    item = pending_exact_item
+                    pending_exact_item = None
+                else:
+                    item = self.move_queue.get(timeout=0.1)
                 if isinstance(item, tuple) and len(item) >= 4:
                     dx, dy, delay, exact_step = item[0], item[1], item[2], bool(item[3])
                 else:
@@ -326,11 +325,8 @@ class AimTracker:
                         except queue.Empty:
                             break
                         if isinstance(nxt, tuple) and len(nxt) >= 4 and bool(nxt[3]):
-                            # Do not merge exact-step ABCurves items into a legacy batch.
-                            try:
-                                self.move_queue.put_nowait(nxt)
-                            except queue.Full:
-                                pass
+                            # Hold exact-step ABCurves item for immediate next iteration without tail re-enqueue.
+                            pending_exact_item = nxt
                             break
                         pending.append((nxt[0], nxt[1], nxt[2]))
                     max_batch = max(
@@ -384,17 +380,17 @@ class AimTracker:
 
     def _track_loop(self):
         """
-        涓昏拷韫ゅ惊鐠?        
-        鍦ㄥ緦鍙扮窔绋嬩腑鎸佺簩鍩疯杩借工鎿嶄綔锛屾帶鍒跺箑鐜囦互閬斿埌鐩 FPS銆?        姣忔寰挵瑾跨敤 track_once() 閫茶涓€娆″畬鏁寸殑杩借工铏曠悊銆?        """
+        主追蹤循環 (high-resolution perf_counter pacing; event-driven sync on UDP).
+        """
         while not self._stop_event.is_set():
             period = 1.0 / float(self._target_fps)
-            start = time.time()
+            start = time.perf_counter()
             try:
                 self.track_once()
             except Exception as e:
                 print("[Track error]", e)
-            elapsed = time.time() - start
-            to_sleep = max(0, period - elapsed)
+            elapsed = time.perf_counter() - start
+            to_sleep = period - elapsed
             if to_sleep > 0:
                 time.sleep(to_sleep)
     
@@ -433,9 +429,7 @@ class AimTracker:
         
         aimbot_running = (
             getattr(config, "enableaim", False) or 
-            getattr(config, "enableaim_sec", False) or 
-            getattr(config, "enabletb", False) or
-            getattr(config, "enable_magnet_trigger", False)
+            getattr(config, "enableaim_sec", False)
         )
         
         if not aimbot_running:
@@ -596,21 +590,34 @@ class AimTracker:
         5. 铏曠悊妾㈡脯绲愭灉涓︿及绠楅牠閮ㄤ綅缃?        6. 绻＝ FOV 鍜岀洰妯欐瑷?        7. 鍩疯鐬勬簴鍜岀Щ鍕曢倧杓?        8. 椤ず妾㈡脯绲愭灉绐楀彛
         """
         if not self.app.capture.is_connected():
+            self._last_udp_frame_seq = 0
             self._close_raw_stream_windows()
             return
 
-        # Button Mask 绠＄悊
+        # Button Mask 管理
         self._handle_button_mask()
         
-        # Mouse Lock 绠＄悊鍣?tick
+        # Mouse Lock 管理器 tick
         try:
             from src.utils.mouse import tick_movement_lock_manager
             tick_movement_lock_manager()
         except Exception:
             pass
 
-        # 浣跨敤 CaptureService 璁€鍙?BGR 骞€
-        raw_bgr_img = self.app.capture.read_frame(apply_fov=False)
+        # 读取 BGR 帧 (UDP 模式按 frame_seq 同步去重，避免重复处理旧帧与相位抖动)
+        capture_mode = getattr(self.app.capture, "mode", None)
+        if capture_mode == "UDP" and hasattr(self.app.capture, "read_udp_frame_with_seq"):
+            wait_budget = min(0.012, 1.0 / max(1.0, float(getattr(self, "_target_fps", 144.0))))
+            last_seq = getattr(self, "_last_udp_frame_seq", 0)
+            raw_bgr_img, udp_seq = self.app.capture.read_udp_frame_with_seq(
+                last_seq=last_seq,
+                wait_timeout=wait_budget,
+                apply_fov=False,
+            )
+            if raw_bgr_img is not None and udp_seq > 0:
+                self._last_udp_frame_seq = udp_seq
+        else:
+            raw_bgr_img = self.app.capture.read_frame(apply_fov=False)
         if raw_bgr_img is None:
             # Keep OpenCV HighGUI event loop responsive while waiting for frames.
             if (getattr(config, "show_opencv_windows", True) and
@@ -651,18 +658,46 @@ class AimTracker:
             print(f"[Track] Invalid frame dimensions: {w}x{h}")
             return
         frame = FrameInfo(w, h)
-        # Keep an untouched frame for trigger detection to avoid UI overlays affecting trigger matches.
-        trigger_source_img = bgr_img.copy()
+        draw_overlays = bool(
+            getattr(config, "show_opencv_windows", False)
+            and getattr(config, "show_opencv_detection", False)
+        )
+
+        need_opencv_pump = False
+        show_mask_win = bool(
+            getattr(config, "show_opencv_windows", False)
+            and getattr(config, "show_opencv_mask", False)
+        )
+        # Dynamic FOV ROI crop (skip only when full-frame MASK debug window is open)
+        det_img = bgr_img
+        roi_x0 = 0
+        roi_y0 = 0
+        if not show_mask_win:
+            try:
+                from src.utils.activation import get_active_aim_fov
+
+                active_fov = float(get_active_aim_fov(is_sec=False, fallback=getattr(config, "fovsize", 48)))
+                half_roi = int(math.ceil(active_fov + max(48.0, active_fov * 0.45)))
+                if 2 * half_roi < min(w, h) - 16:
+                    cx0, cy0 = w // 2, h // 2
+                    roi_x0 = max(0, cx0 - half_roi)
+                    roi_y0 = max(0, cy0 - half_roi)
+                    rx1 = min(w, cx0 + half_roi)
+                    ry1 = min(h, cy0 + half_roi)
+                    if (rx1 - roi_x0) >= 32 and (ry1 - roi_y0) >= 32:
+                        det_img = bgr_img[roi_y0:ry1, roi_x0:rx1]
+            except Exception:
+                det_img = bgr_img
+                roi_x0 = 0
+                roi_y0 = 0
 
         try:
-            detection_results, mask = perform_detection(self.model, bgr_img)
-            # 椤ず MASK 瑕栫獥锛堝鏋滃暉鐢級
-            if (getattr(config, "show_opencv_windows", True) and 
-                getattr(config, "show_opencv_mask", True) and 
-                mask is not None):
+            detection_results, mask = perform_detection(self.model, det_img, roi_offset=(roi_x0, roi_y0))
+            # 显示 MASK 视窗（如果启用）
+            if show_mask_win and mask is not None:
                 cv2.imshow("MASK", mask)
                 self._debug_window_visible["MASK"] = True
-                cv2.waitKey(1)
+                need_opencv_pump = True
             elif self._debug_window_visible.get("MASK", False):
                 try:
                     cv2.destroyWindow("MASK")
@@ -673,13 +708,12 @@ class AimTracker:
             print("[perform_detection error]", e)
             detection_results = []
             mask = None
-            # 鍗充娇妾㈡脯澶辨晽锛屼篃椤ず鍘熷鍦栧儚锛堝鏋滃暉鐢級
             if (getattr(config, "show_opencv_windows", True) and 
                 getattr(config, "show_opencv_detection", True)):
                 try:
                     cv2.imshow("Detection", bgr_img)
-                    cv2.waitKey(1)
-                except:
+                    need_opencv_pump = True
+                except Exception:
                     pass
 
         targets = []
@@ -709,8 +743,9 @@ class AimTracker:
                         continue
                     x1, y1 = int(x), int(y)
                     x2, y2 = int(x + w), int(y + h)
-                    # Dessin corps
-                    self._draw_body(bgr_img, x1, y1, x2, y2, conf)
+                    # Only draw overlay boxes when OpenCV Detection window is enabled
+                    if draw_overlays:
+                        self._draw_body(bgr_img, x1, y1, x2, y2, conf)
                     
                     # 瑷堢畻 body 鐨勪腑蹇冮粸鍜?Y 绡勫湇
                     body_cx = (x1 + x2) / 2.0
@@ -718,7 +753,9 @@ class AimTracker:
                     body_y_min = y1  # body 鐨?Y 杌告渶楂樺€硷紙鍦栧儚搴ф绯讳腑 y 瓒婂皬瓒婇潬涓婏級
                     body_y_max = y2  # body 鐨?Y 杌告渶浣庡€?                    
                     # Estimation t锚tes dans la bbox
-                    head_positions = self._estimate_head_positions(x1, y1, x2, y2, bgr_img, mask)
+                    head_positions = self._estimate_head_positions(
+                        x1, y1, x2, y2, bgr_img, mask, roi_offset=(roi_x0, roi_y0)
+                    )
                     
                     if aim_type == "body":
                         # Body 妯″紡锛氫娇鐢?body 涓績榛?
@@ -729,14 +766,15 @@ class AimTracker:
                     else:
                         # Head 鎴?Nearest 妯″紡锛氫娇鐢?head 浣嶇疆
                         for head_cx, head_cy, bbox in head_positions:
-                            self._draw_head_bbox(bgr_img, head_cx, head_cy)
+                            if draw_overlays:
+                                self._draw_head_bbox(bgr_img, head_cx, head_cy)
                             d = math.hypot(head_cx - frame.xres / 2.0, head_cy - frame.yres / 2.0)
                             
                             # 瑷堢畻 head 鐨?Y 绡勫湇锛堢敤鏂?nearest 妯″紡锛?
                             # head_y_min 鏄?head 鐨勬渶楂?Y 鍊硷紙鏈€灏忕殑 y锛屽湪鍦栧儚搴ф绯讳腑锛?
                             # 浣跨敤 head_cy 娓涘幓涓€鍊嬩及绠楃殑 head 鍗婇珮锛堢磩 15 鍍忕礌锛?
-                            estimated_head_height = 30  # 浼扮畻 head 楂樺害
-                            head_y_min = head_cy - estimated_head_height // 2  # head 鏈€楂?Y 鍊?                            
+                            estimated_head_height = max(8, int(round(int(h) * 0.35)))
+                            head_y_min = head_cy - estimated_head_height // 2  # head 最高 Y 值
                             if aim_type == "nearest":
                                 # Nearest 妯″紡锛氫繚瀛?Y 绡勫湇淇℃伅
                                 target_tuple = (head_cx, head_cy, d, head_y_min, body_y_max)
@@ -755,44 +793,76 @@ class AimTracker:
             self.stable_candidate = self._target_smoother.stable_candidate
             self.stable_count = self._target_smoother.stable_count
 
-        targets_main = list(targets_all)
-        targets_sec = list(targets_all)
-        if targets_all and target_bboxes:
-            frame_shape = bgr_img.shape
+        targets_main = targets_all
+        if targets_all and target_bboxes and getattr(config, "anti_smoke_enabled", False):
             targets_main = self._filter_targets_with_anti_smoke(
-                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector
-            )
-            targets_sec = self._filter_targets_with_anti_smoke(
-                targets_all, target_bboxes, mask, frame_shape, self.anti_smoke_detector_sec
+                targets_all, target_bboxes, mask, bgr_img.shape, self.anti_smoke_detector
             )
 
-        # FOVs une fois par frame
-        try:
-            self._draw_fovs(bgr_img, frame)
-        except Exception:
-            pass
+        # FOVs once per frame (only when OpenCV Detection window is enabled)
+        if draw_overlays:
+            try:
+                self._draw_fovs(bgr_img, frame)
+            except Exception:
+                pass
+
+        # Compute per-target distance scale from bbox height (1.0 at <=25m / h>=64px, gentle 0.72..1.0 curve at 50m+ so aim stays on head, never drops to chest)
+        self._target_offset_scales = {}
+        if getattr(config, "aim_offset_distance_scaling", True) and target_bboxes:
+            ref_h = max(16.0, float(getattr(config, "aim_offset_ref_height", 64.0)))
+            for (tx, ty), bbox in target_bboxes:
+                bh = float(bbox[3]) if len(bbox) >= 4 else ref_h
+                ratio = min(1.0, max(0.0, bh / ref_h))
+                scale = 0.72 + 0.28 * ratio
+                self._target_offset_scales[(round(float(tx), 1), round(float(ty), 1))] = scale
+            if use_temporal_smoothing and targets_all:
+                for tgt in targets_all:
+                    sx, sy = float(tgt[0]), float(tgt[1])
+                    nearest_item = min(
+                        target_bboxes,
+                        key=lambda item: (float(item[0][0]) - sx) ** 2 + (float(item[0][1]) - sy) ** 2,
+                    )
+                    bh = float(nearest_item[1][3]) if len(nearest_item[1]) >= 4 else ref_h
+                    ratio = min(1.0, max(0.0, bh / ref_h))
+                    self._target_offset_scales[(round(sx, 1), round(sy, 1))] = 0.72 + 0.28 * ratio
 
         try:
             self._aim_and_move(
                 targets_main,
                 frame,
                 bgr_img,
-                targets_sec=targets_sec,
-                targets_trigger=targets_all,
-                trigger_img=trigger_source_img,
+                targets_sec=None,
             )
         except Exception as e:
             print("[Aim error]", e)
 
-        # 椤ず Detection 瑕栫獥锛堟牴鎿氳ō缃級
+        # 显示 Detection 视窗（根据设置）
         if (getattr(config, "show_opencv_windows", True) and 
             getattr(config, "show_opencv_detection", True)):
             try:
-                # 鍎寲绻＝锛氭坊鍔犳洿澶氳瑕轰俊鎭?
                 display_img = self._draw_enhanced_detection(bgr_img.copy(), targets_all, frame)
+                if roi_x0 > 0 or roi_y0 > 0:
+                    roi_h, roi_w = det_img.shape[:2]
+                    cv2.rectangle(
+                        display_img,
+                        (roi_x0, roi_y0),
+                        (roi_x0 + roi_w - 1, roi_y0 + roi_h - 1),
+                        (255, 220, 0),
+                        1,
+                    )
+                    cv2.putText(
+                        display_img,
+                        f"ROI {roi_w}x{roi_h}",
+                        (roi_x0 + 4, max(12, roi_y0 + 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.38,
+                        (255, 220, 0),
+                        1,
+                        cv2.LINE_AA,
+                    )
                 cv2.imshow("Detection", display_img)
                 self._debug_window_visible["Detection"] = True
-                cv2.waitKey(1)
+                need_opencv_pump = True
             except Exception as e:
                 print(f"[OpenCV display error] {e}")
         elif self._debug_window_visible.get("Detection", False):
@@ -801,6 +871,13 @@ class AimTracker:
             except Exception:
                 pass
             self._debug_window_visible["Detection"] = False
+
+        # Consolidate OpenCV HighGUI event pump to at most once per frame
+        if need_opencv_pump:
+            try:
+                cv2.waitKey(1)
+            except Exception:
+                pass
     
     def _draw_enhanced_detection(self, img, targets, frame):
         """
@@ -1002,7 +1079,7 @@ class AimTracker:
         # 鍏у湀锛堢磪鑹诧級
         cv2.circle(img, (int(headx), int(heady)), 3, (0, 0, 255), -1)
 
-    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None):
+    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None, roi_offset=(0, 0)):
         """
         Estimate head position from body bbox geometry only.
         """
@@ -1030,20 +1107,21 @@ class AimTracker:
         base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.22))
         heady_base = float(y1) + float(height) * base_head_ratio + effective_height * (offset_y / 100.0)
 
-        # Optional one-pass refinement from the already computed global mask.
-        # Use only the upper body band and median X to reduce left/right arm jitter.
+        # Optional one-pass refinement from the already computed mask.
+        # Convert full-frame bbox into mask-local coords when dynamic ROI crop is active.
         if mask is not None:
-            mx1 = max(0, min(int(x1), mask.shape[1] - 1))
-            my1 = max(0, min(int(y1), mask.shape[0] - 1))
-            mx2 = max(mx1 + 1, min(int(x2), mask.shape[1]))
-            my2 = max(my1 + 1, min(int(y2), mask.shape[0]))
+            rox, roy = int(roi_offset[0]), int(roi_offset[1])
+            mx1 = max(0, min(int(x1) - rox, mask.shape[1] - 1))
+            my1 = max(0, min(int(y1) - roy, mask.shape[0] - 1))
+            mx2 = max(mx1 + 1, min(int(x2) - rox, mask.shape[1]))
+            my2 = max(my1 + 1, min(int(y2) - roy, mask.shape[0]))
             upper_h = max(6, int((my2 - my1) * 0.42))
             upper_y2 = min(my2, my1 + upper_h)
             upper_mask = mask[my1:upper_y2, mx1:mx2]
             if upper_mask.size > 0:
                 ys, xs = np.where(upper_mask > 0)
                 if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
-                    headx_base = float(mx1 + int(np.median(xs)))
+                    headx_base = float(rox + mx1 + int(np.median(xs)))
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
@@ -1055,7 +1133,8 @@ class AimTracker:
         if x2_roi <= x1_roi or y2_roi <= y1_roi:
             return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
-        cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
+        if getattr(config, "show_opencv_windows", False) and getattr(config, "show_opencv_detection", False):
+            cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
 
         return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
 

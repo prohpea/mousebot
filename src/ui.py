@@ -25,10 +25,69 @@ from src.utils.debug_logger import get_recent_logs, clear_logs, get_log_count, l
 from src.utils.mouse.keycodes import to_vk_code
 from src.utils.updater import get_update_checker
 from src.ui_hsv_preview import HsvPreviewWindow
+from src.ui_components import StatusPill, apply_theme as apply_component_theme
 from src.utils.i18n import heading, i18n, t
 
-# --- Theme constants (霓虹暗色主題 + Neon dark inspired by reference) ---
+# --- Theme constants (Cyberpunk Telemetry HUD + Esports Bento + Classic + Neon) ---
+UI_STYLE_ORDER = ("hud", "bento", "classic", "neon")
+
 THEME_PRESETS = {
+    "hud": {
+        "COLOR_BG": "#06080B",
+        "COLOR_SIDEBAR": "#080B10",
+        "COLOR_SURFACE": "#090D13",
+        "COLOR_ACCENT": "#00F0FF",
+        "COLOR_ACCENT_HOVER": "#5CF6FF",
+        "COLOR_TEXT": "#E2F1F8",
+        "COLOR_TEXT_DIM": "#64748B",
+        "COLOR_BORDER": "#15232D",
+        "COLOR_DANGER": "#FF3B5C",
+        "COLOR_SUCCESS": "#10B981",
+        "COLOR_WARNING": "#FFB800",
+        "COLOR_NAV_ACTIVE_BG": "#0A1D26",
+        "COLOR_NAV_HOVER_BG": "#0D161F",
+        "COLOR_MENU_GHOST": "#3B5060",
+        "FONT_MAIN": ("Consolas", 11),
+        "FONT_BOLD": ("Consolas", 11, "bold"),
+        "FONT_TITLE": ("Consolas", 16, "bold"),
+        "COLOR_HARDWARE_PANEL": "#0A0F16",
+        "COLOR_HARDWARE_PANEL_BORDER": "#162630",
+        "COLOR_HARDWARE_INPUT_BG": "#06090D",
+        "COLOR_HARDWARE_INPUT_BORDER": "#1C3444",
+        "COLOR_HARDWARE_INPUT_HOVER": "#00F0FF",
+        "COLOR_HARDWARE_BUTTON_BG": "#0E1A24",
+        "COLOR_HARDWARE_BUTTON_HOVER": "#142736",
+        "COLOR_HARDWARE_BUTTON_TEXT": "#E2F1F8",
+        "COLOR_HARDWARE_DROPDOWN_BG": "#080C12",
+    },
+    "bento": {
+        "COLOR_BG": "#0F131C",
+        "COLOR_SIDEBAR": "#111622",
+        "COLOR_SURFACE": "#151B28",
+        "COLOR_ACCENT": "#3B82F6",
+        "COLOR_ACCENT_HOVER": "#60A5FA",
+        "COLOR_TEXT": "#E2E8F0",
+        "COLOR_TEXT_DIM": "#94A3B8",
+        "COLOR_BORDER": "#232D42",
+        "COLOR_DANGER": "#F43F5E",
+        "COLOR_SUCCESS": "#10B981",
+        "COLOR_WARNING": "#F59E0B",
+        "COLOR_NAV_ACTIVE_BG": "#19263D",
+        "COLOR_NAV_HOVER_BG": "#162033",
+        "COLOR_MENU_GHOST": "#64748B",
+        "FONT_MAIN": ("Segoe UI", 11),
+        "FONT_BOLD": ("Segoe UI", 11, "bold"),
+        "FONT_TITLE": ("Segoe UI", 18, "bold"),
+        "COLOR_HARDWARE_PANEL": "#182030",
+        "COLOR_HARDWARE_PANEL_BORDER": "#28344D",
+        "COLOR_HARDWARE_INPUT_BG": "#121826",
+        "COLOR_HARDWARE_INPUT_BORDER": "#2B3954",
+        "COLOR_HARDWARE_INPUT_HOVER": "#36486B",
+        "COLOR_HARDWARE_BUTTON_BG": "#1D273B",
+        "COLOR_HARDWARE_BUTTON_HOVER": "#26344E",
+        "COLOR_HARDWARE_BUTTON_TEXT": "#E2E8F0",
+        "COLOR_HARDWARE_DROPDOWN_BG": "#151C2B",
+    },
     "neon": {
         "COLOR_BG": "#040B16",
         "COLOR_SIDEBAR": "#030A14",
@@ -47,6 +106,15 @@ THEME_PRESETS = {
         "FONT_MAIN": ("Consolas", 11),
         "FONT_BOLD": ("Consolas", 11, "bold"),
         "FONT_TITLE": ("Consolas", 18, "bold"),
+        "COLOR_HARDWARE_PANEL": "#08172B",
+        "COLOR_HARDWARE_PANEL_BORDER": "#0E2D4C",
+        "COLOR_HARDWARE_INPUT_BG": "#051020",
+        "COLOR_HARDWARE_INPUT_BORDER": "#143A5E",
+        "COLOR_HARDWARE_INPUT_HOVER": "#1C4F7E",
+        "COLOR_HARDWARE_BUTTON_BG": "#0B203B",
+        "COLOR_HARDWARE_BUTTON_HOVER": "#123158",
+        "COLOR_HARDWARE_BUTTON_TEXT": "#B9D8FF",
+        "COLOR_HARDWARE_DROPDOWN_BG": "#061325",
     },
     "classic": {
         "COLOR_BG": "#121212",
@@ -66,28 +134,37 @@ THEME_PRESETS = {
         "FONT_MAIN": ("Roboto", 11),
         "FONT_BOLD": ("Roboto", 11, "bold"),
         "FONT_TITLE": ("Roboto", 18, "bold"),
+        "COLOR_HARDWARE_PANEL": "#202020",
+        "COLOR_HARDWARE_PANEL_BORDER": "#2E2E2E",
+        "COLOR_HARDWARE_INPUT_BG": "#2A2A2A",
+        "COLOR_HARDWARE_INPUT_BORDER": "#3A3A3A",
+        "COLOR_HARDWARE_INPUT_HOVER": "#454545",
+        "COLOR_HARDWARE_BUTTON_BG": "#262626",
+        "COLOR_HARDWARE_BUTTON_HOVER": "#343434",
+        "COLOR_HARDWARE_BUTTON_TEXT": "#F2F2F2",
+        "COLOR_HARDWARE_DROPDOWN_BG": "#242424",
     },
 }
 
 
 def _apply_theme_preset(theme_name):
-    theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["classic"])
+    theme = THEME_PRESETS.get(theme_name, THEME_PRESETS["hud"])
     for key, value in theme.items():
         globals()[key] = value
+    apply_component_theme({
+        "COLOR_CARD": theme["COLOR_SURFACE"],
+        "COLOR_CARD_BORDER": theme["COLOR_BORDER"],
+        "COLOR_CARD_HEADER": theme["COLOR_HARDWARE_PANEL"],
+        "COLOR_INPUT": theme["COLOR_HARDWARE_INPUT_BG"],
+        "COLOR_ACCENT": theme["COLOR_ACCENT"],
+        "COLOR_ACCENT_HOVER": theme["COLOR_ACCENT_HOVER"],
+        "COLOR_BADGE_BG": theme["COLOR_HARDWARE_PANEL"],
+        "COLOR_TEXT": theme["COLOR_TEXT"],
+        "COLOR_TEXT_DIM": theme["COLOR_TEXT_DIM"],
+    })
 
 
-_apply_theme_preset("classic")
-
-# Hardware API 專用 accent colors / 跟主題一致的灰階層次
-COLOR_HARDWARE_PANEL = "#202020"
-COLOR_HARDWARE_PANEL_BORDER = "#2E2E2E"
-COLOR_HARDWARE_INPUT_BG = "#2A2A2A"
-COLOR_HARDWARE_INPUT_BORDER = "#3A3A3A"
-COLOR_HARDWARE_INPUT_HOVER = "#454545"
-COLOR_HARDWARE_BUTTON_BG = "#262626"
-COLOR_HARDWARE_BUTTON_HOVER = "#343434"
-COLOR_HARDWARE_BUTTON_TEXT = "#F2F2F2"
-COLOR_HARDWARE_DROPDOWN_BG = "#242424"
+_apply_theme_preset("hud")
 
 CVM_CONFIG_COMMENT_KEY = "_comment"
 CVM_CONFIG_COMMENT_VALUE = "This is CVM colorBot config."
@@ -226,16 +303,52 @@ TRIGGER_STRAFE_MODE_DISPLAY = {
 AIM_MODE_DISPLAY_TO_VALUE = {
     "ABCurves": "ABCurves",
     "Normal": "Normal",
-    "Flick": "Flick",
-    "Silent": "Silent",
-    "NCAF": "NCAF",
     "WindMouse": "WindMouse",
-    "Bezier": "Bezier",
-    "PID Controller ( RISK )": "PID",
 }
 
 AIM_MODE_VALUE_TO_DISPLAY = {value: key for key, value in AIM_MODE_DISPLAY_TO_VALUE.items()}
 AIM_MODE_OPTIONS = list(AIM_MODE_DISPLAY_TO_VALUE.keys())
+
+# Quick Profile whitelist: switches ONLY Main Aim parameters, preserving Hardware/Capture, arm state & OBS-synced HSV.
+QUICK_PROFILE_AIM_KEYS = frozenset({
+    "mode",
+    "fovsize",
+    "ads_fov_enabled",
+    "ads_fovsize",
+    "deadzone_fov_enabled",
+    "deadzone_fovsize",
+    "deadzone_stop_delay_min_ms",
+    "deadzone_stop_delay_max_ms",
+    "aim_type",
+    "aim_offsetX",
+    "aim_offsetY",
+    "aim_offset_distance_scaling",
+    "aim_offset_ref_height",
+    "selected_mouse_button",
+    "aimbot_activation_type",
+    "ads_key",
+    "ads_key_type",
+    "in_game_sens",
+    "mouse_dpi",
+    "normal_x_speed",
+    "normal_y_speed",
+    "normalsmooth",
+    "normalsmoothfov",
+    "abcurves_x_speed",
+    "abcurves_y_speed",
+    "abcurves_max_step",
+    "abcurves_seed",
+    "abcurves_commitment_ms",
+    "wm_gravity",
+    "wm_wind",
+    "wm_max_step",
+    "wm_min_step",
+    "wm_min_delay",
+    "wm_max_delay",
+    "wm_distance_threshold",
+    "aim_latest_frame_priority",
+    "move_queue_merge_batch",
+})
 
 class ViewerApp(ctk.CTk):
     """主應用程式 UI (Ultra Minimalist)。"""
@@ -250,9 +363,48 @@ class ViewerApp(ctk.CTk):
         self._hicon_big = None
         self._hicon_small = None
         self._apply_window_icon()
-        self._legacy_ui_mode = bool(getattr(config, "legacy_ui_mode", True))
+        raw_ui_style = str(getattr(config, "ui_style", "") or "").strip().lower()
+        if raw_ui_style in THEME_PRESETS:
+            self._ui_style = raw_ui_style
+        else:
+            self._ui_style = "hud"
+        # RCS, Trigger, Magnet Trigger, Sec Aimbot & Anti-Smoke disabled for PC2 minimal aim setup
+        config.enabletb = False
+        config.enable_magnet_trigger = False
+        config.enablercs = False
+        config.enableaim_sec = False
+        config.anti_smoke_enabled = False
+        config.anti_smoke_enabled_sec = False
+        if str(getattr(config, "mode", "ABCurves")) not in AIM_MODE_VALUE_TO_DISPLAY:
+            config.mode = "ABCurves"
+        if not hasattr(config, "gpu_opencl_enabled"):
+            config.gpu_opencl_enabled = True
+        self._legacy_ui_mode = self._ui_style == "classic"
+        self._ui_simple_mode = bool(getattr(config, "ui_simple_mode", False))
+        self._active_quick_profile = None
+        self._quick_profile_buttons = {}
+        self._hud_fps_history = [0.0] * 40
+        self.hud_nav_bar = None
+        self.hud_quick_bar = None
+        self.hud_quick_bar_host = None
+        self.hud_stream_metric = None
+        self.hud_decode_metric = None
+        self.hud_hw_metric = None
+        self.hud_toggle_metric = None
+        self.hud_status_box = None
+        self.hud_status_title = None
+        self.hud_status_sub = None
+        self.hud_status_dot = None
+        self.hud_fps_canvas = None
+        self.hud_fps_graph_val = None
+        self.hud_hsv_summary_labels = {}
+        self.header_fps_pill = None
+        self.header_hw_pill = None
+        self.header_toggle_pill = None
+        self.mode_lite_btn = None
+        self.mode_pro_btn = None
         config.language = i18n.set_language(getattr(config, "language", "en"))
-        _apply_theme_preset("classic" if self._legacy_ui_mode else "neon")
+        _apply_theme_preset(self._ui_style)
         
         # 注意: 若啟用 overrideredirect(True)，系統框線與 taskbar 行為可能不同
         # If you need normal window decorations, keep it commented out.
@@ -391,29 +543,405 @@ class ViewerApp(ctk.CTk):
         self.after(50, self._update_mouse_input_debug)  # 更新滑鼠輸入監控 Mouse input debug
         self.after(100, self._update_debug_log)  # 更新 Debug log
 
+    def _is_hud_mode(self):
+        return getattr(self, "_ui_style", "hud") == "hud"
+
+    def _is_bento_mode(self):
+        return getattr(self, "_ui_style", "hud") == "bento"
+
+    def _uses_two_col_grid(self):
+        return self._is_hud_mode() or self._is_bento_mode()
+
     def _build_layout(self):
-        """建立主版面：title bar + sidebar + content area。"""
+        """建立主版面：title bar + (HUD nav/quick bars) + sidebar + content area。"""
+        self._hud_ui_cache = {}
+        self._hud_spark_items = None
+        self._hud_spark_last_points = None
+        self._hud_spark_last_draw = 0.0
+        self._last_hw_ui_sig = None
+        self._last_toggle_indicator_sig = None
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        
+        if self._is_hud_mode():
+            self.grid_rowconfigure(0, weight=0)
+            self.grid_rowconfigure(1, weight=0)
+            self.grid_rowconfigure(2, weight=0)
+            self.grid_rowconfigure(3, weight=1)
+        else:
+            self.grid_rowconfigure(0, weight=0)
+            self.grid_rowconfigure(1, weight=1)
+            self.grid_rowconfigure(2, weight=0)
+            self.grid_rowconfigure(3, weight=0)
+
         # 標題列 Title bar
         self._build_title_bar()
-        
-        # 側欄導覽 Sidebar
+
+        if self._is_hud_mode():
+            self._build_hud_nav_bar()
+            self._build_hud_quick_profile_bar()
+
+        # 側欄導覽 / HUD Telemetry Cockpit
         self._build_sidebar()
-        
+
         # 內容區 Content frame
+        content_row = 3 if self._is_hud_mode() else 1
+        content_padx = 16 if self._is_hud_mode() else (20 if self._is_bento_mode() else 24)
+        content_pady = 14 if self._is_hud_mode() else (16 if self._is_bento_mode() else 20)
         self.content_frame = ctk.CTkScrollableFrame(
             self, fg_color="transparent",
             scrollbar_button_color=COLOR_BORDER,
             scrollbar_button_hover_color=COLOR_ACCENT
         )
-        self.content_frame.grid(row=1, column=1, sticky="nsew", padx=24, pady=20)
-        
+        self.content_frame.grid(row=content_row, column=1, sticky="nsew", padx=content_padx, pady=content_pady)
+
         self._show_general_tab()
+        self._update_header_status_pills()
 
     def _build_title_bar(self):
         """建立標題列 (title bar)。"""
+        self.header_fps_pill = None
+        self.header_hw_pill = None
+        self.header_toggle_pill = None
+        self.mode_lite_btn = None
+        self.mode_pro_btn = None
+        self.hud_stream_metric = None
+        self.hud_decode_metric = None
+        self.hud_hw_metric = None
+        self.hud_toggle_metric = None
+
+        if self._is_hud_mode():
+            self.title_bar = ctk.CTkFrame(self, height=40, fg_color="#090D12", corner_radius=0)
+            self.title_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+            self.title_bar.pack_propagate(False)
+
+            ctk.CTkFrame(self.title_bar, height=1, fg_color="#162630", corner_radius=0).pack(side="bottom", fill="x")
+
+            bar_inner = ctk.CTkFrame(self.title_bar, fg_color="transparent")
+            bar_inner.pack(fill="both", expand=True, padx=12, pady=4)
+
+            # Left: Brand HUD Tag
+            title_container = ctk.CTkFrame(bar_inner, fg_color="transparent")
+            title_container.pack(side="left", fill="y")
+
+            logo_path = str(get_bundle_dir() / "cvm.jpg")
+            self.logo_lbl = None
+            if os.path.exists(logo_path):
+                try:
+                    logo_image = Image.open(logo_path)
+                    logo_image = logo_image.resize((20, 20), Image.Resampling.LANCZOS)
+                    logo_ctk = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(20, 20))
+                    self.logo_lbl = ctk.CTkLabel(title_container, image=logo_ctk, text="")
+                    self.logo_lbl.pack(side="left", padx=(0, 8))
+                except Exception as e:
+                    log_print(f"[UI] Failed to load logo: {e}")
+
+            title_lbl = ctk.CTkLabel(
+                title_container,
+                text="CVM // TELEMETRY_HUD",
+                font=("Consolas", 12, "bold"),
+                text_color="#00F0FF",
+            )
+            title_lbl.pack(side="left")
+
+            current_version = self.update_checker.get_current_version()
+            self.version_lbl = ctk.CTkLabel(
+                title_container,
+                text=f"[v{current_version}]",
+                font=("Consolas", 10, "bold"),
+                text_color="#64748B",
+            )
+            self.version_lbl.pack(side="left", padx=(8, 0))
+            self.update_btn = None
+
+            # Far right: Window controls
+            close_btn = ctk.CTkButton(
+                bar_inner,
+                text="X",
+                width=28,
+                height=26,
+                fg_color="transparent",
+                hover_color="#FF3B5C",
+                text_color="#94A3B8",
+                font=("Consolas", 11, "bold"),
+                command=self._on_close,
+                corner_radius=3,
+            )
+            close_btn.pack(side="right", padx=(2, 0))
+
+            self.maximize_btn = ctk.CTkButton(
+                bar_inner,
+                text="[]",
+                width=28,
+                height=26,
+                fg_color="transparent",
+                hover_color="#0D1D29",
+                text_color="#94A3B8",
+                font=("Consolas", 10),
+                command=self._toggle_maximize,
+                corner_radius=3,
+            )
+            self.maximize_btn.pack(side="right", padx=(2, 0))
+
+            self.minimize_btn = ctk.CTkButton(
+                bar_inner,
+                text="_",
+                width=28,
+                height=26,
+                fg_color="transparent",
+                hover_color="#0D1D29",
+                text_color="#94A3B8",
+                font=("Consolas", 11, "bold"),
+                command=self._on_minimize,
+                corner_radius=3,
+            )
+            self.minimize_btn.pack(side="right", padx=(2, 0))
+
+            ctk.CTkFrame(bar_inner, width=1, height=18, fg_color="#162630").pack(side="right", padx=8)
+
+            # Utility buttons in HUD top bar: Settings & Style cycle
+            self.settings_btn = ctk.CTkButton(
+                bar_inner,
+                text=t("Settings"),
+                command=self._open_settings_window,
+                fg_color="#0E1822",
+                hover_color="#152736",
+                border_width=1,
+                border_color="#1B3140",
+                text_color="#E2F1F8",
+                font=("Consolas", 10, "bold"),
+                width=78,
+                height=24,
+                corner_radius=3,
+            )
+            self.settings_btn.pack(side="right", padx=(4, 0))
+
+            self.ui_style_btn = ctk.CTkButton(
+                bar_inner,
+                text=t("Style: {style}", style=self._get_ui_style_display_name()),
+                command=self._toggle_ui_style,
+                fg_color="#0A1A24",
+                hover_color="#122B3B",
+                border_width=1,
+                border_color="#00F0FF",
+                text_color="#00F0FF",
+                font=("Consolas", 10, "bold"),
+                width=92,
+                height=24,
+                corner_radius=3,
+            )
+            self.ui_style_btn.pack(side="right", padx=(4, 0))
+
+            ctk.CTkFrame(bar_inner, width=1, height=18, fg_color="#162630").pack(side="right", padx=8)
+
+            # Live Inline HUD Metrics Strip
+            metrics_frame = ctk.CTkFrame(bar_inner, fg_color="transparent")
+            metrics_frame.pack(side="right", fill="y")
+
+            self.hud_toggle_metric = ctk.CTkLabel(
+                metrics_frame,
+                text="AIM: HOLD",
+                font=("Consolas", 10, "bold"),
+                text_color="#00F0FF",
+            )
+            self.hud_toggle_metric.pack(side="right", padx=(10, 0))
+
+            self.hud_hw_metric = ctk.CTkLabel(
+                metrics_frame,
+                text="HW: OFFLINE",
+                font=("Consolas", 10, "bold"),
+                text_color="#FF3B5C",
+            )
+            self.hud_hw_metric.pack(side="right", padx=(10, 0))
+
+            self.hud_decode_metric = ctk.CTkLabel(
+                metrics_frame,
+                text="DECODE: --ms",
+                font=("Consolas", 10, "bold"),
+                text_color="#94A3B8",
+            )
+            self.hud_decode_metric.pack(side="right", padx=(10, 0))
+
+            self.hud_stream_metric = ctk.CTkLabel(
+                metrics_frame,
+                text="STREAM: -- FPS",
+                font=("Consolas", 10, "bold"),
+                text_color="#00F0FF",
+            )
+            self.hud_stream_metric.pack(side="right", padx=(0, 0))
+
+            for drag_widget in (self.title_bar, bar_inner, title_container, title_lbl, self.logo_lbl, self.version_lbl):
+                if drag_widget is not None:
+                    drag_widget.bind("<Button-1>", self.start_move)
+                    drag_widget.bind("<B1-Motion>", self.do_move)
+            return
+
+        if self._is_bento_mode():
+            self.title_bar = ctk.CTkFrame(self, height=48, fg_color="#131824", corner_radius=0)
+            self.title_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+            self.title_bar.pack_propagate(False)
+
+            bottom_line = ctk.CTkFrame(self.title_bar, height=1, fg_color="#20293A", corner_radius=0)
+            bottom_line.pack(side="bottom", fill="x")
+
+            bar_inner = ctk.CTkFrame(self.title_bar, fg_color="transparent")
+            bar_inner.pack(fill="both", expand=True, padx=14, pady=6)
+
+            # Left: Brand + Bento Version Badge
+            title_container = ctk.CTkFrame(bar_inner, fg_color="transparent")
+            title_container.pack(side="left", fill="y")
+
+            logo_path = str(get_bundle_dir() / "cvm.jpg")
+            self.logo_lbl = None
+            if os.path.exists(logo_path):
+                try:
+                    logo_image = Image.open(logo_path)
+                    logo_image = logo_image.resize((22, 22), Image.Resampling.LANCZOS)
+                    logo_ctk = ctk.CTkImage(light_image=logo_image, dark_image=logo_image, size=(22, 22))
+                    self.logo_lbl = ctk.CTkLabel(title_container, image=logo_ctk, text="")
+                    self.logo_lbl.pack(side="left", padx=(0, 8))
+                except Exception as e:
+                    log_print(f"[UI] Failed to load logo: {e}")
+
+            title_lbl = ctk.CTkLabel(
+                title_container,
+                text="CVM COLORBOT",
+                font=("Segoe UI", 13, "bold"),
+                text_color="#F8FAFC",
+            )
+            title_lbl.pack(side="left")
+
+            current_version = self.update_checker.get_current_version()
+            badge_wrap = ctk.CTkFrame(
+                title_container,
+                fg_color="#172554",
+                border_color="#1E40AF",
+                border_width=1,
+                corner_radius=10,
+            )
+            badge_wrap.pack(side="left", padx=(8, 0), pady=4)
+            self.version_lbl = ctk.CTkLabel(
+                badge_wrap,
+                text=f"v{current_version} BENTO",
+                font=("Consolas", 9, "bold"),
+                text_color="#60A5FA",
+                padx=8,
+                pady=1,
+            )
+            self.version_lbl.pack()
+            self.update_btn = None
+
+            # Right: Window controls
+            close_btn = ctk.CTkButton(
+                bar_inner,
+                text="X",
+                width=30,
+                height=28,
+                fg_color="transparent",
+                hover_color="#E11D48",
+                text_color=COLOR_TEXT_DIM,
+                font=("Segoe UI", 11, "bold"),
+                command=self._on_close,
+                corner_radius=6,
+            )
+            close_btn.pack(side="right", padx=(2, 0))
+
+            self.maximize_btn = ctk.CTkButton(
+                bar_inner,
+                text="[]",
+                width=30,
+                height=28,
+                fg_color="transparent",
+                hover_color=COLOR_NAV_HOVER_BG,
+                text_color=COLOR_TEXT_DIM,
+                font=("Consolas", 10),
+                command=self._toggle_maximize,
+                corner_radius=6,
+            )
+            self.maximize_btn.pack(side="right", padx=(2, 0))
+
+            self.minimize_btn = ctk.CTkButton(
+                bar_inner,
+                text="_",
+                width=30,
+                height=28,
+                fg_color="transparent",
+                hover_color=COLOR_NAV_HOVER_BG,
+                text_color=COLOR_TEXT_DIM,
+                font=("Segoe UI", 11, "bold"),
+                command=self._on_minimize,
+                corner_radius=6,
+            )
+            self.minimize_btn.pack(side="right", padx=(2, 0))
+
+            ctk.CTkFrame(bar_inner, width=1, height=20, fg_color="#232D42").pack(side="right", padx=10)
+
+            # Segmented Simple (Lite) / Pro Mode Switcher
+            mode_seg = ctk.CTkFrame(
+                bar_inner,
+                fg_color="#0D121B",
+                border_color="#232D42",
+                border_width=1,
+                corner_radius=8,
+            )
+            mode_seg.pack(side="right", padx=(0, 8), pady=2)
+
+            self.mode_lite_btn = ctk.CTkButton(
+                mode_seg,
+                text=t("Lite"),
+                width=52,
+                height=24,
+                font=("Segoe UI", 10, "bold"),
+                corner_radius=6,
+                command=lambda: self._set_ui_simple_mode(True),
+            )
+            self.mode_lite_btn.pack(side="left", padx=(3, 1), pady=2)
+
+            self.mode_pro_btn = ctk.CTkButton(
+                mode_seg,
+                text=t("Pro"),
+                width=52,
+                height=24,
+                font=("Segoe UI", 10, "bold"),
+                corner_radius=6,
+                command=lambda: self._set_ui_simple_mode(False),
+            )
+            self.mode_pro_btn.pack(side="left", padx=(1, 3), pady=2)
+            self._refresh_simple_mode_buttons()
+
+            # Live Telemetry & Status Pills
+            pills_frame = ctk.CTkFrame(bar_inner, fg_color="transparent")
+            pills_frame.pack(side="right", padx=(0, 8), pady=3)
+
+            self.header_toggle_pill = StatusPill(
+                pills_frame,
+                label=t("Aim"),
+                value=t("Hold"),
+                dot_color=COLOR_ACCENT,
+            )
+            self.header_toggle_pill.pack(side="right", padx=(6, 0))
+
+            self.header_hw_pill = StatusPill(
+                pills_frame,
+                label=t("HW"),
+                value=t("Offline"),
+                dot_color=COLOR_DANGER,
+            )
+            self.header_hw_pill.pack(side="right", padx=(6, 0))
+
+            self.header_fps_pill = StatusPill(
+                pills_frame,
+                label=str(getattr(self.capture, "mode", "UDP")),
+                value="-- FPS",
+                dot_color="#64748B",
+            )
+            self.header_fps_pill.pack(side="right", padx=(0, 0))
+
+            # Window drag bindings
+            for drag_widget in (self.title_bar, bar_inner, title_container, title_lbl, self.logo_lbl):
+                if drag_widget is not None:
+                    drag_widget.bind("<Button-1>", self.start_move)
+                    drag_widget.bind("<B1-Motion>", self.do_move)
+            return
+
         self.title_bar = ctk.CTkFrame(self, height=30, fg_color=COLOR_BG, corner_radius=10)
         self.title_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
         
@@ -512,8 +1040,604 @@ class ViewerApp(ctk.CTk):
             self.logo_lbl.bind("<Button-1>", self.start_move)
             self.logo_lbl.bind("<B1-Motion>", self.do_move)
 
+    def _build_hud_nav_bar(self):
+        """Demo 3 horizontal monospace command tab bar + START/STOP + Lite/Pro."""
+        self.hud_nav_bar = ctk.CTkFrame(self, height=38, fg_color="#080B10", corner_radius=0)
+        self.hud_nav_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.hud_nav_bar.pack_propagate(False)
+
+        ctk.CTkFrame(self.hud_nav_bar, height=1, fg_color="#162630", corner_radius=0).pack(side="bottom", fill="x")
+
+        inner = ctk.CTkFrame(self.hud_nav_bar, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=10, pady=0)
+
+        self.nav_buttons = {}
+        self.nav_indicators = {}
+
+        tabs = [
+            ("General", "01", self._show_general_tab),
+            ("Main Aimbot", "02", self._show_aimbot_tab),
+            ("Config", "03", self._show_config_tab),
+            ("Debug", "04", self._show_debug_tab),
+        ]
+
+        tabs_left = ctk.CTkFrame(inner, fg_color="transparent")
+        tabs_left.pack(side="left", fill="y")
+
+        for tab_name, code, cmd in tabs:
+            slot = ctk.CTkFrame(tabs_left, fg_color="transparent", corner_radius=0)
+            slot.pack(side="left", fill="y", padx=(0, 2))
+
+            btn = ctk.CTkButton(
+                slot,
+                text=f"[{code}] {t(tab_name).upper()}",
+                height=34,
+                width=0,
+                fg_color="transparent",
+                hover_color="#0D1924",
+                text_color="#64748B",
+                font=("Consolas", 10, "bold"),
+                corner_radius=0,
+                border_width=0,
+                command=lambda name=tab_name, fn=cmd: self._handle_nav_click(name, fn),
+            )
+            btn.pack(side="top", fill="x", padx=4, pady=(1, 0))
+
+            underline = ctk.CTkFrame(slot, height=2, fg_color="transparent", corner_radius=0)
+            underline.pack(side="bottom", fill="x")
+
+            self.nav_buttons[tab_name] = btn
+            self.nav_indicators[tab_name] = underline
+
+        # Right side of command bar: START/STOP Engine + Lite/Pro toggle
+        controls_right = ctk.CTkFrame(inner, fg_color="transparent")
+        controls_right.pack(side="right", fill="y", pady=4)
+
+        self.runtime_btn = ctk.CTkButton(
+            controls_right,
+            text=f"▶ {t('START ENGINE')}",
+            command=self._toggle_runtime,
+            fg_color="#00B8D4",
+            hover_color="#00F0FF",
+            text_color="#041016",
+            font=("Consolas", 10, "bold"),
+            width=136,
+            height=28,
+            corner_radius=3,
+        )
+        self.runtime_btn.pack(side="right", padx=(6, 0))
+        self._refresh_runtime_button()
+
+        mode_seg = ctk.CTkFrame(
+            controls_right,
+            fg_color="#05070A",
+            border_color="#162630",
+            border_width=1,
+            corner_radius=3,
+        )
+        mode_seg.pack(side="right", padx=(6, 0))
+
+        self.mode_lite_btn = ctk.CTkButton(
+            mode_seg,
+            text=t("Lite"),
+            width=50,
+            height=22,
+            font=("Consolas", 10, "bold"),
+            corner_radius=2,
+            command=lambda: self._set_ui_simple_mode(True),
+        )
+        self.mode_lite_btn.pack(side="left", padx=(2, 1), pady=2)
+
+        self.mode_pro_btn = ctk.CTkButton(
+            mode_seg,
+            text=t("Pro"),
+            width=50,
+            height=22,
+            font=("Consolas", 10, "bold"),
+            corner_radius=2,
+            command=lambda: self._set_ui_simple_mode(False),
+        )
+        self.mode_pro_btn.pack(side="left", padx=(1, 2), pady=2)
+        self._refresh_simple_mode_buttons()
+        self._set_nav_active(self._active_tab_name)
+
+    def _build_hud_quick_profile_bar(self):
+        """Dedicated 1-click Quick Profile Switcher strip for Demo 3 HUD."""
+        self.hud_quick_bar = ctk.CTkFrame(self, height=36, fg_color="#070A0F", corner_radius=0)
+        self.hud_quick_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.hud_quick_bar.pack_propagate(False)
+
+        ctk.CTkFrame(self.hud_quick_bar, height=1, fg_color="#15232D", corner_radius=0).pack(side="bottom", fill="x")
+
+        inner = ctk.CTkFrame(self.hud_quick_bar, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=4)
+
+        ctk.CTkLabel(
+            inner,
+            text=f"// {heading('Quick Profiles')}:",
+            font=("Consolas", 10, "bold"),
+            text_color="#00F0FF",
+        ).pack(side="left", padx=(0, 8))
+
+        self.hud_quick_bar_host = ctk.CTkFrame(inner, fg_color="transparent")
+        self.hud_quick_bar_host.pack(side="left", fill="y")
+
+        refresh_btn = ctk.CTkButton(
+            inner,
+            text="↻",
+            width=26,
+            height=24,
+            fg_color="#0A131C",
+            hover_color="#132536",
+            border_width=1,
+            border_color="#1B3140",
+            text_color="#94A3B8",
+            font=("Consolas", 11, "bold"),
+            corner_radius=3,
+            command=self._populate_hud_quick_profile_buttons,
+        )
+        refresh_btn.pack(side="left", padx=(6, 0))
+
+        self.status_indicator = ctk.CTkLabel(
+            inner,
+            text=t("Status: Offline"),
+            text_color=COLOR_TEXT_DIM,
+            font=("Consolas", 10),
+            anchor="e",
+        )
+        self.status_indicator.pack(side="right", padx=(8, 0))
+
+        self._populate_hud_quick_profile_buttons()
+
+    def _populate_hud_quick_profile_buttons(self):
+        host = getattr(self, "hud_quick_bar_host", None)
+        if host is None:
+            return
+        try:
+            if not host.winfo_exists():
+                return
+        except Exception:
+            return
+        for child in host.winfo_children():
+            child.destroy()
+        self._quick_profile_buttons = {}
+        names = self._list_quick_profile_names(limit=6)
+        if not names:
+            ctk.CTkLabel(
+                host,
+                text=t("No saved profiles"),
+                font=("Consolas", 10),
+                text_color=COLOR_TEXT_DIM,
+            ).pack(side="left")
+            return
+        for idx, profile_name in enumerate(names, 1):
+            label = f"[{idx}] {self._format_quick_profile_label(profile_name)}"
+            btn = ctk.CTkButton(
+                host,
+                text=label,
+                height=24,
+                width=0,
+                fg_color="#0B121A",
+                hover_color="#102533",
+                border_width=1,
+                border_color="#1B3040",
+                text_color="#CBD5E1",
+                font=("Consolas", 10, "bold"),
+                corner_radius=3,
+                command=lambda n=profile_name: self._quick_load_profile(n),
+            )
+            btn.pack(side="left", padx=(0, 5))
+            self._quick_profile_buttons[profile_name] = btn
+        self._refresh_quick_profile_highlights()
+
     def _build_sidebar(self):
-        """建立側邊欄：navigation + status widgets。"""
+        """建立側邊欄：HUD Telemetry Cockpit / Bento / Classic / Neon。"""
+        if self._is_hud_mode():
+            self.sidebar = ctk.CTkFrame(self, width=258, fg_color="#070A0E", corner_radius=0)
+            self.sidebar.grid(row=3, column=0, sticky="ns")
+            self.sidebar.grid_propagate(False)
+
+            ctk.CTkFrame(self.sidebar, width=1, fg_color="#162630", corner_radius=0).pack(side="right", fill="y")
+
+            cockpit = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            cockpit.pack(fill="both", expand=True, padx=10, pady=10)
+
+            # 1. Runtime / Aim Activation Status Banner (Read-Only Telemetry)
+            self.hud_status_box = ctk.CTkFrame(
+                cockpit,
+                fg_color="#081E26",
+                border_color="#00F0FF",
+                border_width=1,
+                corner_radius=4,
+            )
+            self.hud_status_box.pack(fill="x", pady=(0, 10))
+
+            box_inner = ctk.CTkFrame(self.hud_status_box, fg_color="transparent")
+            box_inner.pack(fill="x", padx=10, pady=9)
+
+            top_row = ctk.CTkFrame(box_inner, fg_color="transparent")
+            top_row.pack(fill="x")
+            ctk.CTkLabel(
+                top_row,
+                text=t("RUNTIME STATE // AIM ACTIVATION"),
+                font=("Consolas", 8, "bold"),
+                text_color="#64748B",
+                anchor="w",
+            ).pack(side="left")
+            self.hud_status_dot = ctk.CTkLabel(
+                top_row,
+                text="●",
+                font=("Arial", 11, "bold"),
+                text_color="#00F0FF",
+            )
+            self.hud_status_dot.pack(side="right")
+
+            self.hud_status_title = ctk.CTkLabel(
+                box_inner,
+                text="[ AIMBOT: HOLD MODE ]",
+                font=("Consolas", 11, "bold"),
+                text_color="#00F0FF",
+                anchor="w",
+            )
+            self.hud_status_title.pack(fill="x", pady=(2, 0))
+
+            self.hud_status_sub = ctk.CTkLabel(
+                box_inner,
+                text="",
+                font=("Consolas", 9),
+                text_color="#94A3B8",
+                anchor="w",
+            )
+            self.hud_status_sub.pack(fill="x", pady=(2, 0))
+
+            # Minimal HUD: zero Canvas sparkline overhead — pure zero-stall telemetry matrix
+            self.hud_fps_canvas = None
+            self.hud_fps_graph_val = None
+
+            # 2. Live Profile, HSV & GPU/CPU Compute Matrix (Read-only summary)
+            spec_panel = ctk.CTkFrame(
+                cockpit,
+                fg_color="#090D13",
+                border_color="#15232D",
+                border_width=1,
+                corner_radius=4,
+            )
+            spec_panel.pack(fill="x", pady=(0, 10))
+
+            ctk.CTkLabel(
+                spec_panel,
+                text="// ACTIVE_PROFILE_MATRIX",
+                font=("Consolas", 9, "bold"),
+                text_color="#00F0FF",
+                anchor="w",
+            ).pack(fill="x", padx=10, pady=(7, 4))
+            ctk.CTkFrame(spec_panel, height=1, fg_color="#132029").pack(fill="x", padx=10, pady=(0, 5))
+
+            self.hud_hsv_summary_labels = {}
+            for key, label_txt in (
+                ("profile", "PROFILE"),
+                ("mode", "AIM_MODE"),
+                ("fov", "FOV_RADIUS"),
+                ("color", "TARGET_COLOR"),
+                ("hsv", "HSV_RANGE"),
+                ("compute", "COMPUTE"),
+            ):
+                row = ctk.CTkFrame(spec_panel, fg_color="transparent")
+                row.pack(fill="x", padx=10, pady=2)
+                ctk.CTkLabel(
+                    row,
+                    text=label_txt,
+                    font=("Consolas", 9),
+                    text_color="#64748B",
+                    anchor="w",
+                ).pack(side="left")
+                val_lbl = ctk.CTkLabel(
+                    row,
+                    text="--",
+                    font=("Consolas", 9, "bold"),
+                    text_color="#10B981" if key == "compute" else ("#00F0FF" if key in ("color", "profile") else "#E2F1F8"),
+                    anchor="e",
+                )
+                val_lbl.pack(side="right")
+                self.hud_hsv_summary_labels[key] = val_lbl
+            ctk.CTkFrame(spec_panel, height=6, fg_color="transparent").pack(fill="x")
+
+            # 4. Hardware & Performance Counters (keeps all legacy attributes alive)
+            hw_panel = ctk.CTkFrame(
+                cockpit,
+                fg_color="#090D13",
+                border_color="#15232D",
+                border_width=1,
+                corner_radius=4,
+            )
+            hw_panel.pack(fill="x", pady=(0, 8))
+
+            ctk.CTkLabel(
+                hw_panel,
+                text="// HARDWARE_&_TIMING",
+                font=("Consolas", 9, "bold"),
+                text_color="#00F0FF",
+                anchor="w",
+            ).pack(fill="x", padx=10, pady=(7, 4))
+            ctk.CTkFrame(hw_panel, height=1, fg_color="#132029").pack(fill="x", padx=10, pady=(0, 5))
+
+            fps_row = ctk.CTkFrame(hw_panel, fg_color="transparent")
+            fps_row.pack(fill="x", padx=10, pady=1)
+            self.fps_label = ctk.CTkLabel(
+                fps_row, text=t("FPS: --"), text_color="#E2F1F8", font=("Consolas", 9, "bold"), anchor="w"
+            )
+            self.fps_label.pack(side="left")
+            self.total_delay_label = ctk.CTkLabel(
+                fps_row, text=t("Delay: -- ms"), text_color="#94A3B8", font=("Consolas", 9), anchor="e"
+            )
+            self.total_delay_label.pack(side="right")
+
+            self.decode_delay_label = ctk.CTkLabel(
+                hw_panel, text=t("Decode: -- ms"), text_color="#94A3B8", font=("Consolas", 9), anchor="w"
+            )
+            self.decode_delay_label.pack(fill="x", padx=10, pady=(1, 2))
+
+            self.hardware_type_label = ctk.CTkLabel(
+                hw_panel,
+                text=t("Hardware: {mode}", mode=getattr(config, "mouse_api", "Medius")),
+                text_color="#CBD5E1",
+                font=("Consolas", 9),
+                anchor="w",
+            )
+            self.hardware_type_label.pack(fill="x", padx=10)
+
+            self.hardware_conn_label = ctk.CTkLabel(
+                hw_panel,
+                text=t("Hardware Status: Disconnected"),
+                text_color=COLOR_DANGER,
+                font=("Consolas", 9, "bold"),
+                anchor="w",
+            )
+            self.hardware_conn_label.pack(fill="x", padx=10, pady=(1, 4))
+
+            self._hardware_info_expanded = False
+            self.hardware_details_toggle = ctk.CTkButton(
+                hw_panel,
+                text=t("Hardware Info"),
+                command=self._toggle_hardware_info_details,
+                fg_color="#0E1822",
+                hover_color="#152736",
+                border_width=1,
+                border_color="#1B3140",
+                text_color="#94A3B8",
+                font=("Consolas", 9),
+                anchor="w",
+                height=22,
+                corner_radius=3,
+            )
+            self.hardware_details_toggle.pack(fill="x", padx=10, pady=(0, 8))
+
+            self.hardware_details_label = ctk.CTkLabel(
+                hw_panel,
+                text="",
+                text_color="#94A3B8",
+                font=("Consolas", 9),
+                anchor="w",
+                justify="left",
+            )
+            self._update_hardware_status_ui()
+
+            # Theme button at bottom of telemetry panel
+            self.theme_btn = ctk.CTkButton(
+                cockpit,
+                text=t("Dark Mode") if ctk.get_appearance_mode() == "Dark" else t("Light Mode"),
+                fg_color="#090D13",
+                hover_color="#111C28",
+                border_width=1,
+                border_color="#15232D",
+                text_color="#64748B",
+                height=24,
+                font=("Consolas", 9),
+                command=self._toggle_theme,
+                corner_radius=3,
+            )
+            self.theme_btn.pack(side="bottom", fill="x")
+            self._draw_hud_fps_sparkline()
+            return
+
+        if self._is_bento_mode():
+            self.sidebar = ctk.CTkFrame(self, width=228, fg_color=COLOR_SIDEBAR, corner_radius=0)
+            self.sidebar.grid(row=1, column=0, sticky="ns")
+            self.sidebar.grid_propagate(False)
+
+            sep = ctk.CTkFrame(self.sidebar, width=1, fg_color="#1F2839")
+            sep.pack(side="right", fill="y")
+
+            # Top primary START/STOP action card
+            action_wrap = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            action_wrap.pack(fill="x", padx=14, pady=(14, 8))
+
+            self.runtime_btn = ctk.CTkButton(
+                action_wrap,
+                text=t("START ENGINE"),
+                command=self._toggle_runtime,
+                fg_color="#2563EB",
+                hover_color="#3B82F6",
+                text_color="#FFFFFF",
+                font=("Segoe UI", 12, "bold"),
+                anchor="center",
+                height=40,
+                corner_radius=10,
+            )
+            self.runtime_btn.pack(fill="x")
+            self._refresh_runtime_button()
+
+            self.status_indicator = ctk.CTkLabel(
+                action_wrap,
+                text=t("Status: Offline"),
+                text_color=COLOR_TEXT_DIM,
+                font=("Segoe UI", 10),
+                anchor="w",
+                height=18,
+            )
+            self.status_indicator.pack(fill="x", pady=(6, 0))
+
+            ctk.CTkFrame(self.sidebar, height=1, fg_color="#1F2839").pack(fill="x", padx=14, pady=(4, 4))
+
+            # Navigation links
+            nav_container = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            nav_container.pack(fill="x", padx=12, pady=(2, 4))
+
+            self.nav_buttons = {}
+            self.nav_indicators = {}
+
+            self._add_sidebar_group_label(nav_container, "Core")
+            self._add_nav_item(nav_container, "General", self._show_general_tab, icon="◆")
+
+            self._add_sidebar_group_label(nav_container, "Combat")
+            self._add_nav_item(nav_container, "Main Aimbot", self._show_aimbot_tab, icon="◎")
+
+            self._add_sidebar_group_label(nav_container, "System")
+            self._add_nav_item(nav_container, "Config", self._show_config_tab, icon="▤")
+            self._add_nav_item(nav_container, "Debug", self._show_debug_tab, icon="⚙")
+
+            self._set_nav_active(self._active_tab_name)
+
+            # Bottom dock: Quick Profiles + Compact Telemetry + Utility buttons
+            bottom_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            bottom_frame.pack(side="bottom", fill="x", padx=12, pady=(4, 12))
+
+            self._build_quick_profiles_card(bottom_frame)
+
+            # Compact Telemetry & Hardware mini-card (preserves all legacy widget attributes)
+            tele_card = ctk.CTkFrame(
+                bottom_frame,
+                fg_color="#141A27",
+                border_color="#20293A",
+                border_width=1,
+                corner_radius=10,
+            )
+            tele_card.pack(fill="x", pady=(8, 8))
+
+            tele_row = ctk.CTkFrame(tele_card, fg_color="transparent")
+            tele_row.pack(fill="x", padx=10, pady=(7, 2))
+            self.fps_label = ctk.CTkLabel(
+                tele_row,
+                text=t("FPS: --"),
+                text_color=COLOR_TEXT,
+                font=("Consolas", 9, "bold"),
+                anchor="w",
+            )
+            self.fps_label.pack(side="left")
+            self.total_delay_label = ctk.CTkLabel(
+                tele_row,
+                text=t("Delay: -- ms"),
+                text_color=COLOR_TEXT_DIM,
+                font=("Consolas", 9),
+                anchor="e",
+            )
+            self.total_delay_label.pack(side="right")
+
+            self.decode_delay_label = ctk.CTkLabel(
+                tele_card,
+                text=t("Decode: -- ms"),
+                text_color=COLOR_TEXT_DIM,
+                font=("Consolas", 9),
+                anchor="w",
+            )
+            self.decode_delay_label.pack(fill="x", padx=10, pady=(0, 2))
+
+            self.hardware_type_label = ctk.CTkLabel(
+                tele_card,
+                text=t("Hardware: {mode}", mode=getattr(config, "mouse_api", "Medius")),
+                text_color=COLOR_TEXT_DIM,
+                font=("Segoe UI", 9),
+                anchor="w",
+            )
+            self.hardware_type_label.pack(fill="x", padx=10)
+
+            self.hardware_conn_label = ctk.CTkLabel(
+                tele_card,
+                text=t("Hardware Status: Disconnected"),
+                text_color=COLOR_DANGER,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            )
+            self.hardware_conn_label.pack(fill="x", padx=10)
+
+            self._hardware_info_expanded = False
+            self.hardware_details_toggle = ctk.CTkButton(
+                tele_card,
+                text=t("Hardware Info"),
+                command=self._toggle_hardware_info_details,
+                fg_color="#1A2233",
+                hover_color="#232E45",
+                text_color=COLOR_TEXT_DIM,
+                font=("Segoe UI", 9),
+                anchor="w",
+                height=22,
+                corner_radius=6,
+            )
+            self.hardware_details_toggle.pack(fill="x", padx=8, pady=(4, 7))
+
+            self.hardware_details_label = ctk.CTkLabel(
+                tele_card,
+                text="",
+                text_color=COLOR_TEXT_DIM,
+                font=("Consolas", 9),
+                anchor="w",
+                justify="left",
+            )
+            self._update_hardware_status_ui()
+
+            # Settings button
+            self.settings_btn = ctk.CTkButton(
+                bottom_frame,
+                text=t("Settings"),
+                command=self._open_settings_window,
+                fg_color=COLOR_SURFACE,
+                hover_color=COLOR_NAV_HOVER_BG,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                text_color=COLOR_TEXT,
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+                height=30,
+                corner_radius=8,
+            )
+            self.settings_btn.pack(fill="x", pady=(0, 6))
+
+            # Compact UI Style + Theme row
+            util_row = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+            util_row.pack(fill="x")
+            util_row.grid_columnconfigure((0, 1), weight=1, uniform="util")
+
+            self.ui_style_btn = ctk.CTkButton(
+                util_row,
+                text=t("Style: {style}", style=self._get_ui_style_display_name()),
+                fg_color=COLOR_SURFACE,
+                text_color=COLOR_TEXT_DIM,
+                hover_color=COLOR_NAV_HOVER_BG,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                height=26,
+                font=("Segoe UI", 9),
+                command=self._toggle_ui_style,
+                corner_radius=7,
+            )
+            self.ui_style_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+
+            self.theme_btn = ctk.CTkButton(
+                util_row,
+                text=t("Dark Mode") if ctk.get_appearance_mode() == "Dark" else t("Light Mode"),
+                fg_color=COLOR_SURFACE,
+                text_color=COLOR_TEXT_DIM,
+                hover_color=COLOR_NAV_HOVER_BG,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                height=26,
+                font=("Segoe UI", 9),
+                command=self._toggle_theme,
+                corner_radius=7,
+            )
+            self.theme_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+            return
+
         sidebar_width = 165 if self._legacy_ui_mode else 250
         self.sidebar = ctk.CTkFrame(self, width=sidebar_width, fg_color=COLOR_SIDEBAR, corner_radius=0)
         self.sidebar.grid(row=1, column=0, sticky="ns")
@@ -556,10 +1680,6 @@ class ViewerApp(ctk.CTk):
             tabs = [
                 ("General", self._show_general_tab),
                 ("Main Aimbot", self._show_aimbot_tab),
-                ("Sec Aimbot", self._show_sec_aimbot_tab),
-                ("Trigger", self._show_tb_tab),
-                ("Magnet Trigger", self._show_magnet_trigger_tab),
-                ("RCS", self._show_rcs_tab),
                 ("Config", self._show_config_tab),
                 ("Debug", self._show_debug_tab),
             ]
@@ -573,12 +1693,6 @@ class ViewerApp(ctk.CTk):
 
             self._add_sidebar_group_label(nav_container, "Aimbot")
             self._add_nav_item(nav_container, "Main Aimbot", self._show_aimbot_tab, icon=">")
-            self._add_nav_item(nav_container, "Sec Aimbot", self._show_sec_aimbot_tab, icon=">")
-            self._add_nav_item(nav_container, "RCS", self._show_rcs_tab, icon=">")
-
-            self._add_sidebar_group_label(nav_container, "Trigger")
-            self._add_nav_item(nav_container, "Trigger", self._show_tb_tab, icon=">")
-            self._add_nav_item(nav_container, "Magnet Trigger", self._show_magnet_trigger_tab, icon=">")
 
             self._add_sidebar_group_label(nav_container, "Miscellaneous")
             self._add_nav_item(nav_container, "Config", self._show_config_tab, icon=">")
@@ -607,7 +1721,7 @@ class ViewerApp(ctk.CTk):
 
         self.ui_style_btn = ctk.CTkButton(
             bottom_frame,
-            text=t("UI Style: {style}", style=t("Classic") if self._legacy_ui_mode else t("Neon")),
+            text=t("UI Style: {style}", style=self._get_ui_style_display_name()),
             fg_color=COLOR_SURFACE,
             text_color=COLOR_TEXT_DIM,
             hover_color=COLOR_SURFACE,
@@ -735,7 +1849,7 @@ class ViewerApp(ctk.CTk):
         if not hasattr(self, "status_indicator") or not self.status_indicator.winfo_exists():
             return
         msg = t(str(text).replace("\n", " ").strip())
-        max_chars = 30
+        max_chars = 90 if self._is_hud_mode() else 36
         if len(msg) > max_chars:
             msg = msg[: max_chars - 3] + "..."
         self.status_indicator.configure(text=msg, text_color=text_color)
@@ -743,6 +1857,8 @@ class ViewerApp(ctk.CTk):
     def _refresh_runtime_button(self):
         if not hasattr(self, "runtime_btn") or not self.runtime_btn.winfo_exists():
             return
+        is_hud = self._is_hud_mode()
+        is_bento = self._is_bento_mode()
         if getattr(self, "_runtime_busy", False):
             label = t("STOPPING...") if getattr(self, "_runtime_active", False) else t("STARTING...")
             self.runtime_btn.configure(
@@ -755,19 +1871,19 @@ class ViewerApp(ctk.CTk):
             return
         if getattr(self, "_runtime_active", False):
             self.runtime_btn.configure(
-                text=t("STOP"),
+                text=f"■ {t('STOP ENGINE')}" if (is_hud or is_bento) else t("STOP"),
                 state="normal",
-                fg_color=COLOR_DANGER,
-                hover_color="#FF6B86",
-                text_color="#140408",
+                fg_color="#FF3B5C" if is_hud else ("#E11D48" if is_bento else COLOR_DANGER),
+                hover_color="#FF5C77" if is_hud else ("#F43F5E" if is_bento else "#FF6B86"),
+                text_color="#FFFFFF" if (is_hud or is_bento) else "#140408",
             )
             return
         self.runtime_btn.configure(
-            text=t("START"),
+            text=f"▶ {t('START ENGINE')}" if (is_hud or is_bento) else t("START"),
             state="normal",
-            fg_color=COLOR_ACCENT,
-            hover_color=COLOR_ACCENT_HOVER,
-            text_color="#04140A",
+            fg_color="#00B8D4" if is_hud else ("#2563EB" if is_bento else COLOR_ACCENT),
+            hover_color="#00F0FF" if is_hud else ("#3B82F6" if is_bento else COLOR_ACCENT_HOVER),
+            text_color="#041016" if is_hud else ("#FFFFFF" if is_bento else "#04140A"),
         )
 
     def _runtime_settings_locked(self):
@@ -1101,6 +2217,21 @@ class ViewerApp(ctk.CTk):
             return False, str(e)
 
     def _create_nav_btn(self, parent, text, command, icon=">"):
+        if self._is_bento_mode():
+            return ctk.CTkButton(
+                parent,
+                text=f"{icon}  {t(text)}",
+                height=34,
+                fg_color="transparent",
+                text_color=COLOR_TEXT_DIM,
+                hover_color=COLOR_NAV_HOVER_BG,
+                anchor="w",
+                font=("Segoe UI", 12, "bold"),
+                command=lambda: self._handle_nav_click(text, command),
+                corner_radius=8,
+                border_width=1,
+                border_color=COLOR_SIDEBAR,
+            )
         return ctk.CTkButton(
             parent,
             text=f"{icon}  {t(text)}",
@@ -1136,10 +2267,10 @@ class ViewerApp(ctk.CTk):
         ctk.CTkLabel(
             parent,
             text=heading(text),
-            font=("Consolas", 11, "bold"),
-            text_color=COLOR_TEXT_DIM,
+            font=("Segoe UI", 9, "bold") if self._is_bento_mode() else ("Consolas", 11, "bold"),
+            text_color="#64748B" if self._is_bento_mode() else COLOR_TEXT_DIM,
             anchor="w",
-        ).pack(fill="x", pady=(10, 5))
+        ).pack(fill="x", padx=(6, 0) if self._is_bento_mode() else 0, pady=(8, 3) if self._is_bento_mode() else (10, 5))
 
     def _add_sidebar_hint_item(self, parent, text):
         ctk.CTkLabel(
@@ -1152,10 +2283,16 @@ class ViewerApp(ctk.CTk):
 
     def _add_nav_item(self, parent, text, command, icon=">"):
         row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=3)
+        row.pack(fill="x", pady=2 if self._is_bento_mode() else 3)
 
-        indicator = ctk.CTkFrame(row, width=3, height=30, fg_color="transparent", corner_radius=2)
-        indicator.pack(side="left", fill="y", padx=(0, 6))
+        indicator = ctk.CTkFrame(
+            row,
+            width=3,
+            height=24 if self._is_bento_mode() else 30,
+            fg_color="transparent",
+            corner_radius=2,
+        )
+        indicator.pack(side="left", fill="y", padx=(0, 6), pady=4 if self._is_bento_mode() else 0)
 
         btn = self._create_nav_btn(row, text, command, icon=icon)
         btn.pack(side="left", fill="x", expand=True)
@@ -1165,18 +2302,639 @@ class ViewerApp(ctk.CTk):
         return btn
 
     def _set_nav_active(self, active_text):
+        is_hud = self._is_hud_mode()
+        is_bento = self._is_bento_mode()
         for btn_text, btn in self.nav_buttons.items():
             indicator = self.nav_indicators.get(btn_text)
             if btn_text == active_text:
-                btn.configure(text_color=COLOR_ACCENT, fg_color=COLOR_NAV_ACTIVE_BG, border_color=COLOR_BORDER)
+                if is_hud:
+                    btn.configure(text_color="#00F0FF", fg_color="#0A1D26")
+                else:
+                    btn.configure(
+                        text_color="#F8FAFC" if is_bento else COLOR_ACCENT,
+                        fg_color=COLOR_NAV_ACTIVE_BG,
+                        border_color=COLOR_ACCENT if is_bento else COLOR_BORDER,
+                    )
                 if indicator is not None:
                     indicator.configure(fg_color=COLOR_ACCENT)
             else:
-                inactive_bg = "transparent" if self._legacy_ui_mode else "#081425"
-                inactive_border = COLOR_BORDER if self._legacy_ui_mode else "#0E223A"
-                btn.configure(text_color=COLOR_TEXT, fg_color=inactive_bg, border_color=inactive_border)
+                if is_hud:
+                    btn.configure(text_color="#64748B", fg_color="transparent")
+                elif is_bento:
+                    btn.configure(text_color=COLOR_TEXT_DIM, fg_color="transparent", border_color=COLOR_SIDEBAR)
+                else:
+                    inactive_bg = "transparent" if self._legacy_ui_mode else "#081425"
+                    inactive_border = COLOR_BORDER if self._legacy_ui_mode else "#0E223A"
+                    btn.configure(text_color=COLOR_TEXT, fg_color=inactive_bg, border_color=inactive_border)
                 if indicator is not None:
                     indicator.configure(fg_color="transparent")
+
+    def _get_ui_style_display_name(self):
+        style = getattr(self, "_ui_style", "hud")
+        if style == "hud":
+            return t("HUD")
+        if style == "bento":
+            return t("Bento")
+        if style == "classic":
+            return t("Classic")
+        return t("Neon")
+
+    def _refresh_simple_mode_buttons(self):
+        lite_btn = getattr(self, "mode_lite_btn", None)
+        pro_btn = getattr(self, "mode_pro_btn", None)
+        if lite_btn is None or pro_btn is None:
+            return
+        try:
+            if not lite_btn.winfo_exists() or not pro_btn.winfo_exists():
+                return
+        except Exception:
+            return
+        is_simple = bool(getattr(self, "_ui_simple_mode", False))
+        active_txt = "#041016" if self._is_hud_mode() else "#FFFFFF"
+        if is_simple:
+            lite_btn.configure(fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=active_txt)
+            pro_btn.configure(fg_color="transparent", hover_color=COLOR_NAV_HOVER_BG, text_color=COLOR_TEXT_DIM)
+        else:
+            lite_btn.configure(fg_color="transparent", hover_color=COLOR_NAV_HOVER_BG, text_color=COLOR_TEXT_DIM)
+            pro_btn.configure(fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, text_color=active_txt)
+
+    def _set_ui_simple_mode(self, simple: bool):
+        simple_val = bool(simple)
+        if getattr(self, "_ui_simple_mode", False) == simple_val:
+            self._refresh_simple_mode_buttons()
+            return
+        self._ui_simple_mode = simple_val
+        config.ui_simple_mode = simple_val
+        self._refresh_simple_mode_buttons()
+        self._refresh_active_tab()
+
+    def _refresh_active_tab(self):
+        tab_name = str(getattr(self, "_active_tab_name", "General"))
+        tab_map = {
+            "General": self._show_general_tab,
+            "Main Aimbot": self._show_aimbot_tab,
+            "Config": self._show_config_tab,
+            "Debug": self._show_debug_tab,
+        }
+        tab_fn = tab_map.get(tab_name, self._show_general_tab)
+        self._set_nav_active(tab_name)
+        tab_fn()
+
+    def _list_quick_profile_names(self, limit=4):
+        try:
+            configs_dir = str(get_configs_dir())
+            os.makedirs(configs_dir, exist_ok=True)
+            raw_files = [f for f in os.listdir(configs_dir) if str(f).lower().endswith(".json")]
+        except Exception:
+            raw_files = []
+        file_map = {}
+        for filename in sorted(raw_files, key=lambda item: str(item).lower()):
+            display_name = self._config_display_name_from_filename(filename)
+            existing = file_map.get(display_name)
+            if existing:
+                existing_is_new = str(existing).lower().endswith("_cvm.json")
+                current_is_new = str(filename).lower().endswith("_cvm.json")
+                if existing_is_new and not current_is_new:
+                    continue
+                if current_is_new and not existing_is_new:
+                    file_map[display_name] = filename
+                continue
+            file_map[display_name] = filename
+        if not file_map:
+            return []
+        self._config_file_map = file_map
+        names = sorted(file_map.keys(), key=lambda item: str(item).lower())
+        return names[:limit]
+
+    @staticmethod
+    def _format_quick_profile_label(name):
+        short = str(name or "").strip()
+        for prefix in ("rank_", "preset_", "cvm_"):
+            if short.lower().startswith(prefix) and len(short) > len(prefix):
+                short = short[len(prefix):]
+        short = short.replace("_", " ").strip()
+        if len(short) > 12:
+            short = short[:11] + "…"
+        return short.title() if short else str(name)
+
+    def _build_quick_profiles_card(self, parent):
+        self._quick_profile_buttons = {}
+        names = self._list_quick_profile_names(limit=4)
+        if not names:
+            return
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#141A27",
+            border_color="#20293A",
+            border_width=1,
+            corner_radius=10,
+        )
+        card.pack(fill="x", pady=(0, 0))
+
+        ctk.CTkLabel(
+            card,
+            text=heading("Quick Profiles"),
+            font=("Segoe UI", 9, "bold"),
+            text_color="#64748B",
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(7, 4))
+
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=8, pady=(0, 8))
+        grid.grid_columnconfigure((0, 1), weight=1, uniform="qp")
+
+        for idx, profile_name in enumerate(names):
+            row = idx // 2
+            col = idx % 2
+            btn = ctk.CTkButton(
+                grid,
+                text=self._format_quick_profile_label(profile_name),
+                height=26,
+                fg_color="#1A2233",
+                hover_color="#24314A",
+                border_width=1,
+                border_color="#26334D",
+                text_color=COLOR_TEXT,
+                font=("Segoe UI", 9, "bold"),
+                corner_radius=6,
+                command=lambda n=profile_name: self._quick_load_profile(n),
+            )
+            btn.grid(row=row, column=col, sticky="ew", padx=2, pady=2)
+            self._quick_profile_buttons[profile_name] = btn
+        self._refresh_quick_profile_highlights()
+
+    def _refresh_quick_profile_highlights(self):
+        active = getattr(self, "_active_quick_profile", None)
+        is_hud = self._is_hud_mode()
+        for name, btn in list(getattr(self, "_quick_profile_buttons", {}).items()):
+            try:
+                if not btn.winfo_exists():
+                    continue
+                if active and str(name).lower() == str(active).lower():
+                    if is_hud:
+                        btn.configure(fg_color="#0A2430", border_color="#00F0FF", text_color="#00F0FF")
+                    else:
+                        btn.configure(fg_color="#1E3A8A", border_color=COLOR_ACCENT, text_color="#FFFFFF")
+                else:
+                    if is_hud:
+                        btn.configure(fg_color="#0B121A", border_color="#1B3040", text_color="#CBD5E1")
+                    else:
+                        btn.configure(fg_color="#1A2233", border_color="#26334D", text_color=COLOR_TEXT)
+            except Exception:
+                pass
+
+    def _quick_load_profile(self, display_name):
+        """Load ONLY Main Aim parameters from the selected profile; keep Hardware/Capture & OBS-synced HSV untouched."""
+        try:
+            path, normalized_name = self._resolve_config_path(display_name)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Config file must contain a JSON object.")
+            raw_settings = self._strip_config_metadata(data)
+            aim_only = {k: v for k, v in raw_settings.items() if k in QUICK_PROFILE_AIM_KEYS}
+            if "mode" in aim_only:
+                norm_mode = self._aim_mode_display_to_value(aim_only["mode"])
+                aim_only["mode"] = norm_mode if norm_mode in AIM_MODE_VALUE_TO_DISPLAY else "ABCurves"
+            self._active_quick_profile = normalized_name
+            self._apply_settings(aim_only, config_name=normalized_name)
+            self._sync_config_to_tracker()
+            config.save_to_file()
+            self._refresh_quick_profile_highlights()
+            if hasattr(self, "config_option") and self.config_option.winfo_exists():
+                try:
+                    self.config_option.set(normalized_name)
+                except Exception:
+                    pass
+            self._set_status_indicator(t("Profile: {name}", name=normalized_name), COLOR_ACCENT)
+            self._update_header_status_pills()
+        except Exception as e:
+            log_print(f"[UI] Quick profile load error ({display_name}): {e}")
+
+    def _draw_hud_fps_sparkline(self, force=False):
+        canvas = getattr(self, "hud_fps_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+            now = time.perf_counter()
+            if not force and (now - float(getattr(self, "_hud_spark_last_draw", 0.0))) < 1.0:
+                return
+            w = max(120, int(canvas.winfo_width()))
+            h = max(60, int(canvas.winfo_height()))
+
+            items = getattr(self, "_hud_spark_items", None)
+            if items is None or items.get("size") != (w, h):
+                canvas.delete("all")
+                for frac in (0.25, 0.5, 0.75):
+                    y = int(h * frac)
+                    canvas.create_line(0, y, w, y, fill="#0E1A24")
+                line_id = canvas.create_line(0, h - 6, w, h - 6, fill="#00F0FF", width=1.8, smooth=False)
+                dot_id = canvas.create_oval(-10, -10, -5, -5, fill="#00F0FF", outline="")
+                items = {"size": (w, h), "line": line_id, "dot": dot_id}
+                self._hud_spark_items = items
+                self._hud_spark_last_points = None
+
+            hist = getattr(self, "_hud_fps_history", None)
+            if not hist:
+                return
+            max_fps = max(144.0, max(hist) * 1.15)
+            pad_x = 4
+            pad_y = 6
+            usable_w = max(1, w - pad_x * 2)
+            usable_h = max(1, h - pad_y * 2)
+            step_x = usable_w / max(1, len(hist) - 1)
+
+            points = []
+            for idx, fps_val in enumerate(hist):
+                clamped = max(0.0, min(max_fps, float(fps_val)))
+                x = round(pad_x + idx * step_x, 1)
+                y = round(h - pad_y - (clamped / max_fps) * usable_h, 1)
+                points.append(x)
+                points.append(y)
+
+            pts_tuple = tuple(points)
+            if force or pts_tuple != getattr(self, "_hud_spark_last_points", None):
+                if len(points) >= 4:
+                    canvas.coords(items["line"], *points)
+                    lx, ly = points[-2], points[-1]
+                    canvas.coords(items["dot"], lx - 2.5, ly - 2.5, lx + 2.5, ly + 2.5)
+                self._hud_spark_last_points = pts_tuple
+            self._hud_spark_last_draw = now
+        except Exception:
+            pass
+
+    def _update_hud_telemetry_ui(self, fps_text=None, delay_text=None):
+        """Update Demo 3 HUD telemetry with strict dirty-checking (zero redundant CTk redraws / GIL stalls)."""
+        cache = getattr(self, "_hud_ui_cache", None)
+        if cache is None:
+            cache = {}
+            self._hud_ui_cache = cache
+
+        mode = str(getattr(self.capture, "mode", "UDP"))
+        connected = bool(self.capture.is_connected())
+
+        if fps_text is None:
+            raw_fps = self.fps_label.cget("text") if hasattr(self, "fps_label") and self.fps_label.winfo_exists() else "--"
+            fps_val = str(raw_fps).replace("FPS:", "").strip() or "--"
+        else:
+            fps_val = str(fps_text)
+
+        raw_decode = self.decode_delay_label.cget("text") if hasattr(self, "decode_delay_label") and self.decode_delay_label.winfo_exists() else "-- ms"
+        decode_val = str(raw_decode).replace("Decode:", "").replace("Grab:", "").strip() or "-- ms"
+
+        # Update rolling FPS sparkline (throttled to <=1Hz with coords() reuse, zero delete("all"))
+        try:
+            numeric_fps = float(fps_val.replace("~", "").strip())
+        except Exception:
+            numeric_fps = 0.0
+        hist = getattr(self, "_hud_fps_history", None)
+        if isinstance(hist, list):
+            next_sample = round(numeric_fps if connected else 0.0, 1)
+            hist.append(next_sample)
+            if len(hist) > 40:
+                del hist[:-40]
+
+        stream_state = (f"{mode}: {fps_val} FPS", "#00F0FF" if connected else "#64748B")
+        if cache.get("stream") != stream_state and getattr(self, "hud_stream_metric", None) is not None:
+            try:
+                if self.hud_stream_metric.winfo_exists():
+                    self.hud_stream_metric.configure(text=stream_state[0], text_color=stream_state[1])
+                    cache["stream"] = stream_state
+            except Exception:
+                pass
+
+        decode_state = f"DECODE: {decode_val}"
+        if cache.get("decode") != decode_state and getattr(self, "hud_decode_metric", None) is not None:
+            try:
+                if self.hud_decode_metric.winfo_exists():
+                    self.hud_decode_metric.configure(text=decode_state)
+                    cache["decode"] = decode_state
+            except Exception:
+                pass
+
+        graph_val_state = (f"{fps_val} FPS" if connected else t("Offline"), "#00F0FF" if connected else "#64748B")
+        if cache.get("graph_val") != graph_val_state and getattr(self, "hud_fps_graph_val", None) is not None:
+            try:
+                if self.hud_fps_graph_val.winfo_exists():
+                    self.hud_fps_graph_val.configure(text=graph_val_state[0], text_color=graph_val_state[1])
+                    cache["graph_val"] = graph_val_state
+            except Exception:
+                pass
+        self._draw_hud_fps_sparkline(force=False)
+
+        # Hardware status
+        hw_mode = self._normalize_mouse_api_name(getattr(config, "mouse_api", "Medius"))
+        hw_connected = False
+        try:
+            from src.utils import mouse as mouse_backend
+            hw_connected = bool(getattr(mouse_backend, "is_connected", False))
+            if hw_connected:
+                active_backend = mouse_backend.get_active_backend()
+                if active_backend:
+                    hw_mode = self._normalize_mouse_api_name(active_backend) or hw_mode
+        except Exception:
+            hw_connected = False
+
+        hw_state = (
+            f"HW: {hw_mode} ({t('OK') if hw_connected else t('Off')})",
+            "#10B981" if hw_connected else "#FF3B5C",
+        )
+        if cache.get("hw") != hw_state and getattr(self, "hud_hw_metric", None) is not None:
+            try:
+                if self.hud_hw_metric.winfo_exists():
+                    self.hud_hw_metric.configure(text=hw_state[0], text_color=hw_state[1])
+                    cache["hw"] = hw_state
+            except Exception:
+                pass
+
+        # Aim Activation / Toggle State (strictly read-only + dirty-checked so CTkFrame never redraws redundantly)
+        act_type = str(getattr(config, "aimbot_activation_type", "hold_enable")).strip().lower()
+        aim_enabled = bool(getattr(config, "enableaim", False))
+        key_display = self._ads_binding_to_display(getattr(config, "selected_mouse_button", 3))
+
+        if not aim_enabled:
+            metric_txt = f"AIM: {t('Disabled').upper()}"
+            metric_col = "#64748B"
+            banner_txt = f"[ AIMBOT: {t('Disabled').upper()} ]"
+            banner_sub = t("Enable Main Aimbot to arm targeting")
+            box_bg, box_border, title_col = "#0D1117", "#1F2937", "#64748B"
+        elif act_type == "toggle":
+            toggle_on = False
+            try:
+                from src.utils.activation import get_aimbot_toggle_state
+                toggle_on = bool(get_aimbot_toggle_state())
+            except Exception:
+                toggle_on = False
+            if toggle_on:
+                metric_txt = f"TOGGLE: {t('ON')}"
+                metric_col = "#00F0FF"
+                banner_txt = f"[ AIMBOT: ACTIVE // TOGGLE {t('ON')} ]"
+                banner_sub = f"{t('Keybind')}: {key_display}"
+                box_bg, box_border, title_col = "#081E26", "#00F0FF", "#00F0FF"
+            else:
+                metric_txt = f"TOGGLE: {t('OFF')}"
+                metric_col = "#FFB800"
+                banner_txt = f"[ AIMBOT: STANDBY // TOGGLE {t('OFF')} ]"
+                banner_sub = f"{t('Keybind')}: {key_display}"
+                box_bg, box_border, title_col = "#1D1607", "#FFB800", "#FFB800"
+        else:
+            mode_label = t("Press").upper() if act_type == "use_enable" else t("Hold").upper()
+            metric_txt = f"AIM: {mode_label}"
+            metric_col = "#00F0FF"
+            banner_txt = f"[ AIMBOT: {mode_label} MODE ]"
+            banner_sub = f"{t('Keybind')}: {key_display}"
+            box_bg, box_border, title_col = "#081A24", "#00B8D4", "#00F0FF"
+
+        toggle_metric_state = (metric_txt, metric_col)
+        if cache.get("toggle_metric") != toggle_metric_state and getattr(self, "hud_toggle_metric", None) is not None:
+            try:
+                if self.hud_toggle_metric.winfo_exists():
+                    self.hud_toggle_metric.configure(text=metric_txt, text_color=metric_col)
+                    cache["toggle_metric"] = toggle_metric_state
+            except Exception:
+                pass
+
+        banner_state = (box_bg, box_border, banner_txt, banner_sub, title_col)
+        if cache.get("banner") != banner_state and getattr(self, "hud_status_box", None) is not None:
+            try:
+                if self.hud_status_box.winfo_exists():
+                    prev_banner = cache.get("banner")
+                    if prev_banner is None or prev_banner[:2] != (box_bg, box_border):
+                        self.hud_status_box.configure(fg_color=box_bg, border_color=box_border)
+                    self.hud_status_title.configure(text=banner_txt, text_color=title_col)
+                    self.hud_status_sub.configure(text=banner_sub)
+                    self.hud_status_dot.configure(text_color=title_col)
+                    cache["banner"] = banner_state
+            except Exception:
+                pass
+
+        # Active Profile Matrix Summary (read-only + dirty-checked)
+        summary = getattr(self, "hud_hsv_summary_labels", None) or {}
+        if summary:
+            try:
+                color_name = str(getattr(config, "color", "purple")).lower()
+                if color_name == "purple":
+                    hsv_txt = "H:120-160 S:95-255"
+                elif color_name == "yellow":
+                    hsv_txt = "H:20-30 S:100-255"
+                elif color_name == "red":
+                    hsv_txt = "H:0-10/160-180"
+                else:
+                    h0 = int(getattr(config, "custom_hsv_min_h", 0))
+                    h1 = int(getattr(config, "custom_hsv_max_h", 179))
+                    s0 = int(getattr(config, "custom_hsv_min_s", 0))
+                    s1 = int(getattr(config, "custom_hsv_max_s", 255))
+                    hsv_txt = f"H:{h0}-{h1} S:{s0}-{s1}"
+
+                active_prof = self._active_quick_profile or "active"
+                compute_txt = "CPU"
+                try:
+                    from src.utils.detection import get_compute_backend_info
+                    cinfo = get_compute_backend_info()
+                    if cinfo.get("active_backend") == "GPU":
+                        if str(getattr(config, "capture_mode", "UDP")).upper() == "UDP":
+                            compute_txt = "CPU (Auto <=400px)"
+                        else:
+                            compute_txt = f"GPU · {cinfo['short_name']}"
+                    else:
+                        compute_txt = "CPU (SIMD)"
+                except Exception:
+                    compute_txt = "CPU"
+                vals = {
+                    "profile": self._format_quick_profile_label(active_prof),
+                    "mode": str(getattr(config, "mode", "ABCurves")),
+                    "fov": f"{int(float(getattr(config, 'fovsize', 150)))} px",
+                    "color": color_name.upper(),
+                    "hsv": hsv_txt,
+                    "compute": compute_txt,
+                }
+                summary_sig = tuple(vals.items())
+                if cache.get("summary") != summary_sig:
+                    for key, val in vals.items():
+                        lbl = summary.get(key)
+                        if lbl is not None and lbl.winfo_exists():
+                            if key == "compute":
+                                lbl.configure(
+                                    text=val,
+                                    text_color="#10B981" if val.startswith("GPU") else "#94A3B8",
+                                )
+                            else:
+                                lbl.configure(text=val)
+                    cache["summary"] = summary_sig
+            except Exception:
+                pass
+
+    def _update_header_status_pills(self, fps_text=None, delay_text=None):
+        if self._is_hud_mode():
+            self._update_hud_telemetry_ui(fps_text=fps_text, delay_text=delay_text)
+            return
+        if not self._is_bento_mode():
+            return
+
+        # 1. Stream / FPS Pill
+        fps_pill = getattr(self, "header_fps_pill", None)
+        if fps_pill is not None:
+            try:
+                if fps_pill.winfo_exists():
+                    mode = str(getattr(self.capture, "mode", "UDP"))
+                    connected = bool(self.capture.is_connected())
+                    if fps_text is None:
+                        raw_fps = self.fps_label.cget("text") if hasattr(self, "fps_label") and self.fps_label.winfo_exists() else "--"
+                        fps_val = str(raw_fps).replace("FPS:", "").strip() or "--"
+                    else:
+                        fps_val = str(fps_text)
+                    if delay_text is None and hasattr(self, "total_delay_label") and self.total_delay_label.winfo_exists():
+                        raw_delay = str(self.total_delay_label.cget("text")).replace("Delay:", "").strip()
+                        delay_val = raw_delay if raw_delay and raw_delay not in ("-- ms", "N/A") else ""
+                    else:
+                        delay_val = str(delay_text or "")
+                    val_str = f"{fps_val} FPS" if fps_val != "--" else "-- FPS"
+                    if delay_val:
+                        val_str = f"{val_str} · {delay_val}"
+                    fps_pill.update_value(
+                        val_str,
+                        dot_color=COLOR_SUCCESS if connected else "#64748B",
+                        label=mode,
+                        fg_color="#102826" if connected else "#151B28",
+                        border_color="#10B981" if connected else "#232D42",
+                        text_color="#E2E8F0" if connected else COLOR_TEXT_DIM,
+                    )
+            except Exception:
+                pass
+
+        # 2. Hardware Pill
+        hw_pill = getattr(self, "header_hw_pill", None)
+        if hw_pill is not None:
+            try:
+                if hw_pill.winfo_exists():
+                    hw_mode = self._normalize_mouse_api_name(getattr(config, "mouse_api", "Medius"))
+                    hw_connected = False
+                    try:
+                        from src.utils import mouse as mouse_backend
+                        hw_connected = bool(getattr(mouse_backend, "is_connected", False))
+                        if hw_connected:
+                            active_backend = mouse_backend.get_active_backend()
+                            if active_backend:
+                                hw_mode = self._normalize_mouse_api_name(active_backend) or hw_mode
+                    except Exception:
+                        hw_connected = False
+                    hw_pill.update_value(
+                        f"{hw_mode} ({t('OK')})" if hw_connected else f"{hw_mode} ({t('Off')})",
+                        dot_color=COLOR_SUCCESS if hw_connected else COLOR_DANGER,
+                        label=t("HW"),
+                        fg_color="#102826" if hw_connected else "#24141D",
+                        border_color="#10B981" if hw_connected else "#4C1D2D",
+                        text_color="#A7F3D0" if hw_connected else "#FDA4AF",
+                    )
+            except Exception:
+                pass
+
+        # 3. Live Aim Toggle / Activation Pill (strictly read-only!)
+        toggle_pill = getattr(self, "header_toggle_pill", None)
+        if toggle_pill is not None:
+            try:
+                if toggle_pill.winfo_exists():
+                    act_type = str(getattr(config, "aimbot_activation_type", "hold_enable")).strip().lower()
+                    aim_enabled = bool(getattr(config, "enableaim", False))
+                    if not aim_enabled:
+                        toggle_pill.update_value(
+                            t("Disabled"),
+                            dot_color="#64748B",
+                            label=t("Aim"),
+                            fg_color="#151B28",
+                            border_color="#232D42",
+                            text_color=COLOR_TEXT_DIM,
+                        )
+                    elif act_type == "toggle":
+                        toggle_on = False
+                        try:
+                            from src.utils.activation import get_aimbot_toggle_state
+                            toggle_on = bool(get_aimbot_toggle_state())
+                        except Exception:
+                            toggle_on = False
+                        toggle_pill.update_value(
+                            t("ON") if toggle_on else t("OFF"),
+                            dot_color=COLOR_SUCCESS if toggle_on else COLOR_DANGER,
+                            label=t("Toggle"),
+                            fg_color="#102826" if toggle_on else "#2A1420",
+                            border_color="#10B981" if toggle_on else "#F43F5E",
+                            text_color="#6EE7B7" if toggle_on else "#FDA4AF",
+                        )
+                    else:
+                        mode_label = t("Press") if act_type == "use_enable" else t("Hold")
+                        toggle_pill.update_value(
+                            mode_label,
+                            dot_color=COLOR_ACCENT,
+                            label=t("Aim"),
+                            fg_color="#152238",
+                            border_color="#2563EB",
+                            text_color="#93C5FD",
+                        )
+            except Exception:
+                pass
+
+    def _create_bento_grid(self, parent):
+        """Create a balanced 2-column Bento grid returning (grid_frame, left_col, right_col)."""
+        grid = ctk.CTkFrame(parent, fg_color="transparent")
+        grid.pack(fill="x", expand=True, pady=(4, 0))
+        grid.grid_columnconfigure(0, weight=1, uniform="bento_col")
+        grid.grid_columnconfigure(1, weight=1, uniform="bento_col")
+
+        left_col = ctk.CTkFrame(grid, fg_color="transparent")
+        left_col.grid(row=0, column=0, sticky="new", padx=(0, 8))
+
+        right_col = ctk.CTkFrame(grid, fg_color="transparent")
+        right_col.grid(row=0, column=1, sticky="new", padx=(8, 0))
+        return grid, left_col, right_col
+
+    def _add_lite_mode_hint_card(self, parent, summary_text):
+        """Show a compact hint in Simple (Lite) mode with a 1-click switch to Pro Mode."""
+        is_hud = self._is_hud_mode()
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#090D13" if is_hud else "#131B2B",
+            border_color="#162630" if is_hud else "#243454",
+            border_width=1,
+            corner_radius=4 if is_hud else 12,
+        )
+        card.pack(fill="x", pady=(8, 0))
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(
+            inner,
+            text=f"// {t('Simple (Lite) Mode Active')}" if is_hud else t("Simple (Lite) Mode Active"),
+            font=("Consolas", 10, "bold") if is_hud else ("Segoe UI", 11, "bold"),
+            text_color="#00F0FF" if is_hud else "#93C5FD",
+            anchor="w",
+        ).pack(fill="x")
+
+        ctk.CTkLabel(
+            inner,
+            text=t(summary_text),
+            font=("Consolas", 9) if is_hud else ("Segoe UI", 10),
+            text_color=COLOR_TEXT_DIM,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        ).pack(fill="x", pady=(3, 8))
+
+        ctk.CTkButton(
+            inner,
+            text=t("Switch to Pro Mode"),
+            height=28,
+            fg_color="#0A2430" if is_hud else "#1E3A8A",
+            hover_color="#00B8D4" if is_hud else "#2563EB",
+            border_width=1 if is_hud else 0,
+            border_color="#00F0FF" if is_hud else COLOR_BORDER,
+            text_color="#00F0FF" if is_hud else "#FFFFFF",
+            font=("Consolas", 10, "bold") if is_hud else ("Segoe UI", 10, "bold"),
+            corner_radius=3 if is_hud else 7,
+            command=lambda: self._set_ui_simple_mode(False),
+        ).pack(anchor="w")
 
     def _handle_nav_click(self, text, command):
         self._active_tab_name = str(text)
@@ -1212,7 +2970,15 @@ class ViewerApp(ctk.CTk):
             self.theme_btn.configure(text=t("Dark Mode"))
 
     def _toggle_ui_style(self):
-        self._legacy_ui_mode = not self._legacy_ui_mode
+        current = getattr(self, "_ui_style", "hud")
+        try:
+            idx = UI_STYLE_ORDER.index(current)
+        except ValueError:
+            idx = 0
+        next_style = UI_STYLE_ORDER[(idx + 1) % len(UI_STYLE_ORDER)]
+        self._ui_style = next_style
+        self._legacy_ui_mode = next_style == "classic"
+        config.ui_style = next_style
         config.legacy_ui_mode = bool(self._legacy_ui_mode)
         self._rebuild_layout_for_ui_style()
 
@@ -1220,25 +2986,22 @@ class ViewerApp(ctk.CTk):
         tab_name = str(getattr(self, "_active_tab_name", "General"))
         self._cancel_binding_capture()
 
-        for attr in ("title_bar", "sidebar", "content_frame"):
+        for attr in ("title_bar", "hud_nav_bar", "hud_quick_bar", "sidebar", "content_frame"):
             widget = getattr(self, attr, None)
             if widget is not None:
                 try:
                     widget.destroy()
                 except Exception:
                     pass
+                setattr(self, attr, None)
 
-        _apply_theme_preset("classic" if self._legacy_ui_mode else "neon")
+        _apply_theme_preset(getattr(self, "_ui_style", "hud"))
         self.configure(fg_color=COLOR_BG)
         self._build_layout()
 
         tab_map = {
             "General": self._show_general_tab,
             "Main Aimbot": self._show_aimbot_tab,
-            "Sec Aimbot": self._show_sec_aimbot_tab,
-            "Trigger": self._show_tb_tab,
-            "Magnet Trigger": self._show_magnet_trigger_tab,
-            "RCS": self._show_rcs_tab,
             "Config": self._show_config_tab,
             "Debug": self._show_debug_tab,
         }
@@ -1257,8 +3020,22 @@ class ViewerApp(ctk.CTk):
         self._add_title("General")
         self._ignore_settings_events = True
 
+        is_bento = self._uses_two_col_grid()
+        is_simple = is_bento and bool(getattr(self, "_ui_simple_mode", False))
+        if is_bento:
+            _, left_col, right_col = self._create_bento_grid(self.content_frame)
+            capture_parent = left_col
+            settings_parent = left_col
+            hardware_parent = right_col
+            advanced_parent = right_col
+        else:
+            capture_parent = self.content_frame
+            settings_parent = self.content_frame
+            hardware_parent = self.content_frame
+            advanced_parent = self.content_frame
+
         # -- HARDWARE API (collapsible) --
-        sec_hardware = self._create_collapsible_section(self.content_frame, "Hardware API", initially_open=True)
+        sec_hardware = self._create_collapsible_section(hardware_parent, "Hardware API", initially_open=True)
         self.var_auto_connect_mouse_api = tk.BooleanVar(value=bool(getattr(config, "auto_connect_mouse_api", False)))
         current_mouse_api = getattr(config, "mouse_api", "Medius")
         current_mouse_api_norm = str(current_mouse_api).strip().lower()
@@ -1473,7 +3250,7 @@ class ViewerApp(ctk.CTk):
         self._update_mouse_api_ui()
         self._update_keyboard_api_ui()
 
-        sec_capture = self._create_collapsible_section(self.content_frame, "Capture", initially_open=True)
+        sec_capture = self._create_collapsible_section(capture_parent, "Capture", initially_open=True)
         self.capture_settings_frame = sec_capture
         self.capture_method_var.set(self._capture_display_mode(self.capture.mode))
         self.capture_method_option = self._add_option_row_in_frame(
@@ -1491,7 +3268,7 @@ class ViewerApp(ctk.CTk):
         self._apply_runtime_settings_lock()
 
         # -- SETTINGS (collapsible) --
-        sec_settings = self._create_collapsible_section(self.content_frame, "Settings", initially_open=True)
+        sec_settings = self._create_collapsible_section(settings_parent, "Settings", initially_open=True)
         
         # In-Game Sensitivity (闋愯ō 0.235, 绡勫湇 0.1-20)
         self._add_slider_in_frame(sec_settings, "In-Game Sensitivity", "in_game_sens", 0.1, 20, 
@@ -1507,17 +3284,30 @@ class ViewerApp(ctk.CTk):
             self._on_color_selected,
         )
         self._option_widgets["color"] = self.color_option
-        # 瑷疆鐣跺墠鍊?
+        # 設置當前值
         current_color = getattr(config, "color", "yellow")
         self.color_option.set(current_color)
+
+        # GPU + CPU Hybrid OpenCL Offload Toggle
+        gpu_label = t("GPU Offload (OpenCL)")
+        try:
+            from src.utils.detection import get_compute_backend_info
+            cinfo = get_compute_backend_info()
+            if cinfo.get("gpu_available"):
+                gpu_label = f"{t('GPU Offload (OpenCL)')} [{cinfo.get('short_name', 'GPU')}]"
+        except Exception:
+            pass
+        self.var_gpu_opencl = tk.BooleanVar(value=bool(getattr(config, "gpu_opencl_enabled", True)))
+        self._add_switch_in_frame(sec_settings, gpu_label, self.var_gpu_opencl, self._on_gpu_opencl_changed)
+        self._checkbox_vars["gpu_opencl_enabled"] = self.var_gpu_opencl
         
         # 鈹€鈹€ Custom HSV Settings (collapsible, only show when custom is selected) 鈹€鈹€
         # 鍓靛缓 container 浠ヤ究鎺у埗椤ず/闅辫棌锛堜笉鑷嫊 pack锛?
         self.custom_hsv_section, self.custom_hsv_container = self._create_collapsible_section(
-            self.content_frame, "Custom HSV", initially_open=True, auto_pack=False
+            settings_parent, "Custom HSV", initially_open=True, auto_pack=False
         )
         if current_color == "custom":
-            self.custom_hsv_container.pack(fill="x", pady=(5, 0))
+            self.custom_hsv_container.pack(fill="x", pady=(0, 10) if is_bento else (5, 0))
         self._hsv_preview_btn_frame = ctk.CTkFrame(self.custom_hsv_section, fg_color="transparent")
         self._hsv_preview_btn_frame.pack(fill="x", pady=(0, 8))
         ctk.CTkButton(
@@ -1563,6 +3353,13 @@ class ViewerApp(ctk.CTk):
         # 鏍规摎鐣跺墠閬告搰椤ず/闅辫棌 Custom HSV 鍗€濉?
 
         self._update_custom_hsv_visibility()
+
+        if is_simple:
+            self._add_lite_mode_hint_card(
+                advanced_parent,
+                "Advanced Detection Filters, Mouse Lock & Button Mask are hidden in Lite mode.",
+            )
+            return
         
         # 鈹€鈹€ DETECTION PARAMETERS (collapsible) 鈹€鈹€
         detection_tooltip_text = (
@@ -1577,7 +3374,7 @@ class ViewerApp(ctk.CTk):
             "- Strict Noise Rejection: Stops grabbing tiny 20px purple sparks when no real target is detected."
         )
         sec_detection = self._create_collapsible_section(
-            self.content_frame, 
+            advanced_parent, 
             "Detection Parameters", 
             initially_open=False,
             tooltip_text=detection_tooltip_text
@@ -1647,7 +3444,7 @@ class ViewerApp(ctk.CTk):
             "Note: The lock will automatically release when the aimbot button is released or aimbot stops moving."
         )
         sec_mouse_lock = self._create_collapsible_section(
-            self.content_frame,
+            advanced_parent,
             "Mouse Lock",
             initially_open=False,
             tooltip_text=mouse_lock_tooltip_text
@@ -1680,7 +3477,7 @@ class ViewerApp(ctk.CTk):
         self._checkbox_vars["mouse_lock_sec_y"] = self.var_mouse_lock_sec_y
         
         # 鈹€鈹€ BUTTON MASK (collapsible) 鈹€鈹€
-        sec_button_mask = self._create_collapsible_section(self.content_frame, "Button Mask", initially_open=False)
+        sec_button_mask = self._create_collapsible_section(advanced_parent, "Button Mask", initially_open=False)
         
         # Button Mask 绺介枊闂?
         if not hasattr(self, 'var_button_mask_enabled'):
@@ -4661,27 +6458,51 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Main Aimbot"
         self._clear_content()
         self._add_title("Main Aimbot")
-        
+
+        is_bento = self._uses_two_col_grid()
+        is_simple = is_bento and bool(getattr(self, "_ui_simple_mode", False))
+
         self.var_enableaim = tk.BooleanVar(value=getattr(config, "enableaim", False))
-        self._add_switch("Enable Aimbot", self.var_enableaim, self._on_enableaim_changed)
         self._checkbox_vars["enableaim"] = self.var_enableaim
+
+        if is_bento:
+            top_bar = ctk.CTkFrame(
+                self.content_frame,
+                fg_color=COLOR_SURFACE,
+                border_color=COLOR_BORDER,
+                border_width=1,
+                corner_radius=4 if self._is_hud_mode() else 12,
+            )
+            top_bar.pack(fill="x", pady=(0, 8))
+            top_inner = ctk.CTkFrame(top_bar, fg_color="transparent")
+            top_inner.pack(fill="x", padx=14, pady=8)
+            self._add_switch_in_frame(top_inner, "Enable Aimbot", self.var_enableaim, self._on_enableaim_changed)
+
+            _, left_col, right_col = self._create_bento_grid(self.content_frame)
+            mode_parent = left_col
+            params_parent = right_col
+            preview_parent = right_col
+            meta_parent = left_col
+        else:
+            self._add_switch("Enable Aimbot", self.var_enableaim, self._on_enableaim_changed)
+            mode_parent = self.content_frame
+            params_parent = self.content_frame
+            preview_parent = self.content_frame
+            meta_parent = self.content_frame
         
-        # Anti-Smoke Switch
-        self.var_anti_smoke = tk.BooleanVar(value=getattr(config, "anti_smoke_enabled", False))
-        self._add_switch("Enable Anti-Smoke", self.var_anti_smoke, self._on_anti_smoke_changed)
-        self._checkbox_vars["anti_smoke_enabled"] = self.var_anti_smoke
-        
-        # 鈹€鈹€ OPERATION MODE (collapsible) 鈹€鈹€
-        sec_mode = self._create_collapsible_section(self.content_frame, "Operation Mode", initially_open=True)
+        # ── OPERATION MODE (collapsible) ──
+        sec_mode = self._create_collapsible_section(mode_parent, "Operation Mode", initially_open=True)
         self.mode_option = self._add_option_row_in_frame(sec_mode, "Mode", AIM_MODE_OPTIONS, self._on_mode_selected)
         self._option_widgets["mode"] = self.mode_option
         current_mode = self._aim_mode_display_to_value(getattr(config, "mode", "ABCurves"))
+        if current_mode not in AIM_MODE_VALUE_TO_DISPLAY:
+            current_mode = "ABCurves"
         config.mode = current_mode
         self.mode_option.set(self._aim_mode_value_to_display(current_mode))
         
         # 鈹€鈹€ MODE PARAMETERS (collapsible) 鈹€鈹€
         sec_params = self._create_collapsible_section(
-            self.content_frame,
+            params_parent,
             f"{current_mode} Parameters",
             initially_open=True,
             state_key="mode_parameters",
@@ -4857,7 +6678,8 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "fovsize", 300)),
                                       self._on_fovsize_changed)
             self._add_ads_fov_controls_in_frame(sec_params, is_sec=False)
-            self._add_pid_preview_section(is_sec=False)
+            if not is_simple:
+                self._add_pid_preview_section(is_sec=False, parent=preview_parent)
 
         elif current_mode == "ABCurves":
             self._add_subtitle_in_frame(sec_params, "ABCURVES PARAMETERS")
@@ -4890,27 +6712,40 @@ class ViewerApp(ctk.CTk):
                                       self._on_fovsize_changed)
             self._add_ads_fov_controls_in_frame(sec_params, is_sec=False)
 
-        if current_mode != "PID":
-            self._add_mouse_path_preview_section(is_sec=False)
+        if current_mode != "PID" and not is_simple:
+            self._add_mouse_path_preview_section(is_sec=False, parent=preview_parent)
         
-        # 鈹€鈹€ OFFSET (collapsible) 鈹€鈹€
-        sec_offset = self._create_collapsible_section(self.content_frame, "Offset", initially_open=False)
-        self._add_slider_in_frame(sec_offset, "X-Offset", "aim_offsetX", -100, 100,
-                                  float(getattr(config, "aim_offsetX", 0)),
-                                  self._on_aim_offsetX_changed)
-        self._add_slider_in_frame(sec_offset, "Y-Offset", "aim_offsetY", -100, 100,
-                                  float(getattr(config, "aim_offsetY", 0)),
-                                  self._on_aim_offsetY_changed)
+        # 鈹€鈹€ OFFSET (collapsible, hidden in Lite mode) 鈹€鈹€
+        if not is_simple:
+            sec_offset = self._create_collapsible_section(meta_parent, "Offset", initially_open=False)
+            self._add_slider_in_frame(sec_offset, "X-Offset", "aim_offsetX", -100, 100,
+                                      float(getattr(config, "aim_offsetX", 0)),
+                                      self._on_aim_offsetX_changed)
+            self._add_slider_in_frame(sec_offset, "Y-Offset", "aim_offsetY", -100, 100,
+                                      float(getattr(config, "aim_offsetY", 0)),
+                                      self._on_aim_offsetY_changed)
+            self.aim_offset_dist_var = ctk.BooleanVar(
+                value=bool(getattr(config, "aim_offset_distance_scaling", True))
+            )
+            self._add_switch_in_frame(
+                sec_offset,
+                "Distance Scaling (50m+)",
+                self.aim_offset_dist_var,
+                lambda: (
+                    setattr(config, "aim_offset_distance_scaling", bool(self.aim_offset_dist_var.get())),
+                    config.save_to_file(),
+                ),
+            )
         
         # 鈹€鈹€ AIM TYPE (collapsible) 鈹€鈹€
-        sec_aim_type = self._create_collapsible_section(self.content_frame, "Aim Type", initially_open=False)
+        sec_aim_type = self._create_collapsible_section(meta_parent, "Aim Type", initially_open=is_bento)
         self.aim_type_option = self._add_option_row_in_frame(sec_aim_type, "Target", ["head", "body", "nearest"], self._on_aim_type_selected)
         self._option_widgets["aim_type"] = self.aim_type_option
         current_aim_type = getattr(config, "aim_type", "head")
         self.aim_type_option.set(current_aim_type)
         
         # 鈹€鈹€ ACTIVATION (collapsible) 鈹€鈹€
-        sec_activation = self._create_collapsible_section(self.content_frame, "Activation", initially_open=False)
+        sec_activation = self._create_collapsible_section(meta_parent, "Activation", initially_open=is_bento)
         current_btn = self._ads_binding_to_display(getattr(config, "selected_mouse_button", 3))
         self.aim_key_bind_button = self._add_bind_capture_row_in_frame(
             sec_activation,
@@ -4954,23 +6789,62 @@ class ViewerApp(ctk.CTk):
         self._option_widgets["ads_key_type"] = self.ads_key_type_option
         current_ads_key_type = str(getattr(config, "ads_key_type", "hold")).strip().lower()
         self.ads_key_type_option.set(ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(current_ads_key_type, "Hold"))
+        if is_simple:
+            self._add_lite_mode_hint_card(
+                meta_parent,
+                "Offset fine-tuning, Anti-Smoke & Live Mouse Path Preview are hidden in Lite mode.",
+            )
 
     def _show_sec_aimbot_tab(self):
         self._active_tab_name = "Sec Aimbot"
         self._clear_content()
         self._add_title("Secondary Aimbot")
+
+        is_bento = self._uses_two_col_grid()
+        is_simple = is_bento and bool(getattr(self, "_ui_simple_mode", False))
         
         self.var_enableaim_sec = tk.BooleanVar(value=getattr(config, "enableaim_sec", False))
-        self._add_switch("Enable Sec Aimbot", self.var_enableaim_sec, self._on_enableaim_sec_changed)
         self._checkbox_vars["enableaim_sec"] = self.var_enableaim_sec
-        
-        # Anti-Smoke Switch for Sec Aimbot
         self.var_anti_smoke_sec = tk.BooleanVar(value=getattr(config, "anti_smoke_enabled_sec", False))
-        self._add_switch("Enable Anti-Smoke", self.var_anti_smoke_sec, self._on_anti_smoke_sec_changed)
         self._checkbox_vars["anti_smoke_enabled_sec"] = self.var_anti_smoke_sec
+
+        if is_bento:
+            top_bar = ctk.CTkFrame(
+                self.content_frame,
+                fg_color=COLOR_SURFACE,
+                border_color=COLOR_BORDER,
+                border_width=1,
+                corner_radius=4 if self._is_hud_mode() else 12,
+            )
+            top_bar.pack(fill="x", pady=(0, 8))
+            top_inner = ctk.CTkFrame(top_bar, fg_color="transparent")
+            top_inner.pack(fill="x", padx=14, pady=8)
+            top_inner.grid_columnconfigure((0, 1), weight=1, uniform="sec_aim_top")
+
+            left_sw = ctk.CTkFrame(top_inner, fg_color="transparent")
+            left_sw.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+            self._add_switch_in_frame(left_sw, "Enable Sec Aimbot", self.var_enableaim_sec, self._on_enableaim_sec_changed)
+
+            if not is_simple:
+                right_sw = ctk.CTkFrame(top_inner, fg_color="transparent")
+                right_sw.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+                self._add_switch_in_frame(right_sw, "Enable Anti-Smoke", self.var_anti_smoke_sec, self._on_anti_smoke_sec_changed)
+
+            _, left_col, right_col = self._create_bento_grid(self.content_frame)
+            mode_parent = left_col
+            params_parent = right_col
+            preview_parent = right_col
+            meta_parent = left_col
+        else:
+            self._add_switch("Enable Sec Aimbot", self.var_enableaim_sec, self._on_enableaim_sec_changed)
+            self._add_switch("Enable Anti-Smoke", self.var_anti_smoke_sec, self._on_anti_smoke_sec_changed)
+            mode_parent = self.content_frame
+            params_parent = self.content_frame
+            preview_parent = self.content_frame
+            meta_parent = self.content_frame
         
         # 鈹€鈹€ OPERATION MODE (collapsible) 鈹€鈹€
-        sec_mode = self._create_collapsible_section(self.content_frame, "Operation Mode", initially_open=True)
+        sec_mode = self._create_collapsible_section(mode_parent, "Operation Mode", initially_open=True)
         self.mode_option_sec = self._add_option_row_in_frame(sec_mode, "Mode", AIM_MODE_OPTIONS, self._on_mode_sec_selected)
         self._option_widgets["mode_sec"] = self.mode_option_sec
         current_mode_sec = self._aim_mode_display_to_value(getattr(config, "mode_sec", "ABCurves"))
@@ -4979,7 +6853,7 @@ class ViewerApp(ctk.CTk):
         
         # 鈹€鈹€ MODE PARAMETERS (collapsible) 鈹€鈹€
         sec_params = self._create_collapsible_section(
-            self.content_frame,
+            params_parent,
             f"{current_mode_sec} Parameters",
             initially_open=True,
             state_key="mode_parameters",
@@ -5149,7 +7023,8 @@ class ViewerApp(ctk.CTk):
                                       float(getattr(config, "fovsize_sec", 150)),
                                       self._on_fovsize_sec_changed)
             self._add_ads_fov_controls_in_frame(sec_params, is_sec=True)
-            self._add_pid_preview_section(is_sec=True)
+            if not is_simple:
+                self._add_pid_preview_section(is_sec=True, parent=preview_parent)
 
         elif current_mode_sec == "ABCurves":
             self._add_subtitle_in_frame(sec_params, "ABCURVES PARAMETERS")
@@ -5182,27 +7057,28 @@ class ViewerApp(ctk.CTk):
                                       self._on_fovsize_sec_changed)
             self._add_ads_fov_controls_in_frame(sec_params, is_sec=True)
 
-        if current_mode_sec != "PID":
-            self._add_mouse_path_preview_section(is_sec=True)
+        if current_mode_sec != "PID" and not is_simple:
+            self._add_mouse_path_preview_section(is_sec=True, parent=preview_parent)
         
-        # 鈹€鈹€ OFFSET (collapsible) 鈹€鈹€
-        sec_offset = self._create_collapsible_section(self.content_frame, "Offset", initially_open=False)
-        self._add_slider_in_frame(sec_offset, "X-Offset", "aim_offsetX_sec", -100, 100,
-                                  float(getattr(config, "aim_offsetX_sec", 0)),
-                                  self._on_aim_offsetX_sec_changed)
-        self._add_slider_in_frame(sec_offset, "Y-Offset", "aim_offsetY_sec", -100, 100,
-                                  float(getattr(config, "aim_offsetY_sec", 0)),
-                                  self._on_aim_offsetY_sec_changed)
+        # 鈹€鈹€ OFFSET (collapsible, hidden in Lite mode) 鈹€鈹€
+        if not is_simple:
+            sec_offset = self._create_collapsible_section(meta_parent, "Offset", initially_open=False)
+            self._add_slider_in_frame(sec_offset, "X-Offset", "aim_offsetX_sec", -100, 100,
+                                      float(getattr(config, "aim_offsetX_sec", 0)),
+                                      self._on_aim_offsetX_sec_changed)
+            self._add_slider_in_frame(sec_offset, "Y-Offset", "aim_offsetY_sec", -100, 100,
+                                      float(getattr(config, "aim_offsetY_sec", 0)),
+                                      self._on_aim_offsetY_sec_changed)
         
         # 鈹€鈹€ AIM TYPE (collapsible) 鈹€鈹€
-        sec_aim_type = self._create_collapsible_section(self.content_frame, "Aim Type", initially_open=False)
+        sec_aim_type = self._create_collapsible_section(meta_parent, "Aim Type", initially_open=is_bento)
         self.aim_type_option_sec = self._add_option_row_in_frame(sec_aim_type, "Target", ["head", "body", "nearest"], self._on_aim_type_sec_selected)
         self._option_widgets["aim_type_sec"] = self.aim_type_option_sec
         current_aim_type_sec = getattr(config, "aim_type_sec", "head")
         self.aim_type_option_sec.set(current_aim_type_sec)
         
         # 鈹€鈹€ ACTIVATION (collapsible) 鈹€鈹€
-        sec_activation = self._create_collapsible_section(self.content_frame, "Activation", initially_open=False)
+        sec_activation = self._create_collapsible_section(meta_parent, "Activation", initially_open=is_bento)
         current_btn_sec = self._ads_binding_to_display(getattr(config, "selected_mouse_button_sec", 2))
         self.aim_key_bind_button_sec = self._add_bind_capture_row_in_frame(
             sec_activation,
@@ -5248,6 +7124,11 @@ class ViewerApp(ctk.CTk):
         self.ads_key_type_option_sec.set(
             ADS_KEY_TYPE_VALUE_TO_DISPLAY.get(current_ads_key_type_sec, "Hold")
         )
+        if is_simple:
+            self._add_lite_mode_hint_card(
+                meta_parent,
+                "Offset fine-tuning, Anti-Smoke & Live Mouse Path Preview are hidden in Lite mode.",
+            )
 
     def _show_tb_tab(self):
         self._active_tab_name = "Trigger"
@@ -5842,10 +7723,6 @@ class ViewerApp(ctk.CTk):
         clear_btn = self._add_text_button(control_frame, "Clear Log", self._clear_debug_log)
         clear_btn.pack(side="left", padx=(0, 10))
 
-        # WebMenu link button
-        webmenu_btn = self._add_text_button(control_frame, "Open WebMenu", self._open_webmenu)
-        webmenu_btn.pack(side="left", padx=(0, 10))
-        
         # Log count label
         self.debug_log_count_label = ctk.CTkLabel(
             control_frame,
@@ -5975,28 +7852,169 @@ class ViewerApp(ctk.CTk):
 
     def _create_collapsible_section(self, parent, title, initially_open=True, auto_pack=True, tooltip_text=None, state_key=None):
         """
-        寤虹珛鍙睍闁?鏀惰捣鐨?section銆?
-        
-        Args:
-            parent: 鐖跺鍣?
-            title: section 妯欓
-            initially_open: 鏄惁闋愯ō灞曢枊
-            auto_pack: 鏄惁鑷嫊 pack container锛團alse 鏅傜敱瑾跨敤鑰呮帶鍒讹級
-            tooltip_text: 鍙伕鐨?tooltip 鏂囧瓧锛堝鏋滄彁渚涳紝鏈冨湪妯欓鏃侀’绀哄晱铏熷湒妯欙級
-            
-        Returns:
-            tuple: (content_frame, container) 濡傛灉 auto_pack=False锛屽惁鍓囧彧杩斿洖 content_frame
+        建立可展開/收起的 section (Bento mode 呈現圓角卡片，Classic/Neon 維持原有樣式)。
         """
+        cache_key = self._get_collapsible_state_key(title, state_key=state_key)
+        initial_open_state = bool(self._collapsible_section_states.get(cache_key, initially_open))
+        is_open = [initial_open_state]
+
+        if self._is_hud_mode():
+            container = ctk.CTkFrame(
+                parent,
+                fg_color="#090D13",
+                corner_radius=4,
+                border_width=1,
+                border_color="#15232D",
+            )
+            if auto_pack:
+                container.pack(fill="x", pady=(0, 8))
+
+            header = ctk.CTkFrame(container, fg_color="transparent", height=32, corner_radius=0)
+            header.pack(fill="x", padx=10, pady=(4, 2))
+            header.pack_propagate(False)
+
+            title_label = ctk.CTkLabel(
+                header,
+                text=f"// {heading(title)}",
+                font=("Consolas", 10, "bold"),
+                text_color="#00F0FF",
+                anchor="w",
+            )
+            title_label.pack(side="left")
+
+            if tooltip_text:
+                tooltip_icon = ctk.CTkLabel(
+                    header,
+                    text="[?]",
+                    font=("Consolas", 9, "bold"),
+                    text_color="#64748B",
+                    cursor="hand2",
+                )
+                tooltip_icon.pack(side="left", padx=(6, 0))
+                self._create_tooltip(tooltip_icon, tooltip_text)
+
+            arrow_label = ctk.CTkLabel(
+                header,
+                text="[-]" if initial_open_state else "[+]",
+                font=("Consolas", 9, "bold"),
+                text_color="#64748B",
+                width=24,
+            )
+            arrow_label.pack(side="right")
+
+            sep = ctk.CTkFrame(container, height=1, fg_color="#132029")
+            content = ctk.CTkFrame(container, fg_color="transparent")
+
+            def toggle(_event=None):
+                if is_open[0]:
+                    sep.pack_forget()
+                    content.pack_forget()
+                    arrow_label.configure(text="[+]")
+                    is_open[0] = False
+                    self._set_collapsible_state(cache_key, False)
+                else:
+                    sep.pack(fill="x", padx=10, pady=(0, 4))
+                    content.pack(fill="x", padx=12, pady=(5, 10))
+                    arrow_label.configure(text="[-]")
+                    is_open[0] = True
+                    self._set_collapsible_state(cache_key, True)
+
+            header.configure(cursor="hand2")
+            for w in (header, title_label, arrow_label):
+                w.bind("<Button-1>", toggle)
+
+            if initial_open_state:
+                sep.pack(fill="x", padx=10, pady=(0, 4))
+                content.pack(fill="x", padx=12, pady=(5, 10))
+            self._set_collapsible_state(cache_key, initial_open_state)
+
+            if auto_pack:
+                return content
+            return content, container
+
+        if self._is_bento_mode():
+            container = ctk.CTkFrame(
+                parent,
+                fg_color=COLOR_SURFACE,
+                corner_radius=12,
+                border_width=1,
+                border_color=COLOR_BORDER,
+            )
+            if auto_pack:
+                container.pack(fill="x", pady=(0, 10))
+
+            header = ctk.CTkFrame(container, fg_color="transparent", height=38, corner_radius=0)
+            header.pack(fill="x", padx=12, pady=(4, 2))
+            header.pack_propagate(False)
+
+            accent_bar = ctk.CTkFrame(header, width=3, height=16, fg_color=COLOR_ACCENT, corner_radius=2)
+            accent_bar.pack(side="left", padx=(0, 8), pady=10)
+
+            title_label = ctk.CTkLabel(
+                header,
+                text=heading(title),
+                font=("Segoe UI", 11, "bold"),
+                text_color="#F8FAFC",
+                anchor="w",
+            )
+            title_label.pack(side="left")
+
+            if tooltip_text:
+                tooltip_icon = ctk.CTkLabel(
+                    header,
+                    text="?",
+                    font=("Consolas", 10, "bold"),
+                    text_color=COLOR_ACCENT,
+                    width=20,
+                    cursor="hand2",
+                )
+                tooltip_icon.pack(side="left", padx=(6, 0))
+                self._create_tooltip(tooltip_icon, tooltip_text)
+
+            arrow_label = ctk.CTkLabel(
+                header,
+                text="▾" if initial_open_state else "▸",
+                font=("Segoe UI", 11, "bold"),
+                text_color=COLOR_TEXT_DIM,
+                width=20,
+            )
+            arrow_label.pack(side="right")
+
+            sep = ctk.CTkFrame(container, height=1, fg_color="#1F2A3E")
+            content = ctk.CTkFrame(container, fg_color="transparent")
+
+            def toggle(_event=None):
+                if is_open[0]:
+                    sep.pack_forget()
+                    content.pack_forget()
+                    arrow_label.configure(text="▸")
+                    is_open[0] = False
+                    self._set_collapsible_state(cache_key, False)
+                else:
+                    sep.pack(fill="x", padx=12, pady=(0, 4))
+                    content.pack(fill="x", padx=14, pady=(6, 12))
+                    arrow_label.configure(text="▾")
+                    is_open[0] = True
+                    self._set_collapsible_state(cache_key, True)
+
+            header.configure(cursor="hand2")
+            for w in (header, accent_bar, title_label, arrow_label):
+                w.bind("<Button-1>", toggle)
+
+            if initial_open_state:
+                sep.pack(fill="x", padx=12, pady=(0, 4))
+                content.pack(fill="x", padx=14, pady=(6, 12))
+            self._set_collapsible_state(cache_key, initial_open_state)
+
+            if auto_pack:
+                return content
+            return content, container
+
         container = ctk.CTkFrame(parent, fg_color="transparent")
         if auto_pack:
             container.pack(fill="x", pady=(5, 0))
         
         content = ctk.CTkFrame(container, fg_color="transparent")
-
-        cache_key = self._get_collapsible_state_key(title, state_key=state_key)
-        initial_open_state = self._collapsible_section_states.get(cache_key, initially_open)
-        initial_open_state = bool(initial_open_state)
-        is_open = [initial_open_state]
         arrow_text = "▼" if initial_open_state else "▶"
         
         header = ctk.CTkFrame(
@@ -6021,7 +8039,7 @@ class ViewerApp(ctk.CTk):
         )
         title_label.pack(side="left", padx=(4, 0))
         
-        # 濡傛灉鏈?tooltip 鏂囧瓧锛屾坊鍔犲晱铏熷湒妯?
+        # 如果有 tooltip 文字，添加問號圖標
         if tooltip_text:
             tooltip_icon = ctk.CTkLabel(
                 header, text="?", font=("Consolas", 10, "bold"), text_color=COLOR_ACCENT,
@@ -6913,10 +8931,10 @@ class ViewerApp(ctk.CTk):
                 self._on_trigger_ads_fovsize_changed,
             )
 
-    def _add_pid_preview_section(self, is_sec=False):
+    def _add_pid_preview_section(self, is_sec=False, parent=None):
         state_key = "pid_preview_sec" if is_sec else "pid_preview_main"
         sec_preview = self._create_collapsible_section(
-            self.content_frame,
+            parent if parent is not None else self.content_frame,
             "PID Preview",
             initially_open=True,
             state_key=state_key,
@@ -7129,10 +9147,10 @@ class ViewerApp(ctk.CTk):
 
     # === Mouse Path Preview (Real Hotkey Trail) ===
 
-    def _add_mouse_path_preview_section(self, is_sec=False):
+    def _add_mouse_path_preview_section(self, is_sec=False, parent=None):
         state_key = "mouse_path_preview_sec" if is_sec else "mouse_path_preview_main"
         sec_preview = self._create_collapsible_section(
-            self.content_frame,
+            parent if parent is not None else self.content_frame,
             "Mouse Path Preview",
             initially_open=True,
             state_key=state_key,
@@ -7238,16 +9256,19 @@ class ViewerApp(ctk.CTk):
         except Exception:
             return
 
-        if hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_snapshot"):
-            snap = self.tracker.get_live_path_snapshot()
-            seq = int(snap[2]) if len(snap) >= 3 else -1
-            seq_attr = "_mouse_path_live_last_seq_sec" if is_sec else "_mouse_path_live_last_seq_main"
-            prev_seq = int(getattr(self, seq_attr, -1))
-            if seq != prev_seq:
-                setattr(self, seq_attr, seq)
-                self._refresh_mouse_path_preview(is_sec=is_sec)
+        # Pause live canvas redraws while engine is running to prevent GIL micro-stutters during gameplay
+        if not getattr(self, "_runtime_active", False):
+            if hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_snapshot"):
+                snap = self.tracker.get_live_path_snapshot()
+                seq = int(snap[2]) if len(snap) >= 3 else -1
+                seq_attr = "_mouse_path_live_last_seq_sec" if is_sec else "_mouse_path_live_last_seq_main"
+                prev_seq = int(getattr(self, seq_attr, -1))
+                if seq != prev_seq:
+                    setattr(self, seq_attr, seq)
+                    self._refresh_mouse_path_preview(is_sec=is_sec)
 
-        self.after(120, lambda sec=is_sec: self._poll_mouse_path_live_trail(is_sec=sec))
+        delay_ms = 1000 if getattr(self, "_runtime_active", False) else 150
+        self.after(delay_ms, lambda sec=is_sec: self._poll_mouse_path_live_trail(is_sec=sec))
 
     def _refresh_mouse_path_preview(self, is_sec=False, force_sim=False):
         canvas, info_label = self._get_mouse_path_preview_widgets(is_sec=is_sec)
@@ -8211,6 +10232,20 @@ class ViewerApp(ctk.CTk):
                 ):
                     self._show_sec_aimbot_tab()
 
+            # Keep removed features disabled even when importing older profile JSONs
+            config.enabletb = False
+            config.enablercs = False
+            config.enable_magnet_trigger = False
+            config.enableaim_sec = False
+            config.anti_smoke_enabled = False
+            config.anti_smoke_enabled_sec = False
+            if str(getattr(config, "mode", "ABCurves")) not in AIM_MODE_VALUE_TO_DISPLAY:
+                config.mode = "ABCurves"
+            if config_name:
+                self._active_quick_profile = str(config_name)
+                self._refresh_quick_profile_highlights()
+            self._update_header_status_pills()
+
             from src.utils.detection import reload_model
             self.tracker.model, self.tracker.class_names = reload_model()
             
@@ -8562,13 +10597,15 @@ class ViewerApp(ctk.CTk):
 
     def _poll_clipboard_config_import(self):
         try:
-            self._maybe_prompt_clipboard_config_import()
+            if not getattr(self, "_runtime_active", False):
+                self._maybe_prompt_clipboard_config_import()
         except Exception as e:
             log_print(f"[UI] Clipboard config poll error: {e}")
         finally:
             try:
                 if self.winfo_exists():
-                    self.after(self._clipboard_import_poll_interval_ms, self._poll_clipboard_config_import)
+                    delay = 2500 if getattr(self, "_runtime_active", False) else self._clipboard_import_poll_interval_ms
+                    self.after(delay, self._poll_clipboard_config_import)
             except Exception:
                 pass
 
@@ -8697,6 +10734,7 @@ class ViewerApp(ctk.CTk):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
             self._refresh_config_list()
+            self._populate_hud_quick_profile_buttons()
             self.config_option.set(normalized_name)
             self._log_config(f"Saved: {normalized_name}")
         except Exception as e:
@@ -8798,6 +10836,7 @@ class ViewerApp(ctk.CTk):
             os.remove(target_path)
             self._log_config(f"Deleted: {selected}")
             self._refresh_config_list()
+            self._populate_hud_quick_profile_buttons()
         except Exception as e:
             self._log_config(f"Delete error: {e}")
             messagebox.showerror("Delete", f"Delete failed:\n{e}")
@@ -8922,7 +10961,9 @@ class ViewerApp(ctk.CTk):
             updates = self.capture.ndi.get_pending_source_updates()
             for names in updates:
                 self._apply_sources_to_ui(names)
-        self.after(100, self._process_source_updates)
+            self.after(150, self._process_source_updates)
+        else:
+            self.after(1000, self._process_source_updates)
 
     def _refresh_sources(self):
         if self.capture.mode == "NDI":
@@ -9580,14 +11621,19 @@ class ViewerApp(ctk.CTk):
         except Exception:
             connected = False
 
-        if hasattr(self, "hardware_type_label") and self.hardware_type_label.winfo_exists():
-            self.hardware_type_label.configure(text=t("Hardware: {mode}", mode=mode))
+        hw_sig = (mode, connected)
+        if getattr(self, "_last_hw_ui_sig", None) != hw_sig:
+            self._last_hw_ui_sig = hw_sig
+            if hasattr(self, "hardware_type_label") and self.hardware_type_label.winfo_exists():
+                self.hardware_type_label.configure(text=t("Hardware: {mode}", mode=mode))
 
-        if hasattr(self, "hardware_conn_label") and self.hardware_conn_label.winfo_exists():
-            if connected:
-                self.hardware_conn_label.configure(text=t("Hardware Status: Connected"), text_color=COLOR_SUCCESS)
-            else:
-                self.hardware_conn_label.configure(text=t("Hardware Status: Disconnected"), text_color=COLOR_DANGER)
+            if hasattr(self, "hardware_conn_label") and self.hardware_conn_label.winfo_exists():
+                if connected:
+                    self.hardware_conn_label.configure(text=t("Hardware Status: Connected"), text_color=COLOR_SUCCESS)
+                else:
+                    self.hardware_conn_label.configure(text=t("Hardware Status: Disconnected"), text_color=COLOR_DANGER)
+
+            self._update_header_status_pills()
 
         if (
             getattr(self, "_hardware_info_expanded", False)
@@ -9622,7 +11668,8 @@ class ViewerApp(ctk.CTk):
                 self._set_status_indicator(t("Status: Offline"), COLOR_TEXT_DIM)
         self._update_hardware_status_ui()
         self._refresh_capture_entry_card()
-        self.after(500, self._update_connection_status_loop)
+        delay_ms = 1000 if getattr(self, "_runtime_active", False) else 500
+        self.after(delay_ms, self._update_connection_status_loop)
 
     def _update_performance_stats(self):
         """鏇存柊鎬ц兘绲辫▓淇℃伅锛團PS 鍜屽欢閬诧級"""
@@ -9683,15 +11730,17 @@ class ViewerApp(ctk.CTk):
                     self.decode_delay_label.configure(text="Decode: N/A")
                     self.total_delay_label.configure(text="Delay: N/A")
             else:
-                # 鏈€ｆ帴鏅傞’绀?--
+                # 未連接時顯示 --
                 self.fps_label.configure(text="FPS: --")
                 self.decode_delay_label.configure(text="Decode: -- ms")
                 self.total_delay_label.configure(text="Delay: -- ms")
+            self._update_header_status_pills()
         except Exception as e:
             log_print(f"[UI] Performance stats update error: {e}")
         
-        # 姣?500ms 鏇存柊涓€娆?
-        self.after(500, self._update_performance_stats)
+        # Throttle UI telemetry refresh to 1Hz while runtime is active to minimize GIL contention
+        delay_ms = 1000 if getattr(self, "_runtime_active", False) else 500
+        self.after(delay_ms, self._update_performance_stats)
 
     def _apply_sources_to_ui(self, names):
         # Only update if we are still on NDI mode and the widget exists
@@ -10041,6 +12090,7 @@ class ViewerApp(ctk.CTk):
     
     def _on_enableaim_changed(self): 
         config.enableaim = self.var_enableaim.get()
+        self._update_header_status_pills()
 
     def _on_ads_fov_enabled_changed(self):
         config.ads_fov_enabled = self.var_ads_fov_enabled.get()
@@ -10150,7 +12200,7 @@ class ViewerApp(ctk.CTk):
         if hasattr(self, 'custom_hsv_container'):
             if is_custom:
                 if not self.custom_hsv_container.winfo_ismapped():
-                    self.custom_hsv_container.pack(fill="x", pady=(5, 0))
+                    self.custom_hsv_container.pack(fill="x", pady=(0, 10) if self._uses_two_col_grid() else (5, 0))
             else:
                 if self.custom_hsv_container.winfo_ismapped():
                     self.custom_hsv_container.pack_forget()
@@ -10701,6 +12751,7 @@ class ViewerApp(ctk.CTk):
         }
         config.aimbot_activation_type = activation_type_map.get(val, "hold_enable")
         self._log_config(f"Aim Activation Type: {val}")
+        self._update_header_status_pills()
 
     def _on_trigger_type_selected(self, val):
         trigger_type_map = {
@@ -10797,36 +12848,35 @@ class ViewerApp(ctk.CTk):
                 except Exception:
                     pass
     
+    def _on_gpu_opencl_changed(self):
+        config.gpu_opencl_enabled = bool(self.var_gpu_opencl.get())
+        self._update_header_status_pills()
+
     def _update_mouse_input_debug(self):
-        """瀹氭湡鏇存柊婊戦紶杓稿叆瑾胯│椤ず"""
-        # Only update if we're on the Debug tab and the switch is enabled
+        """定期更新滑鼠輸入調試顯示 (idle-throttled to avoid GIL contention)"""
+        active_monitor = False
         try:
-            if hasattr(self, 'debug_mouse_input_var') and self.debug_mouse_input_var.get():
-                if hasattr(self, 'debug_button_widgets') and self.debug_button_widgets:
-                    # Update monitor
-                    self.mouse_input_monitor.update()
-                    
-                    # Update UI display
-                    for idx, widgets in self.debug_button_widgets.items():
-                        try:
-                            state = self.mouse_input_monitor.get_button_state(idx)
-                            count = self.mouse_input_monitor.get_button_count(idx)
-                            
-                            # Update status indicator color (green=pressed, red=not pressed)
-                            color = "#4CAF50" if state else "#CF6679"  # Green or red
-                            widgets["state_indicator"].configure(text_color=color)
-                            
-                            # Update count
-                            widgets["count_label"].configure(text=f"Count: {count}")
-                        except Exception:
-                            # Widget might be destroyed, skip this update
-                            pass
+            if (
+                str(getattr(self, "_active_tab_name", "")) == "Debug"
+                and hasattr(self, 'debug_mouse_input_var')
+                and self.debug_mouse_input_var.get()
+                and hasattr(self, 'debug_button_widgets')
+                and self.debug_button_widgets
+            ):
+                active_monitor = True
+                self.mouse_input_monitor.update()
+                for idx, widgets in self.debug_button_widgets.items():
+                    try:
+                        state = self.mouse_input_monitor.get_button_state(idx)
+                        count = self.mouse_input_monitor.get_button_count(idx)
+                        color = "#4CAF50" if state else "#CF6679"
+                        widgets["state_indicator"].configure(text_color=color)
+                        widgets["count_label"].configure(text=f"Count: {count}")
+                    except Exception:
+                        pass
         except Exception:
-            # Tab might have been switched, ignore
             pass
-        
-        # Continue periodic update (every 50ms)
-        self.after(50, self._update_mouse_input_debug)
+        self.after(60 if active_monitor else 500, self._update_mouse_input_debug)
     
     def _reset_button_count(self, button_idx: int):
         """閲嶇疆鍠€嬫寜閳曠殑瑷堟暩"""
@@ -10849,9 +12899,26 @@ class ViewerApp(ctk.CTk):
                     pass
     
     def _update_debug_log(self):
-        """瀹氭湡鏇存柊 Debug 鏃ヨ獙椤ず"""
+        """定期更新 Debug 日誌顯示"""
         try:
-            if hasattr(self, 'debug_log_textbox'):
+            if self._is_hud_mode() or self._is_bento_mode():
+                from src.utils.activation import get_aimbot_toggle_state
+                sig = (
+                    bool(getattr(config, "enableaim", False)),
+                    str(getattr(config, "aimbot_activation_type", "hold_enable")).strip().lower(),
+                    bool(get_aimbot_toggle_state()),
+                )
+                if sig != getattr(self, "_last_toggle_indicator_sig", None):
+                    self._last_toggle_indicator_sig = sig
+                    self._update_header_status_pills()
+        except Exception:
+            pass
+        try:
+            if (
+                str(getattr(self, "_active_tab_name", "")) == "Debug"
+                and hasattr(self, 'debug_log_textbox')
+                and self.debug_log_textbox.winfo_exists()
+            ):
                 try:
                     # Get recent logs (up to 500)
                     logs = get_recent_logs(500)
@@ -10883,16 +12950,21 @@ class ViewerApp(ctk.CTk):
                             else:
                                 log_text += f"[{timestamp}] {log_type:8s} [{source:15s}]\n"
                     
-                    # Update text box (only when content changes to avoid frequent refresh)
+                    # Update text box only when changed; preserve scroll position if user scrolled up
                     try:
                         current_text = self.debug_log_textbox.get("1.0", "end-1c")
                         if current_text != log_text:
+                            at_bottom = True
+                            try:
+                                _, y_end = self.debug_log_textbox._textbox.yview()
+                                at_bottom = y_end >= 0.98
+                            except Exception:
+                                at_bottom = True
                             self.debug_log_textbox.delete("1.0", "end")
                             self.debug_log_textbox.insert("1.0", log_text)
-                            # Auto scroll to bottom
-                            self.debug_log_textbox.see("end")
+                            if at_bottom:
+                                self.debug_log_textbox.see("end")
                     except Exception:
-                        # Widget might be destroyed
                         pass
                 except Exception as e:
                     # Ignore errors during tab switch
@@ -10901,8 +12973,8 @@ class ViewerApp(ctk.CTk):
             # Tab might have been switched
             pass
         
-        # Continue periodic update (every 100ms)
-        self.after(100, self._update_debug_log)
+        # Fast toggle indicator check (150ms); heavy log formatting only runs while Debug tab is open
+        self.after(150, self._update_debug_log)
     
     def _clear_debug_log(self):
         """娓呯┖ Debug 鏃ヨ獙"""
@@ -11095,23 +13167,35 @@ class UpdateDialog(ctk.CTkToplevel):
         
         return result.strip()
 
+    @staticmethod
+    def _is_safe_update_url(value):
+        if not isinstance(value, str) or not value.startswith("https://"):
+            return False
+        try:
+            from urllib.parse import urlparse
+
+            host = (urlparse(value).hostname or "").lower()
+            return host in ("github.com", "raw.githubusercontent.com", "gitee.com")
+        except Exception:
+            return False
+
     def _pick_repo_base_url(self):
         for key in ("repo_url", "repository_url"):
             value = self.update_info.get(key)
-            if isinstance(value, str) and value.startswith(("http://", "https://")):
+            if self._is_safe_update_url(value):
                 return value.rstrip("/")
-        return "https://github.com/asenyeroao-ct/CVM-colorBot"
+        return "https://github.com/prohpea/mousebot"
 
     def _pick_release_url(self):
         for key in ("release_url", "url"):
             value = self.update_info.get(key)
-            if isinstance(value, str) and value.startswith(("http://", "https://")):
+            if self._is_safe_update_url(value):
                 return value
         return f"{self._pick_repo_base_url()}/commits/main"
 
     def _pick_download_url(self):
         value = self.update_info.get("download_url")
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
+        if self._is_safe_update_url(value):
             return value
         return f"{self._pick_repo_base_url()}/archive/refs/heads/main.zip"
 
@@ -11336,55 +13420,51 @@ class SettingsWindow(ctk.CTkToplevel):
         opencv_grid_frame.grid_columnconfigure(0, weight=1)
         opencv_grid_frame.grid_columnconfigure(1, weight=1)
         
-        # 鍚勯爡 OpenCV 瑕栫獥闁嬮棞
+        # OpenCV Window Toggles (removed dead ROI / Triggerbot Mask switches)
         self.show_opencv_mask_var = tk.BooleanVar(value=self.temp_settings["show_opencv_mask"])
         self._add_grid_switch(opencv_grid_frame, "MASK", self.show_opencv_mask_var, 0, 0)
         
         self.show_opencv_detection_var = tk.BooleanVar(value=self.temp_settings["show_opencv_detection"])
         self._add_grid_switch(opencv_grid_frame, "Detection", self.show_opencv_detection_var, 0, 1)
-        
-        self.show_opencv_roi_var = tk.BooleanVar(value=self.temp_settings["show_opencv_roi"])
-        self._add_grid_switch(opencv_grid_frame, "ROI", self.show_opencv_roi_var, 1, 0)
-        
-        self.show_opencv_triggerbot_mask_var = tk.BooleanVar(value=self.temp_settings["show_opencv_triggerbot_mask"])
-        self._add_grid_switch(opencv_grid_frame, "Triggerbot Mask", self.show_opencv_triggerbot_mask_var, 1, 1)
+
+        self.show_opencv_roi_var = tk.BooleanVar(value=False)
+        self.show_opencv_triggerbot_mask_var = tk.BooleanVar(value=False)
 
         self.show_ndi_raw_stream_var = tk.BooleanVar(value=self.temp_settings["show_ndi_raw_stream_window"])
-        self._add_grid_switch(opencv_grid_frame, "NDI Raw Stream", self.show_ndi_raw_stream_var, 2, 0)
+        self._add_grid_switch(opencv_grid_frame, "NDI Raw Stream", self.show_ndi_raw_stream_var, 1, 0)
 
         self.show_udp_raw_stream_var = tk.BooleanVar(value=self.temp_settings["show_udp_raw_stream_window"])
-        self._add_grid_switch(opencv_grid_frame, "UDP Raw Stream", self.show_udp_raw_stream_var, 2, 1)
+        self._add_grid_switch(opencv_grid_frame, "UDP Raw Stream", self.show_udp_raw_stream_var, 1, 1)
 
-        # 鍒嗛殧
+        # 分隔
         self._add_spacer(content_frame)
         
-        # 鍒嗙祫2: 鏂囧瓧璩囪▕ (Overlay Elements)
+        # 分組2: 文字資訊 (Overlay Elements)
         self._add_section_title(content_frame, "OVERLAY ELEMENTS")
         
-        # 浣跨敤 Grid 浣堝眬渚嗘帓鍒楅枊闂滐紝浣垮叾鏇存暣榻?
+        # 使用 Grid 佈局來排列開關，使其更整齊
         grid_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
         grid_frame.pack(fill="x", pady=5)
         grid_frame.grid_columnconfigure(0, weight=1)
         grid_frame.grid_columnconfigure(1, weight=1)
 
-        # 鍚勯爡闁嬮棞 (Switch instead of Checkbox for better look)
+        # 各項開關 (removed dead Trigger Status switch)
         self.show_mode_var = tk.BooleanVar(value=self.temp_settings["show_mode_text"])
         self._add_grid_switch(grid_frame, "Mode Info", self.show_mode_var, 0, 0)
         
         self.show_aimbot_status_var = tk.BooleanVar(value=self.temp_settings["show_aimbot_status"])
         self._add_grid_switch(grid_frame, "Aim Status", self.show_aimbot_status_var, 0, 1)
         
-        self.show_triggerbot_status_var = tk.BooleanVar(value=self.temp_settings["show_triggerbot_status"])
-        self._add_grid_switch(grid_frame, "Trigger Status", self.show_triggerbot_status_var, 1, 0)
+        self.show_triggerbot_status_var = tk.BooleanVar(value=False)
         
         self.show_target_count_var = tk.BooleanVar(value=self.temp_settings["show_target_count"])
-        self._add_grid_switch(grid_frame, "Target Count", self.show_target_count_var, 1, 1)
+        self._add_grid_switch(grid_frame, "Target Count", self.show_target_count_var, 1, 0)
         
         self.show_crosshair_var = tk.BooleanVar(value=self.temp_settings["show_crosshair"])
-        self._add_grid_switch(grid_frame, "Crosshair", self.show_crosshair_var, 2, 0)
+        self._add_grid_switch(grid_frame, "Crosshair", self.show_crosshair_var, 1, 1)
         
         self.show_distance_var = tk.BooleanVar(value=self.temp_settings["show_distance_text"])
-        self._add_grid_switch(grid_frame, "Distance Text", self.show_distance_var, 2, 1)
+        self._add_grid_switch(grid_frame, "Distance Text", self.show_distance_var, 2, 0)
         
         # 搴曢儴鎸夐垥鍗€鍩?
         # 浣跨敤 Spacer 鎺ㄥ埌搴曢儴

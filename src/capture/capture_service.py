@@ -157,11 +157,12 @@ class CaptureService:
         """切換採集模式。採集卡釋放在背景執行，避免 UI 卡住。"""
         if mode not in ["NDI", "UDP", "Teleport", "CaptureCard", "CaptureCardGStreamer", "MSS"]:
             return
-        
-        if self.mode != mode:
-            self.disconnect()
-            
-        self.mode = mode
+
+        with self._io_lock:
+            if self.mode != mode:
+                self.disconnect()
+
+            self.mode = mode
 
     def get_frame_dimensions(self):
         """
@@ -236,11 +237,15 @@ class CaptureService:
             return False, "UDP manager not initialized"
             
         try:
-            success = self.udp_manager.connect(self._ip, self._port, target_fps=0)
+            success = self.udp_manager.connect(self._ip, self._port, target_fps=144)
             if success:
+                receiver = self.udp_manager.get_receiver()
+                backend = getattr(receiver, "decoder_backend", "Unknown") if receiver else "Unknown"
+                bound = getattr(receiver, "bound_address", (self._ip, self._port)) if receiver else (self._ip, self._port)
+                log_print(f"[Capture] UDP connected on {bound[0]}:{bound[1]} | Decoder: {backend}")
                 return True, None
             else:
-                return False, "Connection failed - check IP/Port and ensure OBS is streaming"
+                return False, "Connection failed - check IP/Port, close run_receiver.bat, and ensure OBS is streaming"
         except Exception as e:
             log_print(f"[Capture] UDP connection exception: {e}")
             return False, str(e)
@@ -482,26 +487,27 @@ class CaptureService:
 
     def disconnect(self):
         """斷開連接。採集卡 / GStreamer 釋放放到背景，避免 DirectShow 卡住 UI。"""
-        if self.mode == "NDI":
-            pass 
-        elif self.mode == "UDP":
-            if self.udp_manager:
-                self.udp_manager.disconnect()
-        elif self.mode == "Teleport":
-            if self.teleport_manager:
-                self.teleport_manager.disconnect()
-        elif self.mode == "CaptureCard":
-            camera = self.capture_card_camera
-            self.capture_card_camera = None
-            self._stop_capture_backend_async(camera, "CaptureCard")
-        elif self.mode == "CaptureCardGStreamer":
-            camera = self.capture_card_gstreamer_camera
-            self.capture_card_gstreamer_camera = None
-            self._stop_capture_backend_async(camera, "CaptureCardGStreamer")
-        elif self.mode == "MSS":
-            if self.mss_capture:
-                self.mss_capture.disconnect()
-                self.mss_capture = None
+        with self._io_lock:
+            if self.mode == "NDI":
+                pass
+            elif self.mode == "UDP":
+                if self.udp_manager:
+                    self.udp_manager.disconnect()
+            elif self.mode == "Teleport":
+                if self.teleport_manager:
+                    self.teleport_manager.disconnect()
+            elif self.mode == "CaptureCard":
+                camera = self.capture_card_camera
+                self.capture_card_camera = None
+                self._stop_capture_backend_async(camera, "CaptureCard")
+            elif self.mode == "CaptureCardGStreamer":
+                camera = self.capture_card_gstreamer_camera
+                self.capture_card_gstreamer_camera = None
+                self._stop_capture_backend_async(camera, "CaptureCardGStreamer")
+            elif self.mode == "MSS":
+                if self.mss_capture:
+                    self.mss_capture.disconnect()
+                    self.mss_capture = None
 
     def is_connected(self):
         """妾㈡煡鐣跺墠妯″紡鏄惁宸查€ｆ帴"""
@@ -594,29 +600,59 @@ class CaptureService:
         except Exception:
             return frame
 
+    def read_udp_frame_with_seq(self, last_seq=None, wait_timeout=0.0, apply_fov=True):
+        """Read latest UDP frame along with its monotonic frame_seq (thread-safe snapshot)."""
+        with self._io_lock:
+            if self.mode != "UDP" or not self.udp_manager:
+                return None, -1
+            receiver = self.udp_manager.get_receiver()
+        if not receiver:
+            return None, -1
+        try:
+            if last_seq is not None and hasattr(receiver, "wait_for_new_frame") and wait_timeout > 0:
+                frame, seq = receiver.wait_for_new_frame(last_seq, timeout=wait_timeout)
+            elif hasattr(receiver, "get_current_frame_with_seq"):
+                frame, seq = receiver.get_current_frame_with_seq()
+                if last_seq is not None and seq <= last_seq:
+                    return None, seq
+            else:
+                frame = receiver.get_current_frame()
+                seq = -1
+            if frame is None or frame.size == 0:
+                return None, seq
+            if apply_fov:
+                frame = self._apply_mode_fov(frame)
+            return frame, seq
+        except Exception as e:
+            log_print(f"[Capture] UDP read_with_seq error: {e}")
+            return None, -1
+
     def read_frame(self, apply_fov=True):
         """
-        璁€鍙栫暥鍓嶅箑
+        讀取當前幀
         
         Returns:
-            numpy.ndarray: BGR 鏍煎紡鐨勫湒鍍忥紝濡傛灉璁€鍙栧け鏁楀墖杩斿洖 None
+            numpy.ndarray: BGR 格式的圖像，如果讀取失敗則返回 None
         """
-        if self.mode == "NDI":
-            frame = self.ndi.capture_frame()
+        with self._io_lock:
+            mode = self.mode
+            ndi = self.ndi
+            udp_manager = self.udp_manager
+            teleport_manager = self.teleport_manager
+            capture_card_camera = self.capture_card_camera
+            capture_card_gstreamer_camera = self.capture_card_gstreamer_camera
+            mss_capture = self.mss_capture
+
+        if mode == "NDI":
+            frame = ndi.capture_frame()
             if frame is None:
                 return None
             
-            # NDI 杩斿洖鐨勬槸 VideoFrameSync
+            # NDI 返回的是 VideoFrameSync
             try:
-                # 鍋囪ō frame 鏄?RGBA/RGBX锛岃綁鎻涚偤 numpy
                 img = np.array(frame, dtype=np.uint8).reshape((frame.yres, frame.xres, 4))
-                # 杞夋彌鐐?BGR (OpenCV 鏍煎紡)
-                # 鍘熷浠ｇ⒓锛歜gr_img = img[:, :, [2, 1, 0]].copy()
-                # RGBA: R=0, G=1, B=2. 
-                # [2, 1, 0] -> B, G, R
                 bgr_img = img[:, :, [2, 1, 0]]
                 
-                # 濡傛灉鍟熺敤瑁佸垏锛屽墖鎳夌敤涓績瑁佸垏锛堟鏂瑰舰锛?
                 if apply_fov:
                     bgr_img = self._apply_mode_fov(bgr_img)
                 
@@ -625,27 +661,20 @@ class CaptureService:
                 log_print(f"[Capture] NDI frame conversion error: {e}")
                 return None
                 
-        elif self.mode == "UDP":
-            if not self.udp_manager:
+        elif mode == "UDP":
+            if not udp_manager:
                 return None
             
             try:
-                receiver = self.udp_manager.get_receiver()
+                receiver = udp_manager.get_receiver()
                 if not receiver:
                     log_print("[Capture] UDP receiver is None")
                     return None
                 
-                # OBS_UDP_Receiver.get_current_frame() 杩斿洖 BGR numpy array
                 frame = receiver.get_current_frame()
-                if frame is None:
-                    # 閫欐槸姝ｅ父鐨勶紝鍦ㄥ墰閫ｆ帴鎴栨矑鏈夋柊骞€鏅傛渻杩斿洖 None
+                if frame is None or frame.size == 0:
                     return None
                 
-                # 椹楄瓑骞€鐨勬湁鏁堟€?
-                if frame.size == 0:
-                    return None
-                
-                # 濡傛灉鍟熺敤瑁佸垏锛屽墖鎳夌敤涓績瑁佸垏锛堟鏂瑰舰锛?
                 if apply_fov:
                     frame = self._apply_mode_fov(frame)
                     
@@ -654,49 +683,41 @@ class CaptureService:
                 log_print(f"[Capture] UDP read frame error: {e}")
                 return None
 
-        elif self.mode == "Teleport":
-            if not self.teleport_manager:
+        elif mode == "Teleport":
+            if not teleport_manager:
                 return None
 
             try:
-                receiver = self.teleport_manager.get_receiver()
+                receiver = teleport_manager.get_receiver()
                 if not receiver:
                     return None
                 frame = receiver.get_current_frame()
-                if frame is None:
-                    return None
-                if frame.size == 0:
+                if frame is None or frame.size == 0:
                     return None
                 return frame
             except Exception as e:
                 log_print(f"[Capture] Teleport read frame error: {e}")
                 return None
         
-        elif self.mode == "CaptureCard":
-            if not self.capture_card_camera:
+        elif mode == "CaptureCard":
+            if not capture_card_camera:
                 return None
             
             try:
-                # CaptureCardCamera guarantees BGR output before returning.
-                frame = self.capture_card_camera.get_latest_frame()
-                if frame is None:
+                frame = capture_card_camera.get_latest_frame()
+                if frame is None or frame.size == 0:
                     return None
-                
-                if frame.size == 0:
-                    return None
-                    
                 return frame
             except Exception as e:
                 log_print(f"[Capture] CaptureCard read frame error: {e}")
                 return None
         
-        elif self.mode == "CaptureCardGStreamer":
-            if not self.capture_card_gstreamer_camera:
+        elif mode == "CaptureCardGStreamer":
+            if not capture_card_gstreamer_camera:
                 return None
             
             try:
-                # CaptureCardGStreamer guarantees BGR output before returning.
-                frame = self.capture_card_gstreamer_camera.get_latest_frame()
+                frame = capture_card_gstreamer_camera.get_latest_frame()
                 if frame is None:
                     now = time.time()
                     if now - self._gstreamer_no_frame_last_log >= 2.0:
@@ -711,31 +732,25 @@ class CaptureService:
                     return None
 
                 self._gstreamer_no_frame_last_log = 0.0
-                    
                 return frame
             except Exception as e:
                 log_print(f"[Capture] CaptureCardGStreamer read frame error: {e}")
                 return None
         
-        elif self.mode == "MSS":
-            if not self.mss_capture:
+        elif mode == "MSS":
+            if not mss_capture:
                 return None
             
             try:
-                # 鍕曟厠鏇存柊 FOV锛堝厑瑷卞嵆鏅傝鏁达級
                 from src.utils.config import config as global_config
-                fov_x = int(getattr(global_config, "mss_fov_x", self.mss_capture.fov_x))
-                fov_y = int(getattr(global_config, "mss_fov_y", self.mss_capture.fov_y))
-                if fov_x != self.mss_capture.fov_x or fov_y != self.mss_capture.fov_y:
-                    self.mss_capture.set_fov(fov_x, fov_y)
+                fov_x = int(getattr(global_config, "mss_fov_x", mss_capture.fov_x))
+                fov_y = int(getattr(global_config, "mss_fov_y", mss_capture.fov_y))
+                if fov_x != mss_capture.fov_x or fov_y != mss_capture.fov_y:
+                    mss_capture.set_fov(fov_x, fov_y)
                 
-                frame = self.mss_capture.get_frame()
-                if frame is None:
+                frame = mss_capture.get_frame()
+                if frame is None or frame.size == 0:
                     return None
-                
-                if frame.size == 0:
-                    return None
-                
                 return frame
             except Exception as e:
                 log_print(f"[Capture] MSS read frame error: {e}")
@@ -744,26 +759,18 @@ class CaptureService:
         return None
 
     def cleanup(self):
-        """娓呯悊璩囨簮"""
-        try:
-            self.ndi.cleanup()
-        except Exception as e:
-            log_print(f"[Capture] NDI cleanup error (ignored): {e}")
-        
-        try:
-            if self.udp_manager and self.udp_manager.is_connected:
-                # 鎶戝埗 UDP 娓呯悊鏅傜殑閷杓稿嚭
-                import sys
-                import io
-                old_stderr = sys.stderr
-                sys.stderr = io.StringIO()
-                
-                try:
+        """清理資源"""
+        with self._io_lock:
+            try:
+                self.ndi.cleanup()
+            except Exception as e:
+                log_print(f"[Capture] NDI cleanup error (ignored): {e}")
+
+            try:
+                if self.udp_manager and self.udp_manager.is_connected:
                     self.udp_manager.disconnect()
-                finally:
-                    sys.stderr = old_stderr
-        except Exception as e:
-            log_print(f"[Capture] UDP cleanup error (ignored): {e}")
+            except Exception as e:
+                log_print(f"[Capture] UDP cleanup error (ignored): {e}")
         
         try:
             if self.capture_card_camera:

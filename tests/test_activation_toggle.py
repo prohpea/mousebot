@@ -102,9 +102,6 @@ class ActivationToggleTests(unittest.TestCase):
     def _run_frame(self, tracker, targets_main, targets_sec=None):
         frame = DummyFrame(320, 320)
         with (
-            mock.patch.object(normal, "process_rcs", return_value=False),
-            mock.patch.object(normal, "check_y_release", return_value=False),
-            mock.patch.object(normal, "process_triggerbot", return_value="DISABLED"),
             mock.patch.object(normal.mode_abcurves, "reset"),
             mock.patch.object(normal, "_dispatch_aimbot") as dispatch_mock,
         ):

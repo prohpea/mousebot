@@ -29,11 +29,11 @@ class XUdpHsvSyncTests(unittest.TestCase):
         config.color = "purple"
         model, _ = detection.load_model()
         self.assertIsNotNone(model)
-        self.assertEqual(model[0].tolist(), [120, 188, 115])
+        self.assertEqual(model[0].tolist(), [120, 95, 90])
         self.assertEqual(model[1].tolist(), [160, 255, 255])
 
-        # Pixel 0: dimmed background (S < 90), Pixel 1: xUDP boosted purple outline (S >= 190, V >= 115)
-        hsv = np.array([[[140, 85, 130], [140, 195, 140]]], dtype=np.uint8)
+        # Pixel 0: dimmed background (S < 90), Pixel 1: xUDP 50m+ purple outline (S >= 95, V >= 90)
+        hsv = np.array([[[140, 85, 130], [140, 105, 95]]], dtype=np.uint8)
         mask = detection.compute_hsv_mask(hsv, model)
         self.assertEqual(int(mask[0, 0]), 0)
         self.assertEqual(int(mask[0, 1]), 255)
@@ -57,14 +57,15 @@ class XUdpHsvSyncTests(unittest.TestCase):
         self.assertEqual(int(mask[0, 2]), 0)
 
     def test_active_config_json_custom_hsv_matches_xudp_purple(self):
-        cfg_path = Path(__file__).resolve().parents[1] / "config.json"
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["custom_hsv_min_h"], 120)
-        self.assertEqual(data["custom_hsv_min_s"], 188)
-        self.assertEqual(data["custom_hsv_min_v"], 115)
-        self.assertEqual(data["custom_hsv_max_h"], 160)
-        self.assertEqual(data["custom_hsv_max_s"], 255)
-        self.assertEqual(data["custom_hsv_max_v"], 255)
+        root = Path(__file__).resolve().parents[1]
+        for cfg_path in [root / "config.json"] + sorted((root / "configs").glob("*.json")):
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["custom_hsv_min_h"], 120, cfg_path.name)
+            self.assertEqual(data["custom_hsv_min_s"], 95, cfg_path.name)
+            self.assertEqual(data["custom_hsv_min_v"], 90, cfg_path.name)
+            self.assertEqual(data["custom_hsv_max_h"], 160, cfg_path.name)
+            self.assertEqual(data["custom_hsv_max_s"], 255, cfg_path.name)
+            self.assertEqual(data["custom_hsv_max_v"], 255, cfg_path.name)
 
 
 if __name__ == "__main__":
