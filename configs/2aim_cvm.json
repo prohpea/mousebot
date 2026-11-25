@@ -422,5 +422,15 @@
     "ui_style": "hud",
     "ui_simple_mode": false,
     "update_skipped_version": "",
-    "never_update": false
+    "never_update": false,
+    "detection_anti_vfx_enabled": true,
+    "firing_deadzone_boost_enabled": true,
+    "firing_deadzone_window_ms": 200.0,
+    "dynamic_capture_lag_enabled": true,
+    "velocity_lead_enabled": true,
+    "velocity_lead_max_px": 12.0,
+    "obs_udp_fast_boot": true,
+    "hsv_lighting_guard_enabled": false,
+    "firing_deadzone_boost_px": 2.5,
+    "velocity_lead_gain": 0.55
 }

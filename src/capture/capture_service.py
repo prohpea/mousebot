@@ -184,7 +184,7 @@ class CaptureService:
             tuple: (width, height) 鎴?(None, None) 濡傛灉鐒℃硶鐛插彇
         """
         if self.mode == "NDI":
-            if not self.ndi.is_connected():
+            if not self.ndi or not self.ndi.is_connected():
                 return None, None
             try:
                 frame = self.ndi.capture_frame()
@@ -233,6 +233,7 @@ class CaptureService:
     
     def connect_ndi(self, source_name):
         """閫ｆ帴 NDI 渚嗘簮"""
+        self._ensure_mode_manager("NDI")
         self.mode = "NDI"
         return self.ndi.connect_to_source(source_name)
 
@@ -264,6 +265,7 @@ class CaptureService:
 
     def connect_teleport(self, host="", port=0, stream_key=""):
         """閫ｆ帴 OBS Teleport 渚嗘簮"""
+        self._ensure_mode_manager("Teleport")
         self.mode = "Teleport"
 
         if not HAS_TELEPORT:
@@ -524,7 +526,7 @@ class CaptureService:
     def is_connected(self):
         """妾㈡煡鐣跺墠妯″紡鏄惁宸查€ｆ帴"""
         if self.mode == "NDI":
-            return self.ndi.is_connected()
+            return bool(self.ndi and self.ndi.is_connected())
         elif self.mode == "UDP":
             if not self.udp_manager:
                 return False
@@ -774,7 +776,8 @@ class CaptureService:
         """清理資源"""
         with self._io_lock:
             try:
-                self.ndi.cleanup()
+                if self.ndi:
+                    self.ndi.cleanup()
             except Exception as e:
                 log_print(f"[Capture] NDI cleanup error (ignored): {e}")
 

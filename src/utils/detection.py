@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 
 from src.utils.debug_logger import log_print
@@ -14,6 +15,7 @@ HSV_MIN = None
 HSV_MAX = None
 _PREV_STABLE_RECTS = []
 _PREV_STABLE_TS = 0.0
+_STABILIZE_LOCK = threading.Lock()
 
 _OPENCL_AVAILABLE = False
 _OPENCL_DEVICE_NAME = "CPU"
@@ -382,53 +384,54 @@ def _stabilize_detected_rects(rects):
     """Temporally stabilize bounding box edges across consecutive frames to prevent stationary flicker."""
     global _PREV_STABLE_RECTS, _PREV_STABLE_TS
     now = time.perf_counter()
-    if (now - _PREV_STABLE_TS) > 0.25 or not _PREV_STABLE_RECTS:
-        _PREV_STABLE_RECTS = [(int(x), int(y), int(w), int(h), 0) for (x, y, w, h) in rects]
-        _PREV_STABLE_TS = now
-        return rects
+    with _STABILIZE_LOCK:
+        if (now - _PREV_STABLE_TS) > 0.25 or not _PREV_STABLE_RECTS:
+            _PREV_STABLE_RECTS = [(int(x), int(y), int(w), int(h), 0) for (x, y, w, h) in rects]
+            _PREV_STABLE_TS = now
+            return rects
 
-    used = [False] * len(_PREV_STABLE_RECTS)
-    stabilized = []
-    next_state = []
+        used = [False] * len(_PREV_STABLE_RECTS)
+        stabilized = []
+        next_state = []
 
-    for x, y, w, h in rects:
-        x, y, w, h = int(x), int(y), int(w), int(h)
-        cx = x + 0.5 * w
-        cy = y + 0.5 * h
-        max_center_dist = max(8.0, 0.25 * max(w, h))
+        for x, y, w, h in rects:
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            cx = x + 0.5 * w
+            cy = y + 0.5 * h
+            max_center_dist = max(8.0, 0.25 * max(w, h))
 
-        best_idx = -1
-        best_dist = 1e9
-        for idx, (px, py, pw, ph, _) in enumerate(_PREV_STABLE_RECTS):
-            if used[idx]:
+            best_idx = -1
+            best_dist = 1e9
+            for idx, (px, py, pw, ph, _) in enumerate(_PREV_STABLE_RECTS):
+                if used[idx]:
+                    continue
+                if abs(w - pw) > max(10.0, 0.35 * pw) or abs(h - ph) > max(12.0, 0.35 * ph):
+                    continue
+                dist = math.hypot(cx - (px + 0.5 * pw), cy - (py + 0.5 * ph))
+                if dist <= max_center_dist and dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+
+            if best_idx < 0:
+                rect = (x, y, w, h)
+                stabilized.append(rect)
+                next_state.append((x, y, w, h, 0))
                 continue
-            if abs(w - pw) > max(10.0, 0.35 * pw) or abs(h - ph) > max(12.0, 0.35 * ph):
-                continue
-            dist = math.hypot(cx - (px + 0.5 * pw), cy - (py + 0.5 * ph))
-            if dist <= max_center_dist and dist < best_dist:
-                best_dist = dist
-                best_idx = idx
 
-        if best_idx < 0:
-            rect = (x, y, w, h)
+            used[best_idx] = True
+            px, py, pw, ph, hold_count = _PREV_STABLE_RECTS[best_idx]
+            sx1, sx2, held_x = _stabilize_axis_edges(x, x + w, px, px + pw, hold_count, shimmer_tol=2)
+            sy1, sy2, held_y = _stabilize_axis_edges(y, y + h, py, py + ph, hold_count, shimmer_tol=2)
+            sw = max(1, sx2 - sx1)
+            sh = max(1, sy2 - sy1)
+            new_hold = (hold_count + 1) if (held_x or held_y) else 0
+            rect = (sx1, sy1, sw, sh)
             stabilized.append(rect)
-            next_state.append((x, y, w, h, 0))
-            continue
+            next_state.append((sx1, sy1, sw, sh, new_hold))
 
-        used[best_idx] = True
-        px, py, pw, ph, hold_count = _PREV_STABLE_RECTS[best_idx]
-        sx1, sx2, held_x = _stabilize_axis_edges(x, x + w, px, px + pw, hold_count, shimmer_tol=2)
-        sy1, sy2, held_y = _stabilize_axis_edges(y, y + h, py, py + ph, hold_count, shimmer_tol=2)
-        sw = max(1, sx2 - sx1)
-        sh = max(1, sy2 - sy1)
-        new_hold = (hold_count + 1) if (held_x or held_y) else 0
-        rect = (sx1, sy1, sw, sh)
-        stabilized.append(rect)
-        next_state.append((sx1, sy1, sw, sh, new_hold))
-
-    _PREV_STABLE_RECTS = next_state
-    _PREV_STABLE_TS = now
-    return stabilized
+        _PREV_STABLE_RECTS = next_state
+        _PREV_STABLE_TS = now
+        return stabilized
 
 
 def _filter_false_positive_rects(rects, raw_mask):
@@ -579,7 +582,7 @@ def _build_masks_gpu_opencl(image, model, morph_mode: str):
     return u_raw_mask.get(), u_mask.get()
 
 
-def perform_detection(model, image, roi_offset=(0, 0)):
+def perform_detection(model, image, roi_offset=(0, 0), stabilize: bool = True):
     if model is None or image is None:
         return [], None
 
@@ -703,7 +706,8 @@ def perform_detection(model, image, roi_offset=(0, 0)):
     ox, oy = int(roi_offset[0]), int(roi_offset[1])
     if ox != 0 or oy != 0:
         merged_rects = [(rx + ox, ry + oy, rw, rh) for (rx, ry, rw, rh) in merged_rects]
-    merged_rects = _stabilize_detected_rects(merged_rects)
+    if stabilize:
+        merged_rects = _stabilize_detected_rects(merged_rects)
     return [{"class": "player", "bbox": r, "confidence": 1.0} for r in merged_rects], mask
 
 

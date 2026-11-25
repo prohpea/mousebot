@@ -305,7 +305,7 @@
     "silent_delay": 100.0,
     "silent_move_delay": 500.0,
     "silent_return_delay": 500.0,
-    "anti_smoke_enabled": true,
+    "anti_smoke_enabled": false,
     "anti_smoke_enabled_sec": false,
     "show_opencv_windows": true,
     "show_opencv_mask": false,
@@ -407,5 +407,17 @@
     "trigger_confirm_ms": 0.0,
     "track_wait_mode": "frame",
     "aim_offset_distance_scaling": true,
-    "aim_offset_ref_height": 64.0
+    "aim_offset_ref_height": 64.0,
+    "detection_anti_vfx_enabled": true,
+    "firing_deadzone_boost_enabled": true,
+    "firing_deadzone_window_ms": 200.0,
+    "dynamic_capture_lag_enabled": true,
+    "velocity_lead_enabled": true,
+    "velocity_lead_max_px": 12.0,
+    "obs_udp_fast_boot": true,
+    "hsv_lighting_guard_enabled": false,
+    "deadzone_fov_enabled": true,
+    "deadzone_fovsize": 2.5,
+    "firing_deadzone_boost_px": 2.5,
+    "velocity_lead_gain": 0.55
 }

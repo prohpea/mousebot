@@ -503,7 +503,7 @@ class HsvPreviewWindow(ctk.CTkToplevel):
         preset = XUDP_HSV_PRESETS.get(preset_key)
         if not preset:
             return
-        lo, hi = preset["ranges"][0]
+        lo, hi = preset[0]
         self._h_lo.set(int(lo[0]))
         self._h_hi.set(int(hi[0]))
         self._s_lo.set(int(lo[1]))
@@ -666,7 +666,7 @@ class HsvPreviewWindow(ctk.CTkToplevel):
                 config.custom_hsv_min_h, config.custom_hsv_max_h = h_lo, h_hi
                 config.custom_hsv_min_s, config.custom_hsv_max_s = s_lo, s_hi
                 config.custom_hsv_min_v, config.custom_hsv_max_v = v_lo, v_hi
-                dets, det_mask = perform_detection(self._det_model, bgr)
+                dets, det_mask = perform_detection(self._det_model, bgr, stabilize=False)
                 if det_mask is not None:
                     mask = det_mask
                 for det in dets:

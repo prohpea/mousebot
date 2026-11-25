@@ -416,5 +416,15 @@
     "mouse_lock_sec_y": false,
     "target_fps": 144,
     "aim_offset_distance_scaling": true,
-    "aim_offset_ref_height": 64.0
+    "aim_offset_ref_height": 64.0,
+    "detection_anti_vfx_enabled": true,
+    "firing_deadzone_boost_enabled": true,
+    "firing_deadzone_window_ms": 200.0,
+    "dynamic_capture_lag_enabled": true,
+    "velocity_lead_enabled": true,
+    "velocity_lead_max_px": 12.0,
+    "obs_udp_fast_boot": true,
+    "hsv_lighting_guard_enabled": false,
+    "firing_deadzone_boost_px": 2.0,
+    "velocity_lead_gain": 0.65
 }

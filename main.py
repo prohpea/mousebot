@@ -892,18 +892,23 @@ class AimTracker:
                 decode_ms = float(st.get("decode_time_ms", 0.0) or 0.0)
             self.lag_estimator.update(decode_ms=decode_ms, grab_ms=grab_ms, detect_ms=detect_ms)
 
-            # Optional ~2Hz Lighting-Drift Guard (custom HSV mode only)
+            # Optional ~2Hz Lighting-Drift Guard (custom HSV mode only; updates live model without mutating config.json)
             if (
                 getattr(config, "hsv_lighting_guard_enabled", False)
                 and getattr(config, "color", "custom") == "custom"
+                and isinstance(self.model, tuple)
+                and len(self.model) >= 2
             ):
                 self._lighting_guard_tick = (getattr(self, "_lighting_guard_tick", 0) + 1) % 72
                 if self._lighting_guard_tick == 0:
                     from src.utils.hsv_calibrator import compute_lighting_v_floor
                     base_v = int(getattr(config, "custom_hsv_min_v", 90))
                     new_v = compute_lighting_v_floor(bgr_img, base_v)
-                    if abs(new_v - base_v) >= 2:
-                        config.custom_hsv_min_v = new_v
+                    lo_arr = self.model[0].copy()
+                    hi_arr = self.model[1].copy()
+                    if int(lo_arr[2]) != int(new_v):
+                        lo_arr[2] = int(new_v)
+                        self.model = (lo_arr, hi_arr)
         except Exception:
             pass
 

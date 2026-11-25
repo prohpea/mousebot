@@ -128,6 +128,26 @@ class TestArchitectureUpgrades(unittest.TestCase):
             svc.set_mode("NDI")
             self.assertIsNotNone(svc.ndi)
             svc.set_mode("UDP")
+        svc.cleanup()
+
+    def test_xudp_hsv_presets_unpack_as_tuples_without_type_error(self):
+        from src.utils.detection import XUDP_HSV_PRESETS
+        for key in ("purple", "yellow", "red"):
+            preset = XUDP_HSV_PRESETS[key]
+            lo, hi = preset[0]
+            self.assertEqual(len(lo), 3)
+            self.assertEqual(len(hi), 3)
+
+    def test_config_path_sanitization_blocks_traversal(self):
+        from src.ui import ViewerApp
+        fake = type("Dummy", (), {})()
+        fake._normalize_config_display_name = ViewerApp._normalize_config_display_name.__get__(fake)
+        fake._config_filename_from_display_name = ViewerApp._config_filename_from_display_name.__get__(fake)
+        fake._resolve_config_path = ViewerApp._resolve_config_path.__get__(fake)
+        fake._config_file_map = {}
+        path, norm = fake._resolve_config_path("../../Windows/evil", force_new_suffix=True)
+        self.assertNotIn("..", path)
+        self.assertEqual(norm, "evil")
 
 
 if __name__ == "__main__":

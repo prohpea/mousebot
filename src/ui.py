@@ -10315,7 +10315,10 @@ class ViewerApp(ctk.CTk):
     def _apply_settings(self, data, config_name=None):
         try:
             data = self._strip_config_metadata(data)
+            allowed_keys = set(config.to_dict().keys())
             for k, v in data.items():
+                if not isinstance(k, str) or k.startswith("_") or k not in allowed_keys or callable(v):
+                    continue
                 if k in ("mode", "mode_sec"):
                     v = self._aim_mode_display_to_value(v)
                 elif k in ("abcurves_commitment_ms", "abcurves_commitment_ms_sec"):
@@ -10323,7 +10326,7 @@ class ViewerApp(ctk.CTk):
                 elif k == "udp_ip" and (not str(v).strip() or str(v).strip().lower() == "auto"):
                     v = self._detect_local_ipv4()
                 setattr(config, k, v)
-                if hasattr(self.tracker, k):
+                if hasattr(self.tracker, k) and not callable(getattr(self.tracker, k)):
                     setattr(self.tracker, k, v)
                 if k == "udp_ip":
                     self.saved_udp_ip = str(v)
@@ -10560,12 +10563,14 @@ class ViewerApp(ctk.CTk):
         self._do_save(name)
 
     def _normalize_config_display_name(self, name):
+        import re
         normalized = str(name or "").strip()
         if normalized.lower().endswith(".json"):
             normalized = normalized[:-5]
         if normalized.lower().endswith("_cvm"):
             normalized = normalized[:-4]
-        normalized = normalized.strip()
+        normalized = os.path.basename(normalized.replace("\\", "/"))
+        normalized = re.sub(r"[^A-Za-z0-9_\- .]", "", normalized).replace("..", "").strip(" .")
         return normalized or "default"
 
     def _config_display_name_from_filename(self, filename):
@@ -10582,13 +10587,18 @@ class ViewerApp(ctk.CTk):
         return f"{normalized}_cvm.json"
 
     def _resolve_config_path(self, display_name, force_new_suffix=False):
+        from pathlib import Path
         normalized = self._normalize_config_display_name(display_name)
+        configs_root = Path(str(get_configs_dir())).resolve()
         if force_new_suffix:
             filename = self._config_filename_from_display_name(normalized)
         else:
             file_map = getattr(self, "_config_file_map", {})
-            filename = file_map.get(normalized) or self._config_filename_from_display_name(normalized)
-        return os.path.join(str(get_configs_dir()), filename), normalized
+            filename = os.path.basename(str(file_map.get(normalized) or self._config_filename_from_display_name(normalized)))
+        target = (configs_root / filename).resolve()
+        if not target.is_relative_to(configs_root):
+            raise ValueError(f"Unsafe config path rejected: {display_name}")
+        return str(target), normalized
 
     def _build_config_payload(self, data):
         payload = {CVM_CONFIG_COMMENT_KEY: CVM_CONFIG_COMMENT_VALUE}
@@ -10617,6 +10627,8 @@ class ViewerApp(ctk.CTk):
             return json.dumps(fallback, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
     def _load_importable_settings_from_json_file(self, file_path):
+        if os.path.getsize(file_path) > 2 * 1024 * 1024:
+            raise ValueError("Config file exceeds 2MB size limit.")
         with open(file_path, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
         if not isinstance(raw_data, dict):
@@ -12244,7 +12256,7 @@ class ViewerApp(ctk.CTk):
             pass
         self._refresh_quick_profile_highlights()
         if self._is_hud_mode():
-            self._build_hud_quick_profile_bar()
+            self._populate_hud_quick_profile_buttons()
         else:
             self._build_bento_quick_profile_bar()
         if hasattr(self, "config_log"):
