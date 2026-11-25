@@ -447,6 +447,14 @@ class Config:
         self.ui_simple_mode = False
         self.update_skipped_version = ""
         self.never_update = False
+        # --- CVM-Ultimate Architecture Upgrades ---
+        self.dynamic_capture_lag_enabled = True
+        self.velocity_lead_enabled = True
+        self.velocity_lead_gain = 0.55
+        self.velocity_lead_max_px = 12.0
+        self.hsv_lighting_guard_enabled = False
+        self.pinned_profiles = []
+        self.profile_cycle_hotkey = "F8"
         
         # --- Button Mask Settings ---
         self.button_mask_enabled = False  # 绺介枊闂?
@@ -898,6 +906,13 @@ class Config:
             "ui_simple_mode": self.ui_simple_mode,
             "update_skipped_version": self.update_skipped_version,
             "never_update": self.never_update,
+            "dynamic_capture_lag_enabled": getattr(self, "dynamic_capture_lag_enabled", True),
+            "velocity_lead_enabled": getattr(self, "velocity_lead_enabled", True),
+            "velocity_lead_gain": getattr(self, "velocity_lead_gain", 0.55),
+            "velocity_lead_max_px": getattr(self, "velocity_lead_max_px", 12.0),
+            "hsv_lighting_guard_enabled": getattr(self, "hsv_lighting_guard_enabled", False),
+            "pinned_profiles": list(getattr(self, "pinned_profiles", []) or []),
+            "profile_cycle_hotkey": getattr(self, "profile_cycle_hotkey", "F8"),
         }
     
     def from_dict(self, data):

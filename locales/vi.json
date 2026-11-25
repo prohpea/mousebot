@@ -206,6 +206,15 @@
     "Smooth": "Độ mượt",
     "Smooth FOV": "FOV làm mượt",
     "Mouse Lock": "Khóa trục chuột",
-    "Button Mask": "Mặt nạ nút chuột"
+    "Button Mask": "Mặt nạ nút chuột",
+    "Mouse DPI": "DPI Chuột",
+    "Lighting-Drift Guard (2Hz)": "Tự bù sáng HSV (2Hz)",
+    "HSV Calibration Lab": "Phòng Hiệu chuẩn HSV",
+    "Dynamic Capture Lag": "Tự đo độ trễ Capture",
+    "Velocity Lead Prediction": "Dự đoán đón đầu mục tiêu",
+    "PROFILE MANAGER": "QUẢN LÝ CẤU HÌNH",
+    "PROFILE DIFF & SCOPE": "SO SÁNH THAY ĐỔI",
+    "Cycle Pinned Hotkey": "Phím đổi Profile ghim",
+    "144HZ PIPELINE PROFILER (6.94MS BUDGET)": "ĐO HIỆU NĂNG 144HZ (NGÂN SÁCH 6.94MS)"
   }
 }

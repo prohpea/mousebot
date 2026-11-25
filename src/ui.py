@@ -383,6 +383,10 @@ class ViewerApp(ctk.CTk):
         self._ui_simple_mode = bool(getattr(config, "ui_simple_mode", False))
         self._active_quick_profile = None
         self._quick_profile_buttons = {}
+        self._profile_cycle_was_down = False
+        self._profile_cycle_last_ts = 0.0
+        self._status_toast_after_id = None
+        self._mouse_path_replay_slot_main = "Live"
         self._hud_fps_history = [0.0] * 40
         self.hud_nav_bar = None
         self.hud_quick_bar = None
@@ -418,6 +422,7 @@ class ViewerApp(ctk.CTk):
         # 預設不置頂，避免影響其他 app/focus
         self.attributes('-topmost', False)
         self.bind("<Map>", self._on_window_map)
+        self.after(60, self._poll_profile_cycle_hotkey)
         self.after(50, self._ensure_taskbar_icon)
         
         # --- Core services ---
@@ -732,41 +737,32 @@ class ViewerApp(ctk.CTk):
 
             ctk.CTkFrame(bar_inner, width=1, height=18, fg_color="#162630").pack(side="right", padx=8)
 
-            # Live Inline HUD Metrics Strip
+            # Live Inline HUD Metrics Strip (144Hz Budget Pills)
             metrics_frame = ctk.CTkFrame(bar_inner, fg_color="transparent")
             metrics_frame.pack(side="right", fill="y")
 
-            self.hud_toggle_metric = ctk.CTkLabel(
-                metrics_frame,
-                text="AIM: HOLD",
-                font=("Consolas", 10, "bold"),
-                text_color="#00F0FF",
-            )
-            self.hud_toggle_metric.pack(side="right", padx=(10, 0))
+            def _make_metric_pill(text, text_color):
+                pill = ctk.CTkFrame(
+                    metrics_frame,
+                    fg_color="#0A141D",
+                    border_width=1,
+                    border_color="#162630",
+                    corner_radius=4,
+                )
+                pill.pack(side="right", padx=(6, 0), pady=4)
+                lbl = ctk.CTkLabel(
+                    pill,
+                    text=text,
+                    font=("Consolas", 10, "bold"),
+                    text_color=text_color,
+                )
+                lbl.pack(padx=6, pady=1)
+                return pill, lbl
 
-            self.hud_hw_metric = ctk.CTkLabel(
-                metrics_frame,
-                text="HW: OFFLINE",
-                font=("Consolas", 10, "bold"),
-                text_color="#FF3B5C",
-            )
-            self.hud_hw_metric.pack(side="right", padx=(10, 0))
-
-            self.hud_decode_metric = ctk.CTkLabel(
-                metrics_frame,
-                text="DECODE: --ms",
-                font=("Consolas", 10, "bold"),
-                text_color="#94A3B8",
-            )
-            self.hud_decode_metric.pack(side="right", padx=(10, 0))
-
-            self.hud_stream_metric = ctk.CTkLabel(
-                metrics_frame,
-                text="STREAM: -- FPS",
-                font=("Consolas", 10, "bold"),
-                text_color="#00F0FF",
-            )
-            self.hud_stream_metric.pack(side="right", padx=(0, 0))
+            _, self.hud_toggle_metric = _make_metric_pill("AIM: HOLD", "#00F0FF")
+            _, self.hud_hw_metric = _make_metric_pill("● HW: OFFLINE", "#FF3B5C")
+            self.hud_decode_pill, self.hud_decode_metric = _make_metric_pill("DECODE: --/6.94ms", "#94A3B8")
+            _, self.hud_stream_metric = _make_metric_pill("STREAM: -- FPS", "#00F0FF")
 
             for drag_widget in (self.title_bar, bar_inner, title_container, title_lbl, self.logo_lbl, self.version_lbl):
                 if drag_widget is not None:
@@ -2403,8 +2399,16 @@ class ViewerApp(ctk.CTk):
         if not file_map:
             return []
         self._config_file_map = file_map
-        names = sorted(file_map.keys(), key=lambda item: str(item).lower())
-        return names[:limit]
+        all_names = sorted(file_map.keys(), key=lambda item: str(item).lower())
+        from src.utils.profile_manager import normalize_pinned_profiles
+        pinned = normalize_pinned_profiles(getattr(config, "pinned_profiles", []), all_names, max_slots=limit)
+        ordered = list(pinned)
+        for nm in all_names:
+            if nm not in ordered:
+                ordered.append(nm)
+            if len(ordered) >= limit:
+                break
+        return ordered[:limit]
 
     @staticmethod
     def _format_quick_profile_label(name):
@@ -2470,20 +2474,106 @@ class ViewerApp(ctk.CTk):
             try:
                 if not btn.winfo_exists():
                     continue
+                short = self._format_quick_profile_label(name)
                 if active and str(name).lower() == str(active).lower():
                     if is_hud:
-                        btn.configure(fg_color="#0A2430", border_color="#00F0FF", text_color="#00F0FF")
+                        btn.configure(
+                            text=f"▸ {short}",
+                            border_width=2,
+                            fg_color="#0A2430",
+                            border_color="#00F0FF",
+                            text_color="#00F0FF",
+                        )
                     else:
-                        btn.configure(fg_color="#1E3A8A", border_color=COLOR_ACCENT, text_color="#FFFFFF")
+                        btn.configure(
+                            text=f"▸ {short}",
+                            border_width=2,
+                            fg_color="#1E3A8A",
+                            border_color=COLOR_ACCENT,
+                            text_color="#FFFFFF",
+                        )
                 else:
                     if is_hud:
-                        btn.configure(fg_color="#0B121A", border_color="#1B3040", text_color="#CBD5E1")
+                        btn.configure(
+                            text=short,
+                            border_width=1,
+                            fg_color="#0B121A",
+                            border_color="#1B3040",
+                            text_color="#CBD5E1",
+                        )
                     else:
-                        btn.configure(fg_color="#1A2233", border_color="#26334D", text_color=COLOR_TEXT)
+                        btn.configure(
+                            text=short,
+                            border_width=1,
+                            fg_color="#1A2233",
+                            border_color="#26334D",
+                            text_color=COLOR_TEXT,
+                        )
             except Exception:
                 pass
 
-    def _quick_load_profile(self, display_name):
+    def _show_status_toast(self, message, color="#00F0FF", duration_ms=2200):
+        pending = getattr(self, "_status_toast_after_id", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+            self._status_toast_after_id = None
+        self._set_status_indicator(message, color)
+
+        def _revert():
+            self._status_toast_after_id = None
+            if getattr(self, "_runtime_active", False):
+                self._set_status_indicator(t("Status: Running"), COLOR_SUCCESS)
+            else:
+                self._set_status_indicator(t("Status: Stopped"), COLOR_TEXT_DIM)
+
+        try:
+            self._status_toast_after_id = self.after(int(duration_ms), _revert)
+        except Exception:
+            pass
+
+    def _poll_profile_cycle_hotkey(self):
+        try:
+            hk_name = str(getattr(config, "profile_cycle_hotkey", "F8") or "Off").strip()
+            vk_map = {"F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77, "F9": 0x78}
+            vk = vk_map.get(hk_name.upper())
+            if (
+                os.name == "nt"
+                and USER32 is not None
+                and vk is not None
+                and getattr(self, "_binding_capture_ctx", None) is None
+            ):
+                pressed = bool(USER32.GetAsyncKeyState(vk) & 0x8000)
+                now = time.monotonic()
+                if pressed and not getattr(self, "_profile_cycle_was_down", False):
+                    if (now - float(getattr(self, "_profile_cycle_last_ts", 0.0))) >= 0.25:
+                        self._profile_cycle_last_ts = now
+                        self._cycle_pinned_profile()
+                self._profile_cycle_was_down = pressed
+        except Exception:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(60, self._poll_profile_cycle_hotkey)
+        except Exception:
+            pass
+
+    def _cycle_pinned_profile(self):
+        all_names = self._list_quick_profile_names(limit=24)
+        from src.utils.profile_manager import normalize_pinned_profiles
+        pinned = normalize_pinned_profiles(getattr(config, "pinned_profiles", []), all_names, max_slots=6)
+        pool = pinned if len(pinned) >= 2 else self._list_quick_profile_names(limit=6)
+        if len(pool) < 2:
+            self._show_status_toast("Pin 2+ profiles to cycle", "#F59E0B")
+            return
+        active = str(getattr(self, "_active_quick_profile", "") or "").lower()
+        idx = next((i for i, n in enumerate(pool) if n.lower() == active), -1)
+        next_idx = (idx + 1) % len(pool)
+        self._quick_load_profile(pool[next_idx], cycle_label=f"[{next_idx + 1}/{len(pool)}]")
+
+    def _quick_load_profile(self, display_name, cycle_label=""):
         """Load ONLY Main Aim parameters from the selected profile; keep Hardware/Capture & OBS-synced HSV untouched."""
         try:
             path, normalized_name = self._resolve_config_path(display_name)
@@ -2500,13 +2590,23 @@ class ViewerApp(ctk.CTk):
             self._apply_settings(aim_only, config_name=normalized_name)
             self._sync_config_to_tracker()
             config.save_to_file()
-            self._refresh_quick_profile_highlights()
+            btn = getattr(self, "_quick_profile_buttons", {}).get(normalized_name)
+            if btn is not None:
+                try:
+                    if btn.winfo_exists():
+                        btn.configure(fg_color="#0F3A47", border_color="#10B981", text_color="#10B981")
+                        self.after(140, self._refresh_quick_profile_highlights)
+                except Exception:
+                    self._refresh_quick_profile_highlights()
+            else:
+                self._refresh_quick_profile_highlights()
             if hasattr(self, "config_option") and self.config_option.winfo_exists():
                 try:
                     self.config_option.set(normalized_name)
                 except Exception:
                     pass
-            self._set_status_indicator(t("Profile: {name}", name=normalized_name), COLOR_ACCENT)
+            suffix = f" {cycle_label}" if cycle_label else " (AIM ONLY)"
+            self._show_status_toast(f"[OK] PROFILE -> {normalized_name}{suffix}", "#00F0FF")
             self._update_header_status_pills()
         except Exception as e:
             log_print(f"[UI] Quick profile load error ({display_name}): {e}")
@@ -2596,7 +2696,16 @@ class ViewerApp(ctk.CTk):
             if len(hist) > 40:
                 del hist[:-40]
 
-        stream_state = (f"{mode}: {fps_val} FPS", "#00F0FF" if connected else "#64748B")
+        if not connected:
+            stream_color = "#64748B"
+        elif numeric_fps >= 120.0:
+            stream_color = "#00F0FF"
+        elif numeric_fps >= 60.0:
+            stream_color = "#F59E0B"
+        else:
+            stream_color = "#FF3B5C"
+
+        stream_state = (f"{mode}: {fps_val} FPS", stream_color)
         if cache.get("stream") != stream_state and getattr(self, "hud_stream_metric", None) is not None:
             try:
                 if self.hud_stream_metric.winfo_exists():
@@ -2605,11 +2714,27 @@ class ViewerApp(ctk.CTk):
             except Exception:
                 pass
 
-        decode_state = f"DECODE: {decode_val}"
+        dec_num = None
+        try:
+            dec_num = float(str(decode_val).replace("ms", "").strip())
+        except Exception:
+            dec_num = None
+        if dec_num is None:
+            dec_color, dec_border, dec_txt = "#94A3B8", "#162630", f"DECODE: {decode_val}"
+        elif dec_num <= 4.5:
+            dec_color, dec_border, dec_txt = "#5EE173", "#162630", f"DECODE: {dec_num:.1f}/6.9ms"
+        elif dec_num <= 6.94:
+            dec_color, dec_border, dec_txt = "#F59E0B", "#78350F", f"DECODE: {dec_num:.1f}/6.9ms"
+        else:
+            dec_color, dec_border, dec_txt = "#FF3B5C", "#FF3B5C", f"DECODE: {dec_num:.1f}/6.9ms"
+
+        decode_state = (dec_txt, dec_color, dec_border)
         if cache.get("decode") != decode_state and getattr(self, "hud_decode_metric", None) is not None:
             try:
                 if self.hud_decode_metric.winfo_exists():
-                    self.hud_decode_metric.configure(text=decode_state)
+                    self.hud_decode_metric.configure(text=dec_txt, text_color=dec_color)
+                    if getattr(self, "hud_decode_pill", None) is not None and self.hud_decode_pill.winfo_exists():
+                        self.hud_decode_pill.configure(border_color=dec_border)
                     cache["decode"] = decode_state
             except Exception:
                 pass
@@ -3274,6 +3399,9 @@ class ViewerApp(ctk.CTk):
         self._add_slider_in_frame(sec_settings, "In-Game Sensitivity", "in_game_sens", 0.1, 20, 
                         float(getattr(config, "in_game_sens", 0.23)), 
                         self._on_config_in_game_sens_changed, is_float=True)
+        self._add_slider_in_frame(sec_settings, "Mouse DPI", "mouse_dpi", 200, 6400,
+                        int(getattr(config, "mouse_dpi", 1100)),
+                        self._on_config_mouse_dpi_changed)
         
         self._add_spacer_in_frame(sec_settings)
         
@@ -3300,6 +3428,31 @@ class ViewerApp(ctk.CTk):
         self.var_gpu_opencl = tk.BooleanVar(value=bool(getattr(config, "gpu_opencl_enabled", True)))
         self._add_switch_in_frame(sec_settings, gpu_label, self.var_gpu_opencl, self._on_gpu_opencl_changed)
         self._checkbox_vars["gpu_opencl_enabled"] = self.var_gpu_opencl
+
+        self.var_hsv_lighting_guard = tk.BooleanVar(value=bool(getattr(config, "hsv_lighting_guard_enabled", False)))
+        self._add_switch_in_frame(
+            sec_settings,
+            "Lighting-Drift Guard (2Hz)",
+            self.var_hsv_lighting_guard,
+            self._on_hsv_lighting_guard_changed,
+        )
+        self._checkbox_vars["hsv_lighting_guard_enabled"] = self.var_hsv_lighting_guard
+
+        hsv_lab_btn_row = ctk.CTkFrame(sec_settings, fg_color="transparent")
+        hsv_lab_btn_row.pack(fill="x", pady=(6, 4))
+        ctk.CTkButton(
+            hsv_lab_btn_row,
+            text=t("HSV Calibration Lab"),
+            height=30,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_ACCENT,
+            font=FONT_BOLD,
+            corner_radius=4,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            command=self._open_hsv_preview,
+        ).pack(fill="x", padx=14)
         
         # 鈹€鈹€ Custom HSV Settings (collapsible, only show when custom is selected) 鈹€鈹€
         # 鍓靛缓 container 浠ヤ究鎺у埗椤ず/闅辫棌锛堜笉鑷嫊 pack锛?
@@ -3380,9 +3533,9 @@ class ViewerApp(ctk.CTk):
             tooltip_text=detection_tooltip_text
         )
         
-        # Merge Distance
-        self._add_slider_in_frame(sec_detection, "Merge Distance", "detection_merge_distance", 50, 500,
-                                  int(getattr(config, "detection_merge_distance", 250)),
+        # Merge Distance (aligned with merge_close_rects 0..28px clamp)
+        self._add_slider_in_frame(sec_detection, "Merge Distance", "detection_merge_distance", 0, 28,
+                                  min(28, max(0, int(getattr(config, "detection_merge_distance", 28)))),
                                   self._on_detection_merge_distance_changed)
         
         self._add_spacer_in_frame(sec_detection)
@@ -3431,15 +3584,11 @@ class ViewerApp(ctk.CTk):
         )
         self._checkbox_vars["detection_disable_empty_fallback"] = self.var_detection_disable_fallback
         
-        # MOUSE LOCK (collapsible)
+        # MOUSE LOCK (collapsible, Main Aimbot only)
         mouse_lock_tooltip_text = (
             "- Lock Main Aimbot X-Axis: Blocks physical mouse movement on X-axis when Main Aimbot is active. "
             "Only aimbot-controlled movements will be applied.\n\n"
             "- Lock Main Aimbot Y-Axis: Blocks physical mouse movement on Y-axis when Main Aimbot is active. "
-            "Only aimbot-controlled movements will be applied.\n\n"
-            "- Lock Sec Aimbot X-Axis: Blocks physical mouse movement on X-axis when Sec Aimbot is active. "
-            "Only aimbot-controlled movements will be applied.\n\n"
-            "- Lock Sec Aimbot Y-Axis: Blocks physical mouse movement on Y-axis when Sec Aimbot is active. "
             "Only aimbot-controlled movements will be applied.\n\n"
             "Note: The lock will automatically release when the aimbot button is released or aimbot stops moving."
         )
@@ -3461,20 +3610,6 @@ class ViewerApp(ctk.CTk):
             self.var_mouse_lock_main_y = tk.BooleanVar(value=getattr(config, "mouse_lock_main_y", False))
         self._add_switch_in_frame(sec_mouse_lock, "Lock Main Aimbot Y-Axis", self.var_mouse_lock_main_y, self._on_mouse_lock_main_y_changed)
         self._checkbox_vars["mouse_lock_main_y"] = self.var_mouse_lock_main_y
-        
-        self._add_spacer_in_frame(sec_mouse_lock)
-        
-        # Lock Sec Aimbot X-Axis
-        if not hasattr(self, 'var_mouse_lock_sec_x'):
-            self.var_mouse_lock_sec_x = tk.BooleanVar(value=getattr(config, "mouse_lock_sec_x", False))
-        self._add_switch_in_frame(sec_mouse_lock, "Lock Sec Aimbot X-Axis", self.var_mouse_lock_sec_x, self._on_mouse_lock_sec_x_changed)
-        self._checkbox_vars["mouse_lock_sec_x"] = self.var_mouse_lock_sec_x
-        
-        # Lock Sec Aimbot Y-Axis
-        if not hasattr(self, 'var_mouse_lock_sec_y'):
-            self.var_mouse_lock_sec_y = tk.BooleanVar(value=getattr(config, "mouse_lock_sec_y", False))
-        self._add_switch_in_frame(sec_mouse_lock, "Lock Sec Aimbot Y-Axis", self.var_mouse_lock_sec_y, self._on_mouse_lock_sec_y_changed)
-        self._checkbox_vars["mouse_lock_sec_y"] = self.var_mouse_lock_sec_y
         
         # 鈹€鈹€ BUTTON MASK (collapsible) 鈹€鈹€
         sec_button_mask = self._create_collapsible_section(advanced_parent, "Button Mask", initially_open=False)
@@ -6705,6 +6840,26 @@ class ViewerApp(ctk.CTk):
             self._add_slider_in_frame(sec_params, "Seed", "abcurves_seed", 1, 9999,
                                       float(getattr(config, "abcurves_seed", 7)),
                                       self._on_abcurves_seed_changed)
+            self.var_dynamic_capture_lag = tk.BooleanVar(
+                value=bool(getattr(config, "dynamic_capture_lag_enabled", True))
+            )
+            self._add_switch_in_frame(
+                sec_params,
+                "Dynamic Capture Lag",
+                self.var_dynamic_capture_lag,
+                self._on_dynamic_lag_changed,
+            )
+            self._checkbox_vars["dynamic_capture_lag_enabled"] = self.var_dynamic_capture_lag
+            self.var_velocity_lead = tk.BooleanVar(
+                value=bool(getattr(config, "velocity_lead_enabled", True))
+            )
+            self._add_switch_in_frame(
+                sec_params,
+                "Velocity Lead Prediction",
+                self.var_velocity_lead,
+                self._on_velocity_lead_changed,
+            )
+            self._checkbox_vars["velocity_lead_enabled"] = self.var_velocity_lead
             self._add_spacer_in_frame(sec_params)
             self._add_subtitle_in_frame(sec_params, "FOV")
             self._add_slider_in_frame(sec_params, "FOV Size", "fovsize", 1, 1000,
@@ -7564,33 +7719,89 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Config"
         self._clear_content()
         self._add_title("Configuration")
-        
+
         os.makedirs(str(get_configs_dir()), exist_ok=True)
-        
-        self.config_option = self._add_option_menu([], self._on_config_selected)
-        self.config_option.pack(fill="x", pady=10)
-        
-        btn_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=10)
-        self._add_text_button(btn_frame, "SAVE", self._save_config).pack(side="left", padx=(0, 10))
-        self._add_text_button(btn_frame, "LOAD", self._load_selected_config).pack(side="left", padx=(0, 10))
-        self._add_text_button(btn_frame, "DEL", self._delete_selected_config).pack(side="left", padx=(0, 10))
-        self._add_text_button(btn_frame, "NEW", self._save_new_config).pack(side="left", padx=(0, 10))
-        self._add_text_button(btn_frame, "EXPORT", self._export_selected_config).pack(side="left", padx=(0, 10))
-        self._add_text_button(btn_frame, "IMPORT", self._import_config_file).pack(side="left")
-        
-        self._add_spacer()
+
+        columns = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        columns.pack(fill="both", expand=True)
+        columns.grid_columnconfigure(0, weight=1)
+        columns.grid_columnconfigure(1, weight=1)
+
+        left_col = ctk.CTkFrame(columns, fg_color=COLOR_SURFACE, corner_radius=6)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=4)
+        right_col = ctk.CTkFrame(columns, fg_color=COLOR_SURFACE, corner_radius=6)
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=4)
+
+        ctk.CTkLabel(
+            left_col, text=t("PROFILE MANAGER"), font=("Roboto", 11, "bold"), text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        self.config_option = ctk.CTkOptionMenu(
+            left_col,
+            values=[],
+            command=self._on_config_selected_with_diff,
+            fg_color=COLOR_BG,
+            button_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=FONT_MAIN,
+        )
+        self.config_option.pack(fill="x", padx=12, pady=6)
+
+        btn_frame = ctk.CTkFrame(left_col, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=6)
+        self._add_text_button(btn_frame, "SAVE", self._save_config).pack(side="left", padx=(0, 6))
+        self._add_text_button(btn_frame, "LOAD FULL", self._load_selected_config).pack(side="left", padx=(0, 6))
+        self._add_text_button(btn_frame, "LOAD AIM", self._load_selected_config_aim_only).pack(side="left", padx=(0, 6))
+        self._add_text_button(btn_frame, "DEL", self._delete_selected_config).pack(side="left", padx=(0, 6))
+        self._add_text_button(btn_frame, "NEW", self._save_new_config).pack(side="left", padx=(0, 6))
+
+        io_frame = ctk.CTkFrame(left_col, fg_color="transparent")
+        io_frame.pack(fill="x", padx=12, pady=(0, 6))
+        self._add_text_button(io_frame, "EXPORT", self._export_selected_config).pack(side="left", padx=(0, 6))
+        self._add_text_button(io_frame, "IMPORT", self._import_config_file).pack(side="left", padx=(0, 6))
+        self._add_text_button(io_frame, "PIN / UNPIN", self._toggle_pin_selected_profile).pack(side="left")
+
+        hk_row = ctk.CTkFrame(left_col, fg_color="transparent")
+        hk_row.pack(fill="x", padx=12, pady=(4, 8))
+        ctk.CTkLabel(hk_row, text=t("Cycle Pinned Hotkey"), font=FONT_MAIN, text_color=COLOR_TEXT_DIM).pack(side="left")
+        hk_opt = ctk.CTkOptionMenu(
+            hk_row,
+            values=["Off", "F5", "F6", "F7", "F8", "F9"],
+            command=self._on_profile_cycle_hotkey_changed,
+            fg_color=COLOR_BG,
+            button_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=FONT_MAIN,
+            width=85,
+        )
+        hk_opt.set(str(getattr(config, "profile_cycle_hotkey", "F8") or "F8"))
+        hk_opt.pack(side="right")
+
         self.config_log = ctk.CTkTextbox(
-            self.content_frame, 
-            height=100, 
-            fg_color=COLOR_SURFACE, 
+            left_col,
+            height=90,
+            fg_color=COLOR_BG,
             text_color=COLOR_TEXT_DIM,
             font=("Consolas", 10),
-            corner_radius=0
+            corner_radius=4,
         )
-        self.config_log.pack(fill="x", pady=10)
-        
+        self.config_log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
+        ctk.CTkLabel(
+            right_col, text=t("PROFILE DIFF & SCOPE"), font=("Roboto", 11, "bold"), text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        self.config_diff_box = ctk.CTkTextbox(
+            right_col,
+            height=220,
+            fg_color=COLOR_BG,
+            text_color=COLOR_TEXT,
+            font=("Consolas", 10),
+            corner_radius=4,
+        )
+        self.config_diff_box.pack(fill="both", expand=True, padx=12, pady=(4, 12))
+
         self._refresh_config_list()
+        self._refresh_config_diff_inspector()
         self.after(100, self._maybe_prompt_clipboard_config_import)
 
     def _show_debug_tab(self):
@@ -7598,7 +7809,29 @@ class ViewerApp(ctk.CTk):
         self._active_tab_name = "Debug"
         self._clear_content()
         self._add_title("Debug")
-        
+
+        # 144Hz Pipeline Profiler & Pre-Flight Section
+        self._add_subtitle("144HZ PIPELINE PROFILER (6.94MS BUDGET)")
+        prof_frame = ctk.CTkFrame(self.content_frame, fg_color=COLOR_SURFACE, corner_radius=6)
+        prof_frame.pack(fill="x", pady=(0, 10))
+        self.debug_profiler_label = ctk.CTkLabel(
+            prof_frame,
+            text="Grab: -- ms | Detect: -- ms | Aim: -- ms | Budget: --% | Lag: -- ms",
+            font=("Consolas", 11),
+            text_color="#38BDF8",
+            anchor="w",
+        )
+        self.debug_profiler_label.pack(fill="x", padx=12, pady=(8, 4))
+        self.debug_preflight_label = ctk.CTkLabel(
+            prof_frame,
+            text="Pre-Flight: Checking Capture & Hardware...",
+            font=("Consolas", 10),
+            text_color=COLOR_TEXT_DIM,
+            anchor="w",
+        )
+        self.debug_preflight_label.pack(fill="x", padx=12, pady=(0, 8))
+        self._refresh_debug_profiler_card()
+
         # Mouse Input Debug Section
         self._add_subtitle("MOUSE INPUT DEBUG")
         
@@ -9159,12 +9392,23 @@ class ViewerApp(ctk.CTk):
         top_bar = ctk.CTkFrame(sec_preview, fg_color="transparent")
         top_bar.pack(fill="x", pady=(2, 6))
 
-        ctk.CTkLabel(
+        slot_seg = ctk.CTkSegmentedButton(
             top_bar,
-            text="Real mouse path when you press your Aim Hotkey (Start -> Target)",
-            font=("Roboto", 10),
-            text_color=COLOR_TEXT_DIM,
-        ).pack(side="left")
+            values=["Live", "#1", "#2", "#3", "#4", "#5"],
+            command=lambda val, sec=is_sec: self._on_mouse_path_slot_selected(val, is_sec=sec),
+            font=("Consolas", 10, "bold"),
+            fg_color=COLOR_SURFACE,
+            selected_color="#0284C7",
+            selected_hover_color="#0EA5E9",
+            unselected_color=COLOR_SURFACE,
+            unselected_hover_color=COLOR_BORDER,
+            height=24,
+        )
+        slot_seg.set(getattr(self, "_mouse_path_replay_slot_main", "Live") if not is_sec else "Live")
+        slot_seg._allow_during_runtime = True
+        slot_seg.pack(side="left")
+        if not is_sec:
+            self._mouse_path_slot_seg_main = slot_seg
 
         clear_btn = ctk.CTkButton(
             top_bar,
@@ -9225,6 +9469,13 @@ class ViewerApp(ctk.CTk):
         )
 
     def _clear_mouse_path_preview(self, is_sec=False):
+        if not is_sec:
+            self._mouse_path_replay_slot_main = "Live"
+            if hasattr(self, "_mouse_path_slot_seg_main") and self._mouse_path_slot_seg_main.winfo_exists():
+                try:
+                    self._mouse_path_slot_seg_main.set("Live")
+                except Exception:
+                    pass
         if hasattr(self, "tracker") and hasattr(self.tracker, "clear_live_path"):
             self.tracker.clear_live_path()
         self._refresh_mouse_path_preview(is_sec=is_sec)
@@ -9246,6 +9497,11 @@ class ViewerApp(ctk.CTk):
         )
         setattr(self, job_attr, job)
 
+    def _on_mouse_path_slot_selected(self, slot_val, is_sec=False):
+        if not is_sec:
+            self._mouse_path_replay_slot_main = str(slot_val or "Live")
+        self._refresh_mouse_path_preview(is_sec=is_sec)
+
     def _poll_mouse_path_live_trail(self, is_sec=False):
         canvas, _ = self._get_mouse_path_preview_widgets(is_sec=is_sec)
         if canvas is None:
@@ -9257,7 +9513,8 @@ class ViewerApp(ctk.CTk):
             return
 
         # Pause live canvas redraws while engine is running to prevent GIL micro-stutters during gameplay
-        if not getattr(self, "_runtime_active", False):
+        slot = "Live" if is_sec else str(getattr(self, "_mouse_path_replay_slot_main", "Live"))
+        if not getattr(self, "_runtime_active", False) and slot == "Live":
             if hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_snapshot"):
                 snap = self.tracker.get_live_path_snapshot()
                 seq = int(snap[2]) if len(snap) >= 3 else -1
@@ -9295,7 +9552,29 @@ class ViewerApp(ctk.CTk):
 
         live_pts = [(0.0, 0.0)]
         rec_mode = str(getattr(config, "mode_sec" if is_sec else "mode", "ABCurves"))
-        if hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_snapshot"):
+        slot = "Live" if is_sec else str(getattr(self, "_mouse_path_replay_slot_main", "Live"))
+        slot_prefix = ""
+        if slot.startswith("#") and hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_history"):
+            history = list(reversed(self.tracker.get_live_path_history()))
+            try:
+                h_idx = int(slot[1:]) - 1
+            except Exception:
+                h_idx = 0
+            if 0 <= h_idx < len(history):
+                entry = history[h_idx]
+                live_pts = list(entry.get("points") or [(0.0, 0.0)])
+                rec_mode = str(entry.get("mode") or rec_mode)
+                slot_prefix = f"Slot {slot}/{len(history)} | "
+            else:
+                cx0, cy0 = width * 0.5, height * 0.5
+                canvas.create_text(
+                    cx0, cy0,
+                    text=f"No engagement recorded in {slot} ({len(history)}/5)",
+                    fill=COLOR_TEXT_DIM, font=("Consolas", 9),
+                )
+                info_label.configure(text=f"Slot {slot}: Empty ({len(history)}/5 recorded)")
+                return
+        elif hasattr(self, "tracker") and hasattr(self.tracker, "get_live_path_snapshot"):
             snap = self.tracker.get_live_path_snapshot()
             if len(snap) >= 1 and snap[0]:
                 live_pts = list(snap[0])
@@ -9378,9 +9657,10 @@ class ViewerApp(ctk.CTk):
             cxp, cyp = to_canvas(px, py)
             flat_pts.extend((cxp, cyp))
             canvas_pts.append((cxp, cyp))
+        canvas.create_line(flat_pts, fill="#0E3A52", width=4, smooth=False)
         canvas.create_line(flat_pts, fill="#38BDF8", width=2, smooth=False)
         for cxp, cyp in canvas_pts[1:]:
-            canvas.create_oval(cxp - 2, cyp - 2, cxp + 2, cyp + 2, fill="#5EE173", outline="")
+            canvas.create_oval(cxp - 1.5, cyp - 1.5, cxp + 1.5, cyp + 1.5, fill="#5EE173", outline="")
 
         # Start and End markers
         canvas.create_oval(sx_c - 4, sy_c - 4, sx_c + 4, sy_c + 4, fill="#F8FAFC", outline="")
@@ -9393,8 +9673,8 @@ class ViewerApp(ctk.CTk):
         tag = "Curved" if ratio >= 1.02 else "Direct"
         info_label.configure(
             text=(
-                f"Mode: {rec_mode} | Distance: {chord_px:.1f}px ({chord_cnt:.0f} cnt) | "
-                f"Steps: {steps_count} | Curve: {ratio:.2f}x ({tag}) | Peak Step: {int(round(peak_step))} cnt"
+                f"{slot_prefix}{rec_mode} · {chord_px:.1f}px ({chord_cnt:.0f}cnt) · "
+                f"{steps_count} steps · {ratio:.2f}x {tag} · Peak {int(round(peak_step))}cnt"
             )
         )
 
@@ -11674,6 +11954,10 @@ class ViewerApp(ctk.CTk):
     def _update_performance_stats(self):
         """鏇存柊鎬ц兘绲辫▓淇℃伅锛團PS 鍜屽欢閬诧級"""
         try:
+            if self.state() == "iconic":
+                self.after(1200, self._update_performance_stats)
+                return
+            self._refresh_debug_profiler_card()
             if self.capture.mode == "UDP" and self.capture.is_connected():
                 # 寰?UDP receiver 鐛插彇鎬ц兘绲辫▓
                 receiver = self.capture.udp_manager.get_receiver()
@@ -11902,6 +12186,122 @@ class ViewerApp(ctk.CTk):
     def _on_config_in_game_sens_changed(self, val): 
         config.in_game_sens = val
         self.tracker.in_game_sens = val
+
+    def _on_config_mouse_dpi_changed(self, val):
+        dpi = max(100, int(round(float(val))))
+        config.mouse_dpi = dpi
+        self.tracker.mouse_dpi = dpi
+
+    def _on_hsv_lighting_guard_changed(self):
+        config.hsv_lighting_guard_enabled = bool(self.var_hsv_lighting_guard.get())
+
+    def _on_dynamic_lag_changed(self):
+        config.dynamic_capture_lag_enabled = bool(self.var_dynamic_capture_lag.get())
+
+    def _on_velocity_lead_changed(self):
+        config.velocity_lead_enabled = bool(self.var_velocity_lead.get())
+
+    def _on_profile_cycle_hotkey_changed(self, val):
+        config.profile_cycle_hotkey = str(val or "F8")
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+
+    def _toggle_pin_selected_profile(self):
+        if not hasattr(self, "config_option"):
+            return
+        name = self.config_option.get()
+        if not name:
+            return
+        pinned = list(getattr(config, "pinned_profiles", []) or [])
+        if name in pinned:
+            pinned.remove(name)
+            msg = f"Unpinned: {name}"
+        else:
+            if len(pinned) >= 6:
+                pinned.pop(0)
+            pinned.append(name)
+            msg = f"Pinned: {name}"
+        config.pinned_profiles = pinned
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+        self._refresh_quick_profile_highlights()
+        if self._is_hud_mode():
+            self._build_hud_quick_profile_bar()
+        else:
+            self._build_bento_quick_profile_bar()
+        if hasattr(self, "config_log"):
+            self.config_log.insert("end", f"\n{msg}")
+            self.config_log.see("end")
+
+    def _on_config_selected_with_diff(self, val):
+        self._on_config_selected(val)
+        self._refresh_config_diff_inspector()
+
+    def _refresh_config_diff_inspector(self):
+        if not hasattr(self, "config_diff_box") or not self.config_diff_box.winfo_exists():
+            return
+        try:
+            name = self.config_option.get()
+            file_map = getattr(self, "_config_file_map", {})
+            filename = file_map.get(name)
+            if not filename:
+                return
+            path = os.path.join(str(get_configs_dir()), filename)
+            import json
+            with open(path, "r", encoding="utf-8") as fh:
+                target_dict = json.load(fh)
+            from src.utils.profile_manager import compute_profile_diff
+            diff = compute_profile_diff(config, target_dict, QUICK_PROFILE_AIM_KEYS)
+            lines = [f"Selected: {name} ({len(diff.aim_changes)} aim, {len(diff.system_changes)} sys changes)"]
+            lines.append("--- AIM KEYS (Safe Load Aim) ---")
+            for k, old_v, new_v in diff.aim_changes[:10]:
+                lines.append(f"  {k}: {old_v} -> {new_v}")
+            if diff.system_changes:
+                lines.append("--- SYSTEM / HW / HSV (Skipped by Load Aim) ---")
+                for k, old_v, new_v in diff.system_changes[:8]:
+                    lines.append(f"  {k}: {old_v} -> {new_v}")
+            self.config_diff_box.delete("1.0", "end")
+            self.config_diff_box.insert("1.0", "\n".join(lines))
+        except Exception as exc:
+            self.config_diff_box.delete("1.0", "end")
+            self.config_diff_box.insert("1.0", f"Diff unavailable: {exc}")
+
+    def _load_selected_config_aim_only(self):
+        if not hasattr(self, "config_option"):
+            return
+        name = self.config_option.get()
+        if name:
+            self._quick_load_profile(name)
+            self._refresh_config_diff_inspector()
+
+    def _refresh_debug_profiler_card(self):
+        if not hasattr(self, "debug_profiler_label") or not self.debug_profiler_label.winfo_exists():
+            return
+        try:
+            profiler = getattr(self.tracker, "profiler", None)
+            lag_est = getattr(self.tracker, "lag_estimator", None)
+            if profiler is not None:
+                st = profiler.get_stats()
+                lag_ms = (lag_est.get_lag_seconds() * 1000.0) if lag_est else 28.0
+                self.debug_profiler_label.configure(
+                    text=(
+                        f"Grab: {st.grab_p95_ms:.2f}ms | Detect: {st.detect_p95_ms:.2f}ms | "
+                        f"Aim: {st.aim_p95_ms:.2f}ms | Budget: {st.budget_pct:.0f}% ({st.bottleneck}) | "
+                        f"Lag: {lag_ms:.1f}ms | Q:{st.queue_depth}"
+                    )
+                )
+            from src.utils.pipeline_profiler import run_preflight_check
+            pf = run_preflight_check(self.tracker, self.capture)
+            status_txt = "READY" if pf["ready"] else "CHECK"
+            self.debug_preflight_label.configure(
+                text=f"Pre-Flight [{status_txt}] — Capture: {pf['capture_msg']} | Hardware: {pf['hardware_msg']}"
+            )
+        except Exception:
+            pass
     
     def _on_config_normal_smooth_changed(self, val): 
         config.normalsmooth = val

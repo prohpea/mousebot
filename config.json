@@ -94,7 +94,7 @@
     "keyboard_ferrum_dhz_ip": "192.168.8.88",
     "keyboard_ferrum_dhz_port": "5000",
     "keyboard_ferrum_dhz_random": 0,
-    "aimbot_activation_type": "toggle",
+    "aimbot_activation_type": "hold_enable",
     "aimbot_activation_type_sec": "hold_enable",
     "mode": "ABCurves",
     "mode_sec": "ABCurves",
@@ -421,5 +421,12 @@
     "ui_style": "hud",
     "ui_simple_mode": false,
     "update_skipped_version": "",
-    "never_update": false
+    "never_update": false,
+    "dynamic_capture_lag_enabled": true,
+    "velocity_lead_enabled": true,
+    "velocity_lead_gain": 0.55,
+    "velocity_lead_max_px": 12.0,
+    "hsv_lighting_guard_enabled": false,
+    "pinned_profiles": [],
+    "profile_cycle_hotkey": "F8"
 }

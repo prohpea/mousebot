@@ -25,6 +25,7 @@ import threading
 import queue
 import time
 import math
+from collections import deque
 import numpy as np
 import cv2
 
@@ -43,6 +44,7 @@ from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
 from src.aim_system.anti_smoke_detector import AntiSmokeDetector
 from src.aim_system.target_smoother import TargetSmoother
+from src.utils.pipeline_profiler import CaptureLagEstimator, PipelineProfiler
 
 class FrameInfo:
     """绨″柈鐨勫箑淇℃伅椤烇紝鐢ㄦ柤鍏煎鐝炬湁浠ｇ⒓"""
@@ -195,12 +197,16 @@ class AimTracker:
         self.stable_count = 0
         self._live_path_lock = threading.Lock()
         self._live_path_points = [(0.0, 0.0)]
+        self._live_path_history = deque(maxlen=5)
         self._live_path_last_ts = 0.0
         self._live_path_seq = 0
         self._live_session_pending_reset = True
         self._live_session_mode = str(getattr(config, "mode", "ABCurves"))
         self._live_session_target_px = (0.0, 0.0)
         self._active_locked_target_main = None
+        self.profiler = PipelineProfiler()
+        self.lag_estimator = CaptureLagEstimator()
+        self._lighting_guard_tick = 0
 
         try:
             from src.aim_system.abcurves_controller import prewarm_abcurves_async
@@ -242,8 +248,18 @@ class AimTracker:
             self._live_session_mode = str(mode_name or getattr(config, "mode", "ABCurves"))
             self._live_session_target_px = (float(init_dx_px), float(init_dy_px))
 
+    def _archive_live_path_locked(self) -> None:
+        if len(self._live_path_points) >= 3:
+            self._live_path_history.append({
+                "points": list(self._live_path_points),
+                "mode": str(self._live_session_mode),
+                "target_px": tuple(self._live_session_target_px),
+                "ts": time.perf_counter(),
+            })
+
     def end_live_aim_session(self) -> None:
         with self._live_path_lock:
+            self._archive_live_path_locked()
             self._live_session_pending_reset = True
 
     def clear_live_path(self) -> None:
@@ -257,6 +273,7 @@ class AimTracker:
         now = time.perf_counter()
         with self._live_path_lock:
             if self._live_session_pending_reset or (now - self._live_path_last_ts) > 0.45:
+                self._archive_live_path_locked()
                 self._live_path_points = [(0.0, 0.0)]
                 self._live_session_pending_reset = False
             if len(self._live_path_points) < 2000:
@@ -264,6 +281,10 @@ class AimTracker:
                 self._live_path_points.append((last_x + float(dx), last_y + float(dy)))
                 self._live_path_last_ts = now
                 self._live_path_seq += 1
+
+    def get_live_path_history(self):
+        with self._live_path_lock:
+            return list(self._live_path_history)
 
     def get_live_path_snapshot(self):
         with self._live_path_lock:
@@ -382,17 +403,31 @@ class AimTracker:
         """
         主追蹤循環 (high-resolution perf_counter pacing; event-driven sync on UDP).
         """
-        while not self._stop_event.is_set():
-            period = 1.0 / float(self._target_fps)
-            start = time.perf_counter()
+        winmm = None
+        if sys.platform == "win32":
             try:
-                self.track_once()
-            except Exception as e:
-                print("[Track error]", e)
-            elapsed = time.perf_counter() - start
-            to_sleep = period - elapsed
-            if to_sleep > 0:
-                time.sleep(to_sleep)
+                winmm = ctypes.windll.winmm
+                winmm.timeBeginPeriod(1)
+            except Exception:
+                winmm = None
+        try:
+            while not self._stop_event.is_set():
+                period = 1.0 / float(self._target_fps)
+                start = time.perf_counter()
+                try:
+                    self.track_once()
+                except Exception as e:
+                    print("[Track error]", e)
+                elapsed = time.perf_counter() - start
+                to_sleep = period - elapsed
+                if to_sleep > 0:
+                    time.sleep(to_sleep)
+        finally:
+            if winmm is not None:
+                try:
+                    winmm.timeEndPeriod(1)
+                except Exception:
+                    pass
     
     def set_target_fps(self, fps):
         """
@@ -605,6 +640,7 @@ class AimTracker:
             pass
 
         # 读取 BGR 帧 (UDP 模式按 frame_seq 同步去重，避免重复处理旧帧与相位抖动)
+        t_loop_start = time.perf_counter()
         capture_mode = getattr(self.app.capture, "mode", None)
         if capture_mode == "UDP" and hasattr(self.app.capture, "read_udp_frame_with_seq"):
             wait_budget = min(0.012, 1.0 / max(1.0, float(getattr(self, "_target_fps", 144.0))))
@@ -618,6 +654,8 @@ class AimTracker:
                 self._last_udp_frame_seq = udp_seq
         else:
             raw_bgr_img = self.app.capture.read_frame(apply_fov=False)
+        t_grab_end = time.perf_counter()
+        grab_ms = (t_grab_end - t_loop_start) * 1000.0
         if raw_bgr_img is None:
             # Keep OpenCV HighGUI event loop responsive while waiting for frames.
             if (getattr(config, "show_opencv_windows", True) and
@@ -692,7 +730,9 @@ class AimTracker:
                 roi_y0 = 0
 
         try:
+            t_det_start = time.perf_counter()
             detection_results, mask = perform_detection(self.model, det_img, roi_offset=(roi_x0, roi_y0))
+            detect_ms = (time.perf_counter() - t_det_start) * 1000.0
             # 显示 MASK 视窗（如果启用）
             if show_mask_win and mask is not None:
                 cv2.imshow("MASK", mask)
@@ -706,6 +746,7 @@ class AimTracker:
                 self._debug_window_visible["MASK"] = False
         except Exception as e:
             print("[perform_detection error]", e)
+            detect_ms = 0.0
             detection_results = []
             mask = None
             if (getattr(config, "show_opencv_windows", True) and 
@@ -826,6 +867,7 @@ class AimTracker:
                     ratio = min(1.0, max(0.0, bh / ref_h))
                     self._target_offset_scales[(round(sx, 1), round(sy, 1))] = 0.72 + 0.28 * ratio
 
+        t_aim_start = time.perf_counter()
         try:
             self._aim_and_move(
                 targets_main,
@@ -835,6 +877,35 @@ class AimTracker:
             )
         except Exception as e:
             print("[Aim error]", e)
+        t_aim_end = time.perf_counter()
+        aim_ms = (t_aim_end - t_aim_start) * 1000.0
+        total_ms = (t_aim_end - t_loop_start) * 1000.0
+
+        # Record 144Hz pipeline telemetry & update dynamic capture lag estimator
+        try:
+            q_depth = int(self.move_queue.qsize())
+            self.profiler.record(grab_ms, detect_ms, aim_ms, total_ms, queue_depth=q_depth)
+            decode_ms = 0.0
+            cap_stats_fn = getattr(self.app.capture, "get_performance_stats", None)
+            if callable(cap_stats_fn):
+                st = cap_stats_fn() or {}
+                decode_ms = float(st.get("decode_time_ms", 0.0) or 0.0)
+            self.lag_estimator.update(decode_ms=decode_ms, grab_ms=grab_ms, detect_ms=detect_ms)
+
+            # Optional ~2Hz Lighting-Drift Guard (custom HSV mode only)
+            if (
+                getattr(config, "hsv_lighting_guard_enabled", False)
+                and getattr(config, "color", "custom") == "custom"
+            ):
+                self._lighting_guard_tick = (getattr(self, "_lighting_guard_tick", 0) + 1) % 72
+                if self._lighting_guard_tick == 0:
+                    from src.utils.hsv_calibrator import compute_lighting_v_floor
+                    base_v = int(getattr(config, "custom_hsv_min_v", 90))
+                    new_v = compute_lighting_v_floor(bgr_img, base_v)
+                    if abs(new_v - base_v) >= 2:
+                        config.custom_hsv_min_v = new_v
+        except Exception:
+            pass
 
         # 显示 Detection 视窗（根据设置）
         if (getattr(config, "show_opencv_windows", True) and 

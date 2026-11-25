@@ -594,8 +594,20 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
     state["prev_dx"] = float(dx)
     state["prev_dy"] = float(dy)
 
+    def _get_effective_lag_s() -> float:
+        if getattr(config, "dynamic_capture_lag_enabled", True):
+            est = getattr(tracker, "lag_estimator", None)
+            if est is not None and hasattr(est, "get_lag_seconds"):
+                try:
+                    return float(est.get_lag_seconds())
+                except Exception:
+                    pass
+        return _CAPTURE_LAG_SECONDS
+
+    effective_lag_s = _get_effective_lag_s()
+
     def _compute_inflight_delta() -> Tuple[float, float]:
-        cap_cx, cap_cy = _lookup_captured_counts(state["sent_history"], now - _CAPTURE_LAG_SECONDS)
+        cap_cx, cap_cy = _lookup_captured_counts(state["sent_history"], now - effective_lag_s)
         inflight_x = state["cum_sent_x"] - cap_cx
         inflight_y = state["cum_sent_y"] - cap_cy
         if float(dx) >= 0.0:
@@ -654,6 +666,35 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
     state["ema_tx"] = ema_tx
     state["ema_ty"] = ema_ty
 
+    # Velocity lead estimation (activates ema_vx / ema_vy with turn-reversal zeroing)
+    target_tx = ema_tx
+    target_ty = ema_ty
+    if turn_x:
+        state["ema_vx"] = 0.0
+    if turn_y:
+        state["ema_vy"] = 0.0
+    if dt_us > 0 and not was_held:
+        dt_s = float(dt_us) * 1e-6
+        if dt_s >= 0.002 and state.get("prev_raw_tx") is not None:
+            inst_vx = (raw_tx - float(state["prev_raw_tx"])) / dt_s
+            inst_vy = (raw_ty - float(state["prev_raw_ty"])) / dt_s
+            # Filter out noise spikes (>2800 counts/s)
+            if abs(inst_vx) <= 2800.0 and not turn_x:
+                state["ema_vx"] = float(state.get("ema_vx", 0.0)) + 0.35 * (inst_vx - float(state.get("ema_vx", 0.0)))
+            if abs(inst_vy) <= 2800.0 and not turn_y:
+                state["ema_vy"] = float(state.get("ema_vy", 0.0)) + 0.35 * (inst_vy - float(state.get("ema_vy", 0.0)))
+    state["prev_raw_tx"] = raw_tx
+    state["prev_raw_ty"] = raw_ty
+
+    if getattr(config, "velocity_lead_enabled", False) and not (turn_x or turn_y) and not was_held:
+        lead_gain = max(0.0, min(1.2, float(getattr(config, "velocity_lead_gain", 0.55))))
+        max_lead_px = max(0.0, min(25.0, float(getattr(config, "velocity_lead_max_px", 12.0))))
+        lead_s = effective_lag_s * lead_gain
+        lead_x = max(-max_lead_px * counts_per_px_x, min(max_lead_px * counts_per_px_x, float(state["ema_vx"]) * lead_s))
+        lead_y = max(-max_lead_px * counts_per_px_y, min(max_lead_px * counts_per_px_y, float(state["ema_vy"]) * lead_s))
+        target_tx = ema_tx + lead_x
+        target_ty = ema_ty + lead_y
+
     t_receipt_us = state["last_t_us"]
     t_next_us = t_receipt_us + dt_us
     try:
@@ -676,7 +717,7 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
                     turn_x=turn_x,
                     turn_y=turn_y,
                 )
-        pipe.update_target((ema_tx, ema_ty), timestamp_us=t_receipt_us)
+        pipe.update_target((target_tx, target_ty), timestamp_us=t_receipt_us)
         out = pipe.advance(t_next_us)
     except Exception as exc:
         log_print(f"[ABCurves runtime error] {exc}")

@@ -14,6 +14,8 @@ from PIL import Image, ImageTk
 from src.utils.app_paths import get_bundle_dir
 from src.utils.config import config
 from src.utils.debug_logger import log_print
+from src.utils.detection import XUDP_HSV_PRESETS, load_model, perform_detection
+from src.utils.hsv_calibrator import solve_contrast_hsv
 from src.utils.i18n import t
 
 COLOR_BG = "#121212"
@@ -109,6 +111,15 @@ class HsvPreviewWindow(ctk.CTkToplevel):
         self._photo_result = None
 
         self._eyedropper_active = False
+        self._pick_role = "target"
+        self._target_samples = []
+        self._bg_samples = []
+        self._full_det_var = tk.BooleanVar(value=True)
+        self._det_model = None
+        try:
+            self._det_model, _ = load_model()
+        except Exception:
+            self._det_model = None
         self._eyedropper_icon = None
         self._preview_canvases = []
 
@@ -227,7 +238,7 @@ class HsvPreviewWindow(ctk.CTkToplevel):
         self._eyedropper_icon = self._load_eyedropper_icon()
         self._btn_eyedropper = ctk.CTkButton(
             btn_row,
-            text="" if self._eyedropper_icon else "Pick",
+            text="Pick Target" if not self._eyedropper_icon else "",
             image=self._eyedropper_icon,
             width=40,
             height=32,
@@ -236,9 +247,60 @@ class HsvPreviewWindow(ctk.CTkToplevel):
             text_color=COLOR_TEXT,
             font=FONT_MAIN,
             corner_radius=4,
-            command=self._toggle_eyedropper,
+            command=lambda: self._start_pick("target"),
         )
-        self._btn_eyedropper.pack(side="left", padx=(0, 6))
+        self._btn_eyedropper.pack(side="left", padx=(0, 4))
+
+        self._btn_pick_bg = ctk.CTkButton(
+            btn_row,
+            text=t("Pick BG"),
+            width=70,
+            height=32,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_BORDER,
+            text_color="#F59E0B",
+            font=FONT_SMALL,
+            corner_radius=4,
+            command=lambda: self._start_pick("bg"),
+        )
+        self._btn_pick_bg.pack(side="left", padx=(0, 4))
+
+        self._btn_auto_solve = ctk.CTkButton(
+            btn_row,
+            text=t("Auto-Solve"),
+            width=86,
+            height=32,
+            fg_color="#0E7490",
+            hover_color="#0891B2",
+            text_color="#FFFFFF",
+            font=FONT_SMALL,
+            corner_radius=4,
+            command=self._auto_solve_samples,
+        )
+        self._btn_auto_solve.pack(side="left", padx=(0, 6))
+
+        ctk.CTkCheckBox(
+            btn_row,
+            text=t("Full Det"),
+            variable=self._full_det_var,
+            font=FONT_SMALL,
+            text_color=COLOR_TEXT,
+            width=70,
+        ).pack(side="left", padx=(0, 6))
+
+        for preset_key, preset_lbl in (("purple", "Purple"), ("yellow", "Yellow"), ("red", "Red")):
+            ctk.CTkButton(
+                btn_row,
+                text=preset_lbl,
+                width=52,
+                height=26,
+                fg_color=COLOR_SURFACE,
+                hover_color=COLOR_BORDER,
+                text_color=COLOR_TEXT_DIM,
+                font=FONT_SMALL,
+                corner_radius=4,
+                command=lambda pk=preset_key: self._load_preset(pk),
+            ).pack(side="left", padx=2)
 
         self._lbl_pixels = ctk.CTkLabel(
             btn_row,
@@ -431,7 +493,44 @@ class HsvPreviewWindow(ctk.CTkToplevel):
         self._v_hi.set(int(getattr(config, "custom_hsv_max_v", 255)))
         self._lbl_pick.configure(text=t("Pick mode: Off"))
 
+    def _start_pick(self, role: str):
+        self._pick_role = role
+        self._set_eyedropper_active(True)
+        lbl = "Pick TARGET (click enemy)" if role == "target" else "Pick BG (click wall/noise)"
+        self._lbl_pick.configure(text=lbl)
+
+    def _load_preset(self, preset_key: str):
+        preset = XUDP_HSV_PRESETS.get(preset_key)
+        if not preset:
+            return
+        lo, hi = preset["ranges"][0]
+        self._h_lo.set(int(lo[0]))
+        self._h_hi.set(int(hi[0]))
+        self._s_lo.set(int(lo[1]))
+        self._s_hi.set(int(hi[1]))
+        self._v_lo.set(int(lo[2]))
+        self._v_hi.set(int(hi[2]))
+        self._lbl_pick.configure(text=f"Preset: {preset_key}")
+
+    def _auto_solve_samples(self):
+        if not self._target_samples:
+            self._lbl_pick.configure(text="Pick at least 1 Target pixel first")
+            return
+        h_lo, h_hi, s_lo, s_hi, v_lo, v_hi = solve_contrast_hsv(
+            self._target_samples, self._bg_samples
+        )
+        self._h_lo.set(h_lo)
+        self._h_hi.set(h_hi)
+        self._s_lo.set(s_lo)
+        self._s_hi.set(s_hi)
+        self._v_lo.set(v_lo)
+        self._v_hi.set(v_hi)
+        self._lbl_pick.configure(
+            text=f"Solved ({len(self._target_samples)}T/{len(self._bg_samples)}BG)"
+        )
+
     def _toggle_eyedropper(self):
+        self._pick_role = "target"
         self._set_eyedropper_active(not self._eyedropper_active)
 
     def _set_eyedropper_active(self, is_active: bool):
@@ -467,11 +566,21 @@ class HsvPreviewWindow(ctk.CTkToplevel):
         src_y = min(src_h - 1, int(y * src_h / PREVIEW_H))
 
         h, s, v = [int(vv) for vv in self._preview_hsv[src_y, src_x]]
-        self._set_hsv_range_from_pick(h, s, v)
+        if self._pick_role == "bg":
+            self._bg_samples.append((h, s, v))
+            if self._target_samples:
+                self._auto_solve_samples()
+            else:
+                self._lbl_pick.configure(text=f"BG sample ({len(self._bg_samples)}): {h},{s},{v}")
+        else:
+            self._target_samples.append((h, s, v))
+            if len(self._target_samples) == 1 and not self._bg_samples:
+                self._set_hsv_range_from_pick(h, s, v)
+                self._lbl_pick.configure(text=f"Target: {h},{s},{v} (pick BG or Apply)")
+            else:
+                self._auto_solve_samples()
         self._set_eyedropper_active(False)
-
-        self._lbl_pick.configure(text=f"Picked HSV: {h}, {s}, {v}")
-        log_print(f"[HsvPreview] Eyedropper picked HSV ({h}, {s}, {v}) at ({src_x}, {src_y})")
+        log_print(f"[HsvPreview] Eyedropper ({self._pick_role}) picked HSV ({h}, {s}, {v}) at ({src_x}, {src_y})")
 
     def _set_hsv_range_from_pick(self, h: int, s: int, v: int):
         self._h_lo.set(max(0, h - EYEDROPPER_H_TOL))
@@ -544,6 +653,38 @@ class HsvPreviewWindow(ctk.CTkToplevel):
 
         self._preview_hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         result, mask = _apply_hsv_mask(bgr, h_lo, h_hi, s_lo, s_hi, v_lo, v_hi)
+
+        if getattr(self, "_full_det_var", None) is not None and self._full_det_var.get() and self._det_model is not None:
+            try:
+                old_vals = (
+                    config.color,
+                    config.custom_hsv_min_h, config.custom_hsv_max_h,
+                    config.custom_hsv_min_s, config.custom_hsv_max_s,
+                    config.custom_hsv_min_v, config.custom_hsv_max_v,
+                )
+                config.color = "custom"
+                config.custom_hsv_min_h, config.custom_hsv_max_h = h_lo, h_hi
+                config.custom_hsv_min_s, config.custom_hsv_max_s = s_lo, s_hi
+                config.custom_hsv_min_v, config.custom_hsv_max_v = v_lo, v_hi
+                dets, det_mask = perform_detection(self._det_model, bgr)
+                if det_mask is not None:
+                    mask = det_mask
+                for det in dets:
+                    bx, by, bw, bh = det["bbox"]
+                    cv2.rectangle(result, (int(bx), int(by)), (int(bx + bw), int(by + bh)), (0, 255, 160), 2)
+                    hx = int(bx + bw * 0.5)
+                    hy = int(by + bh * 0.22)
+                    cv2.circle(result, (hx, hy), 4, (0, 80, 255), -1)
+            except Exception:
+                pass
+            finally:
+                (
+                    config.color,
+                    config.custom_hsv_min_h, config.custom_hsv_max_h,
+                    config.custom_hsv_min_s, config.custom_hsv_max_s,
+                    config.custom_hsv_min_v, config.custom_hsv_max_v,
+                ) = old_vals
+
         pixel_count = int(cv2.countNonZero(mask))
 
         self._photo_orig = _bgr_to_pil(bgr, PREVIEW_W, PREVIEW_H)
