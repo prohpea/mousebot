@@ -127,7 +127,7 @@ class CaptureLagEstimator:
     MIN_LAG_S = 0.010
     MAX_LAG_S = 0.065
 
-    def __init__(self, base_transport_s: float = 0.014, alpha: float = 0.15):
+    def __init__(self, base_transport_s: float = 0.024, alpha: float = 0.15):
         self._base_transport_s = max(0.004, float(base_transport_s))
         self._alpha = max(0.02, min(0.5, float(alpha)))
         self._lag_s = self.DEFAULT_LAG_S

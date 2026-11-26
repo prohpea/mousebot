@@ -8,6 +8,7 @@ import queue
 import random
 import threading
 import time
+from typing import Tuple
 
 from src.utils.config import config
 from src.utils.debug_logger import log_move, log_print
@@ -817,54 +818,82 @@ def _dispatch_aimbot(dx, dy, distance_to_center, mode, tracker, is_sec=False):
 _FIRING_BOOST_UNTIL = 0.0
 
 
-def _is_inside_stop_fov(dx: float, dy: float, is_sec: bool = False) -> bool:
-    """Return True when Stop Aim FOV is enabled and aim offset is already inside it."""
+def _get_stop_fov_radius(tracker, is_sec: bool = False) -> Tuple[float, bool]:
+    """Compute effective Stop Aim FOV radius and whether LMB firing protection is active."""
     global _FIRING_BOOST_UNTIL
     enabled_key = "deadzone_fov_enabled_sec" if is_sec else "deadzone_fov_enabled"
     size_key = "deadzone_fovsize_sec" if is_sec else "deadzone_fovsize"
     if not bool(getattr(config, enabled_key, False)):
-        return False
+        return 0.0, False
     try:
         radius = float(getattr(config, size_key, 0.0))
     except Exception:
-        return False
+        return 0.0, False
+
+    firing_now = False
     if not is_sec and bool(getattr(config, "firing_deadzone_boost_enabled", True)):
         now = time.perf_counter()
+        boost_until = float((getattr(tracker, "_firing_boost_until", 0.0) if tracker is not None else _FIRING_BOOST_UNTIL) or 0.0)
         try:
             if is_button_pressed(0):
+                firing_now = True
                 win_s = max(0.05, min(0.5, float(getattr(config, "firing_deadzone_window_ms", 200.0)) * 0.001))
-                _FIRING_BOOST_UNTIL = now + win_s
+                boost_until = now + win_s
+                if tracker is not None:
+                    setattr(tracker, "_firing_boost_until", boost_until)
+                _FIRING_BOOST_UNTIL = boost_until
         except Exception:
             pass
-        if now <= _FIRING_BOOST_UNTIL:
+        if now <= boost_until:
             boost_px = max(0.0, min(8.0, float(getattr(config, "firing_deadzone_boost_px", 2.5))))
             radius += boost_px
+    return max(0.0, radius), firing_now
+
+
+def _is_inside_stop_fov(dx: float, dy: float, is_sec: bool = False, tracker=None) -> bool:
+    """Return True when Stop Aim FOV is enabled and aim offset is already inside it."""
+    radius, _ = _get_stop_fov_radius(tracker, is_sec=is_sec)
     if radius <= 0.0:
         return False
     return math.hypot(float(dx), float(dy)) <= radius
 
 
-def _clear_stop_fov_state(tracker, is_sec: bool = False) -> None:
+def _clear_stop_fov_state(tracker, is_sec: bool = False, clear_firing_boost: bool = False) -> None:
+    global _FIRING_BOOST_UNTIL
     attr = "_stop_fov_state_sec" if is_sec else "_stop_fov_state_main"
     setattr(tracker, attr, None)
+    if clear_firing_boost and not is_sec:
+        _FIRING_BOOST_UNTIL = 0.0
+        if tracker is not None:
+            setattr(tracker, "_firing_boost_until", 0.0)
 
 
 def _should_pause_in_stop_fov(tracker, dx: float, dy: float, is_sec: bool = False) -> bool:
-    """Return True once aim remains in Stop Aim FOV past its randomized settling delay."""
-    if not _is_inside_stop_fov(dx, dy, is_sec=is_sec):
-        _clear_stop_fov_state(tracker, is_sec=is_sec)
+    """Return True once aim enters Stop Aim FOV (immediately on shot/inner core, or after brief settle)."""
+    radius, firing_now = _get_stop_fov_radius(tracker, is_sec=is_sec)
+    dist = math.hypot(float(dx), float(dy))
+    if radius <= 0.0 or dist > radius:
+        # Preserve 200ms firing boost across 1-frame recoil excursions; only reset entry timer.
+        _clear_stop_fov_state(tracker, is_sec=is_sec, clear_firing_boost=False)
         return False
+
+    # Pause immediately when actively clicking LMB or already settled inside inner 70% of deadzone
+    # so bullets are never yanked mid-shot and fast entries don't overshoot out the far side.
+    if firing_now or dist <= max(1.2, radius * 0.70):
+        attr = "_stop_fov_state_sec" if is_sec else "_stop_fov_state_main"
+        setattr(tracker, attr, {"entered_ts": time.perf_counter(), "delay_s": 0.0, "paused": True})
+        return True
 
     min_key = "deadzone_stop_delay_min_ms_sec" if is_sec else "deadzone_stop_delay_min_ms"
     max_key = "deadzone_stop_delay_max_ms_sec" if is_sec else "deadzone_stop_delay_max_ms"
     try:
-        min_ms = max(0.0, float(getattr(config, min_key, 15.0)))
+        min_ms = max(0.0, float(getattr(config, min_key, 0.0)))
     except Exception:
-        min_ms = 15.0
+        min_ms = 0.0
     try:
-        max_ms = max(0.0, float(getattr(config, max_key, 45.0)))
+        max_ms = max(0.0, float(getattr(config, max_key, 12.0)))
     except Exception:
-        max_ms = 45.0
+        max_ms = 12.0
     if max_ms < min_ms:
         min_ms, max_ms = max_ms, min_ms
 
@@ -945,8 +974,8 @@ def _select_locked_target(targets, tracker, fov_radius: float, is_sec: bool = Fa
             if match_jump <= max_jump:
                 locked_dist = float(locked_match[2])
                 closest_dist = float(closest[2])
-                # Keep current locked target unless another target is significantly closer (>30% and >10px).
-                hysteresis_margin = max(10.0, locked_dist * 0.30)
+                # Light hysteresis prevents 1-2px equidistant chatter without blocking intentional flicks.
+                hysteresis_margin = max(3.5, locked_dist * 0.15)
                 if closest_dist + hysteresis_margin >= locked_dist:
                     chosen = locked_match
 
@@ -1018,12 +1047,33 @@ def process_normal_mode(
         )
 
     main_fov = float(get_active_aim_fov(is_sec=False, fallback=tracker.fovsize))
-    best_target_main = _select_locked_target(targets_main, tracker, main_fov, is_sec=False)
+    is_toggle_mode = str(activation_type or "").strip().lower() == "toggle"
+    # In always-on toggle mode, keep exact FOV boundary (0 sticky expansion) so user can pull off freely.
+    effective_main_fov = (
+        main_fov
+        if is_toggle_mode
+        else (main_fov + 2.0 if getattr(tracker, "_was_main_aimbot_active", False) else main_fov)
+    )
+    best_target_main = _select_locked_target(targets_main, tracker, effective_main_fov, is_sec=False)
     sec_fov = 0.0
     best_target_sec = None
     if aim_enabled_sec and targets_sec:
         sec_fov = float(get_active_aim_fov(is_sec=True, fallback=tracker.fovsize_sec))
         best_target_sec = _select_locked_target(targets_sec, tracker, sec_fov, is_sec=True)
+
+    now_loop = time.perf_counter()
+    # Track sustained LMB spray duration so toggle mode never yanks upward against manual recoil control
+    lmb_pressed = False
+    try:
+        lmb_pressed = bool(is_button_pressed(0))
+    except Exception:
+        lmb_pressed = False
+    if lmb_pressed:
+        if float(getattr(tracker, "_lmb_down_since", 0.0) or 0.0) <= 0.0:
+            tracker._lmb_down_since = now_loop
+    else:
+        tracker._lmb_down_since = 0.0
+    sustained_spray = lmb_pressed and (now_loop - float(getattr(tracker, "_lmb_down_since", now_loop))) >= 0.16
 
     if best_target_main:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_main)
@@ -1031,7 +1081,7 @@ def process_normal_mode(
             distance_to_center = math.hypot(cx - center_x, cy - center_y)
 
             # === 鍎厛铏曠悊 Main Aimbot ===
-            if distance_to_center <= main_fov and main_activation_ready:
+            if distance_to_center <= effective_main_fov and main_activation_ready:
                 try:
                     aim_type = getattr(config, "aim_type", "head")
                     aim_offsetX = float(getattr(config, "aim_offsetX", tracker.aim_offsetX))
@@ -1052,28 +1102,78 @@ def process_normal_mode(
                             target_y = cy + aim_offsetY
                             if head_y_min <= target_y <= body_y_max:
                                 dy = 0
-                    
-                    # 鏍规摎 Main 妯″紡瑾垮害
+
+                    # During sustained spray (>160ms LMB), yield upward Y pull so player can pull down recoil freely
+                    if sustained_spray and dy < 0.0:
+                        dy = 0.0
+
+                    # Detect intentional manual hand break-away in toggle mode so CVM yields effortlessly
+                    breakaway_until = float(getattr(tracker, "_toggle_breakaway_until", 0.0) or 0.0)
+                    prev_aim = getattr(tracker, "_prev_main_aim_vec", None)
+                    if is_toggle_mode and prev_aim is not None and (now_loop - float(prev_aim[2])) <= 0.035:
+                        pdx, pdy = float(prev_aim[0]), float(prev_aim[1])
+                        abc_st = getattr(tracker, "_abcurves_state_main", None) or {}
+                        sent_px_x = float(abc_st.get("last_sent_px_x", 0.0))
+                        sent_px_y = float(abc_st.get("last_sent_px_y", 0.0))
+                        # Expected new dx if target is static and only CVM moved: pdx - sent_px_x.
+                        # Residual divergence away from center reflects intentional human hand counter-motion.
+                        exp_dx = pdx - sent_px_x
+                        exp_dy = pdy - sent_px_y
+                        user_pull_x = float(dx) - exp_dx
+                        user_pull_y = float(dy) - exp_dy
+                        pulling_away = (
+                            (abs(float(dx)) > abs(pdx) + 2.5 and float(dx) * user_pull_x > 0.0 and abs(user_pull_x) >= 4.2)
+                            or (abs(float(dy)) > abs(pdy) + 2.5 and float(dy) * user_pull_y > 0.0 and abs(user_pull_y) >= 4.2)
+                        )
+                        if pulling_away:
+                            streak = int(getattr(tracker, "_toggle_breakaway_streak", 0)) + 1
+                            tracker._toggle_breakaway_streak = streak
+                            if streak >= 2 or math.hypot(user_pull_x, user_pull_y) >= 9.0:
+                                breakaway_until = now_loop + 0.075
+                                tracker._toggle_breakaway_until = breakaway_until
+                        else:
+                            tracker._toggle_breakaway_streak = 0
+                    else:
+                        tracker._toggle_breakaway_streak = 0
+                    tracker._prev_main_aim_vec = (float(dx), float(dy), now_loop)
+                    aim_distance = math.hypot(float(dx), float(dy))
+                    tracker._last_main_aim_dist = distance_to_center
+
                     if not getattr(tracker, "_was_main_aimbot_active", False):
                         if hasattr(tracker, "begin_live_aim_session"):
                             tracker.begin_live_aim_session(mode_main, dx, dy)
-                    if _should_pause_in_stop_fov(tracker, dx, dy, is_sec=False):
+                    if now_loop < breakaway_until or _should_pause_in_stop_fov(tracker, dx, dy, is_sec=False):
                         _pause_mode_in_stop_fov(tracker, is_sec=False)
                     else:
-                        _dispatch_aimbot(dx, dy, distance_to_center, mode_main, tracker, is_sec=False)
+                        _dispatch_aimbot(dx, dy, aim_distance, mode_main, tracker, is_sec=False)
                     main_aimbot_active = True
+                    tracker._was_main_aimbot_active = True
+                    tracker._main_abcurves_lost_since = 0.0
                 except Exception as e:
                     log_print(f"[Main Aimbot error] {e}")
     
     # === 濡傛灉 Main Aimbot 鏈暉鍕曪紝鍢楄│ Sec Aimbot ===
     if not main_aimbot_active:
-        if getattr(tracker, "_was_main_aimbot_active", False):
-            if hasattr(tracker, "end_live_aim_session"):
-                tracker.end_live_aim_session()
-        mode_abcurves.reset(tracker, is_sec=False)
-        _clear_stop_fov_state(tracker, is_sec=False)
-        _clear_locked_target(tracker, is_sec=False)
-    tracker._was_main_aimbot_active = main_aimbot_active
+        now_reset = time.perf_counter()
+        lost_since = float(getattr(tracker, "_main_abcurves_lost_since", 0.0) or 0.0)
+        if lost_since <= 0.0:
+            tracker._main_abcurves_lost_since = now_reset
+            lost_since = now_reset
+            # Flush pending exact steps immediately on target loss / FOV exit so 0 backward steps trail!
+            mode_abcurves.hold(tracker, is_sec=False)
+        last_dist = float(getattr(tracker, "_last_main_aim_dist", main_fov) or main_fov)
+        grace_s = 0.035 if (last_dist < 0.80 * main_fov) else 0.0
+        if (not main_activation_ready) or (now_reset - lost_since) >= grace_s:
+            if getattr(tracker, "_was_main_aimbot_active", False):
+                if hasattr(tracker, "end_live_aim_session"):
+                    tracker.end_live_aim_session()
+            tracker._was_main_aimbot_active = False
+            tracker._prev_main_aim_vec = None
+            tracker._toggle_breakaway_streak = 0
+            tracker._toggle_breakaway_until = 0.0
+            mode_abcurves.reset(tracker, is_sec=False)
+            _clear_stop_fov_state(tracker, is_sec=False, clear_firing_boost=(not main_activation_ready))
+            _clear_locked_target(tracker, is_sec=False)
 
     if not main_aimbot_active and best_target_sec:
         cx, cy, _, head_y_min, body_y_max = _unpack_target(best_target_sec)
@@ -1105,7 +1205,9 @@ def process_normal_mode(
                     log_print(f"[Sec Aimbot error] {e}")
 
     if not sec_aimbot_active:
-        mode_abcurves.reset(tracker, is_sec=True)
+        if getattr(tracker, "_was_sec_aimbot_active", False):
+            mode_abcurves.reset(tracker, is_sec=True)
         _clear_stop_fov_state(tracker, is_sec=True)
         _clear_locked_target(tracker, is_sec=True)
+    tracker._was_sec_aimbot_active = sec_aimbot_active
 

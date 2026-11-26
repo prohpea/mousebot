@@ -2,10 +2,10 @@
     "_comment": "This is CVM colorBot config.",
     "enableaim": true,
     "enabletb": false,
-    "offsetX": -2,
-    "offsetY": 3,
+    "offsetX": 0,
+    "offsetY": 0,
     "aim_offsetX": 0,
-    "aim_offsetY": -4,
+    "aim_offsetY": 0,
     "aim_type": "head",
     "color": "custom",
     "detection_merge_distance": 28,
@@ -26,7 +26,7 @@
     "detection_max_aspect": 2.8,
     "detection_require_vertical_line": false,
     "min_detection_bbox_area": 150,
-    "head_estimate_ratio": 0.22,
+    "head_estimate_ratio": 0.14,
     "head_refine_min_pixels": 20,
     "aim_latest_frame_priority": true,
     "enable_target_temporal_smoothing": false,
@@ -295,5 +295,9 @@
     "deadzone_fov_enabled": true,
     "deadzone_fovsize": 3.0,
     "firing_deadzone_boost_px": 2.5,
-    "velocity_lead_gain": 0.55
+    "velocity_lead_gain": 0.55,
+    "hybrid_ai_enabled": false,
+    "hybrid_ai_model_path": "models/v11_192_Valorant_180.onnx",
+    "hybrid_ai_conf_threshold": 0.28,
+    "hybrid_ai_sync_mode": false
 }

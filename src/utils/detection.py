@@ -15,6 +15,7 @@ HSV_MIN = None
 HSV_MAX = None
 _PREV_STABLE_RECTS = []
 _PREV_STABLE_TS = 0.0
+_PREV_STABLE_SHAPE = (0, 0)
 _STABILIZE_LOCK = threading.Lock()
 
 _OPENCL_AVAILABLE = False
@@ -380,15 +381,21 @@ def _stabilize_axis_edges(e1, e2, pe1, pe2, hold_count, shimmer_tol):
     return e1, e2, False
 
 
-def _stabilize_detected_rects(rects):
+def _stabilize_detected_rects(rects, frame_shape=(0, 0)):
     """Temporally stabilize bounding box edges across consecutive frames to prevent stationary flicker."""
-    global _PREV_STABLE_RECTS, _PREV_STABLE_TS
+    global _PREV_STABLE_RECTS, _PREV_STABLE_TS, _PREV_STABLE_SHAPE
     now = time.perf_counter()
+    shape_key = (int(frame_shape[0]), int(frame_shape[1])) if frame_shape else (0, 0)
     with _STABILIZE_LOCK:
-        if (now - _PREV_STABLE_TS) > 0.25 or not _PREV_STABLE_RECTS:
+        if (now - _PREV_STABLE_TS) > 0.25 or not _PREV_STABLE_RECTS or (
+            shape_key != (0, 0) and _PREV_STABLE_SHAPE not in ((0, 0), shape_key)
+        ):
             _PREV_STABLE_RECTS = [(int(x), int(y), int(w), int(h), 0) for (x, y, w, h) in rects]
             _PREV_STABLE_TS = now
+            _PREV_STABLE_SHAPE = shape_key
             return rects
+        if shape_key != (0, 0):
+            _PREV_STABLE_SHAPE = shape_key
 
         used = [False] * len(_PREV_STABLE_RECTS)
         stabilized = []
@@ -460,7 +467,8 @@ def _filter_false_positive_rects(rects, raw_mask):
             if (raw_mask is not None and img_w > 0 and img_h > 0 and rx2 > rx1 and ry2 > ry1)
             else -1
         )
-        if strict_noise_on and raw_px >= 0 and raw_px < 8:
+        min_raw_px = 3 if (iw <= 22 and ih <= 30) else 8
+        if strict_noise_on and raw_px >= 0 and raw_px < min_raw_px:
             continue
 
         # Only run hollow-interior check on medium/close targets so distant enemies still lock.
@@ -479,7 +487,8 @@ def _filter_false_positive_rects(rects, raw_mask):
 
         # Valorant Anti-VFX filter: reject circular/square purple orbs (Reyna Leer, Astra Star, Omen Blind)
         # and low ground-only ability strips while preserving upright human outline silhouettes.
-        if anti_vfx_on and raw_mask is not None and iw >= 16 and ih >= 22 and img_w > 0 and img_h > 0:
+        # Skip compact 38m-55m distant targets (<22x28) so thickened far outlines are never mistaken for orbs.
+        if anti_vfx_on and raw_mask is not None and iw >= 22 and ih >= 28 and img_w > 0 and img_h > 0:
             aspect = float(iw) / float(ih)
             if 0.78 <= aspect <= 1.35 and ih <= 85:
                 cx1 = max(0, ix + int(round(iw * 0.25)))
@@ -582,12 +591,117 @@ def _build_masks_gpu_opencl(image, model, morph_mode: str):
     return u_raw_mask.get(), u_mask.get()
 
 
-def perform_detection(model, image, roi_offset=(0, 0), stabilize: bool = True):
+def _recover_far_foveated_rects(image: np.ndarray, model, center_xy=None) -> list:
+    """
+    Tier-2 foveated sub-pixel chroma recovery for 38m-55m distant targets near crosshair.
+    Under 320x320 / JPEG 4:2:0 subsampling, 1px enemy outlines blend with walls and drop
+    from S>=95, H<=160 to S~72..92, H~118..166. Scans ONLY a tight ±40x44px foveated patch
+    and enforces multi-pixel peak saturation core + upright player geometry so textured walls
+    and JPEG compression ringing never trigger ghost locks.
+    """
+    if image is None or model is None or len(model) < 2:
+        return []
+    lo = np.asarray(model[0], dtype=np.int32).flatten()
+    hi = np.asarray(model[1], dtype=np.int32).flatten()
+    if len(lo) < 3 or len(hi) < 3:
+        return []
+
+    lo_h, lo_s, lo_v = int(lo[0]), int(lo[1]), int(lo[2])
+    hi_h, hi_s, hi_v = int(hi[0]), int(hi[1]), int(hi[2])
+
+    # Derive chroma-diluted bounds for purple or yellow presets/custom configs
+    if 110 <= lo_h <= 135 and hi_h >= 145 and lo_s >= 70:
+        far_lo = np.array([max(118, lo_h - 2), 72, max(82, lo_v - 8)], dtype=np.uint8)
+        far_hi = np.array([min(166, max(hi_h, 165)), hi_s, hi_v], dtype=np.uint8)
+        core_h_lo, core_h_hi, core_s_min, core_v_min = 118, 166, 80, 90
+    elif 14 <= lo_h <= 26 and hi_h <= 38 and lo_s >= 70:
+        far_lo = np.array([max(17, lo_h - 2), 74, max(85, lo_v - 10)], dtype=np.uint8)
+        far_hi = np.array([min(34, hi_h + 4), hi_s, hi_v], dtype=np.uint8)
+        core_h_lo, core_h_hi, core_s_min, core_v_min = 17, 35, 84, 92
+    else:
+        return []
+
+    img_h, img_w = image.shape[:2]
+    if center_xy is not None:
+        cx0 = max(0, min(img_w - 1, int(round(float(center_xy[0])))))
+        cy0 = max(0, min(img_h - 1, int(round(float(center_xy[1])))))
+    else:
+        cx0, cy0 = img_w // 2, img_h // 2
+    fx0, fy0 = max(0, cx0 - 40), max(0, cy0 - 44)
+    fx1, fy1 = min(img_w, cx0 + 40), min(img_h, cy0 + 44)
+    if (fx1 - fx0) < 20 or (fy1 - fy0) < 20:
+        return []
+
+    sub_bgr = image[fy0:fy1, fx0:fx1]
+    sub_hsv = cv2.cvtColor(sub_bgr, cv2.COLOR_BGR2HSV)
+    far_raw = cv2.inRange(sub_hsv, far_lo, far_hi)
+
+    is_dark_crushed = False
+    if 110 <= lo_h <= 135 and float(np.percentile(sub_hsv[::2, ::2, 2], 90)) <= 62.0:
+        is_dark_crushed = True
+        dark_lo = np.array([max(125, lo_h), 125, 22], dtype=np.uint8)
+        dark_hi = np.array([min(162, max(hi_h, 160)), 255, 255], dtype=np.uint8)
+        far_raw = cv2.bitwise_or(far_raw, cv2.inRange(sub_hsv, dark_lo, dark_hi))
+
+    if cv2.countNonZero(far_raw) < 6:
+        return []
+
+    far_closed = cv2.morphologyEx(far_raw, cv2.MORPH_CLOSE, _get_kernel((9, 9), use_umat=False))
+    far_mask = cv2.dilate(far_closed, _get_kernel((3, 3), use_umat=False), iterations=1)
+    contours, _ = cv2.findContours(far_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    recovered = []
+    for c in contours:
+        if cv2.contourArea(c) < 10.0:
+            continue
+        x, y, w, h = cv2.boundingRect(c)
+        area = int(w) * int(h)
+        if w < 5 or w > 24 or h < 7 or h > 36 or area < 35 or area > 750:
+            continue
+        aspect = float(w) / float(h)
+        if aspect < 0.25 or aspect > 1.35:
+            continue
+        raw_px = int(cv2.countNonZero(far_raw[y : y + h, x : x + w]))
+        if raw_px < 6:
+            continue
+        patch_hsv = sub_hsv[y : y + h, x : x + w]
+        core_hits = int(
+            np.sum(
+                (patch_hsv[:, :, 0] >= core_h_lo)
+                & (patch_hsv[:, :, 0] <= core_h_hi)
+                & (patch_hsv[:, :, 1] >= core_s_min)
+                & (patch_hsv[:, :, 2] >= core_v_min)
+            )
+        )
+        if core_hits < 3 and is_dark_crushed:
+            core_hits = int(
+                np.sum(
+                    (patch_hsv[:, :, 0] >= 125)
+                    & (patch_hsv[:, :, 0] <= 162)
+                    & (patch_hsv[:, :, 1] >= 140)
+                    & (patch_hsv[:, :, 2] >= 24)
+                )
+            )
+        if core_hits < 3:
+            continue
+        recovered.append((fx0 + int(x), fy0 + int(y), int(w), int(h)))
+    return recovered
+
+
+def perform_detection(model, image, roi_offset=(0, 0), stabilize: bool = True, full_frame_size=None):
     if model is None or image is None:
         return [], None
 
     img_h, img_w = image.shape[:2]
     frame_area = max(1, img_h * img_w)
+    ox, oy = int(roi_offset[0]), int(roi_offset[1])
+    if full_frame_size is not None and len(full_frame_size) >= 2:
+        icx = float(full_frame_size[0]) * 0.5 - float(ox)
+        icy = float(full_frame_size[1]) * 0.5 - float(oy)
+        stab_shape = (int(full_frame_size[1]), int(full_frame_size[0]))
+    else:
+        icx, icy = img_w * 0.5, img_h * 0.5
+        stab_shape = (img_h, img_w)
 
     # Reference-like morphology path (close + dilate) is the default because it
     # keeps thin color edges that OPEN often removes completely.
@@ -628,30 +742,42 @@ def perform_detection(model, image, roi_offset=(0, 0), stabilize: bool = True):
     require_vertical_line = bool(getattr(config, "detection_require_vertical_line", False))
     min_contour_points = int(getattr(config, "detection_min_contour_points", 5))
 
-    if morph_mode != "stable":
-        # Prevent stale strict settings from killing detection in legacy mode.
-        min_bbox_area = min(min_bbox_area, max(48, int(frame_area * 0.00045)))
-        min_contour_area = min(min_contour_area, max(10, int(frame_area * 0.00010)))
-        min_fill_ratio = min(min_fill_ratio, 0.08)
-
+    # Honor configured detection_min_bbox_area / min_contour_area across general ROI while allowing
+    # verified compact 40m-55m upright silhouettes strictly inside the tight central fovea (<=44px).
     for c in contours:
         contour_area = float(cv2.contourArea(c))
-        if len(c) < min_contour_points and not (
+        x, y, w, h = cv2.boundingRect(c)
+        bbox_area = int(w) * int(h)
+        cx_f, cy_f = x + 0.5 * w, y + 0.5 * h
+        is_foveated_compact = (
+            morph_mode != "stable"
+            and math.hypot(cx_f - icx, cy_f - icy) <= 44.0
+            and int(w) >= 5
+            and int(h) >= 7
+            and 40 <= bbox_area < min_bbox_area
+            and 0.25 <= (float(w) / max(1.0, float(h))) <= 1.35
+            and int(cv2.countNonZero(raw_mask[y : y + h, x : x + w])) >= 6
+        )
+        eff_min_points = 4 if is_foveated_compact else min_contour_points
+        if len(c) < eff_min_points and not (
             len(c) >= 4 and contour_area >= max(40.0, min_contour_area * 2.5)
         ):
             continue
 
-        x, y, w, h = cv2.boundingRect(c)
-        bbox_area = int(w) * int(h)
-        if contour_area < min_contour_area:
-            continue
-        if bbox_area < min_bbox_area:
-            continue
-        if int(w) < min_w or int(h) < min_h:
-            continue
+        if is_foveated_compact:
+            if contour_area < 10.0:
+                continue
+        else:
+            if contour_area < min_contour_area:
+                continue
+            if bbox_area < min_bbox_area:
+                continue
+            if int(w) < min_w or int(h) < min_h:
+                continue
 
+        eff_fill = min(min_fill_ratio, 0.12) if is_foveated_compact else min_fill_ratio
         fill_ratio = contour_area / max(float(bbox_area), 1.0)
-        if fill_ratio < min_fill_ratio:
+        if fill_ratio < eff_fill:
             continue
 
         aspect = float(w) / max(float(h), 1.0)
@@ -691,23 +817,34 @@ def perform_detection(model, image, roi_offset=(0, 0), stabilize: bool = True):
             centers.append((cx, cy))
 
     if not rects:
-        return [], mask
+        far_rects = _recover_far_foveated_rects(image, model, center_xy=(icx, icy))
+        if not far_rects:
+            return [], mask
+        merged_rects = far_rects
+    else:
+        rects, centers = _split_wide_multi_target_rects(rects, raw_mask, mask)
 
-    rects, centers = _split_wide_multi_target_rects(rects, raw_mask, mask)
+        rects_centers = sorted(zip(rects, centers), key=lambda rc: _bbox_area(rc[0]), reverse=True)
+        rects = [rc[0] for rc in rects_centers]
+        centers = [rc[1] for rc in rects_centers]
 
-    rects_centers = sorted(zip(rects, centers), key=lambda rc: _bbox_area(rc[0]), reverse=True)
-    rects = [rc[0] for rc in rects_centers]
-    centers = [rc[1] for rc in rects_centers]
+        merged_rects, _ = merge_close_rects(rects, centers)
+        merged_rects = _filter_false_positive_rects(merged_rects, raw_mask)
+        has_near_center = any(
+            math.hypot((rx + rw * 0.5) - icx, (ry + rh * 0.5) - icy) <= 44.0
+            for (rx, ry, rw, rh) in merged_rects
+        )
+        if not has_near_center:
+            for fr in _recover_far_foveated_rects(image, model, center_xy=(icx, icy)):
+                if not any(_boxes_overlap(fr, mr) for mr in merged_rects):
+                    merged_rects.append(fr)
 
-    merged_rects, _ = merge_close_rects(rects, centers)
-    merged_rects = _filter_false_positive_rects(merged_rects, raw_mask)
     if not merged_rects:
         return [], mask
-    ox, oy = int(roi_offset[0]), int(roi_offset[1])
     if ox != 0 or oy != 0:
         merged_rects = [(rx + ox, ry + oy, rw, rh) for (rx, ry, rw, rh) in merged_rects]
     if stabilize:
-        merged_rects = _stabilize_detected_rects(merged_rects)
+        merged_rects = _stabilize_detected_rects(merged_rects, frame_shape=stab_shape)
     return [{"class": "player", "bbox": r, "confidence": 1.0} for r in merged_rects], mask
 
 

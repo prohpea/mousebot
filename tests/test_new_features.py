@@ -149,6 +149,26 @@ class TestArchitectureUpgrades(unittest.TestCase):
         self.assertNotIn("..", path)
         self.assertEqual(norm, "evil")
 
+    def test_abcurves_linear_inflight_interpolation_and_queue_accounting(self):
+        import queue as pyqueue
+        from collections import deque
+        from src.aim_system.abcurves_controller import _enqueue_exact_reports, _lookup_captured_counts
+
+        hist = deque([(1.00, 10, -4), (1.02, 30, -14)])
+        ix, iy = _lookup_captured_counts(hist, 1.01)
+        self.assertAlmostEqual(ix, 20.0, places=3)
+        self.assertAlmostEqual(iy, -9.0, places=3)
+
+        dummy_tracker = type("T", (), {})()
+        dummy_tracker.move_queue = pyqueue.Queue(maxsize=2)
+        dummy_tracker._clip_movement = lambda x, y: (x, y)
+        reports = np.array([[0, 0], [3, -1], [4, -2], [5, -3]], dtype=np.int32)
+        sent_x, sent_y = _enqueue_exact_reports(dummy_tracker, reports, max_step=20.0, dx=20.0, dy=-10.0)
+        # Only 2 items fit in maxsize=2 queue (3, -1) and (4, -2); (5, -3) dropped on queue.Full
+        self.assertEqual((sent_x, sent_y), (7, -3))
+        first = dummy_tracker.move_queue.get_nowait()
+        self.assertGreater(first[2], 0.001)  # leading (0,0) delay carried onto first nonzero step
+
 
 if __name__ == "__main__":
     unittest.main()

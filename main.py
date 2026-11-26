@@ -44,6 +44,7 @@ from src.capture.capture_service import CaptureService
 from src.aim_system.normal import process_normal_mode
 from src.aim_system.anti_smoke_detector import AntiSmokeDetector
 from src.aim_system.target_smoother import TargetSmoother
+from src.utils.hybrid_head_refiner import HybridHeadRefiner
 from src.utils.pipeline_profiler import CaptureLagEstimator, PipelineProfiler
 
 class FrameInfo:
@@ -164,16 +165,15 @@ class AimTracker:
         self._target_offset_scales = {}
         self._current_masked_buttons = set()
         self.move_queue = queue.Queue(maxsize=50)
+        self._move_flush_lock = threading.Lock()
+        self._pending_exact_item = None
         self._move_batch_size = 4
         self._move_batch_small_step = 3.0
         self._move_thread = threading.Thread(target=self._process_move_queue, daemon=True)
-        self._move_thread.start()
 
         self.model, self.class_names = load_model()
         print("Classes:", self.class_names)
         self._target_fps = target_fps
-        self._track_thread = threading.Thread(target=self._track_loop, daemon=True)
-        self._track_thread.start()
         
         # 骞€瑷堟暩鍣紙鐢ㄦ柤瑾胯│锛?
         self._frame_count = 0
@@ -207,6 +207,12 @@ class AimTracker:
         self.profiler = PipelineProfiler()
         self.lag_estimator = CaptureLagEstimator()
         self._lighting_guard_tick = 0
+        self.hybrid_head_refiner = HybridHeadRefiner(start_worker=True)
+
+        # Start worker threads only after every tracker field is initialized.
+        self._move_thread.start()
+        self._track_thread = threading.Thread(target=self._track_loop, daemon=True)
+        self._track_thread.start()
 
         try:
             from src.aim_system.abcurves_controller import prewarm_abcurves_async
@@ -228,6 +234,9 @@ class AimTracker:
             self._move_thread.join(timeout=1.0)
         except Exception:
             pass
+        refiner = getattr(self, "hybrid_head_refiner", None)
+        if refiner is not None:
+            refiner.stop()
         self._close_raw_stream_windows()
 
     def _sleep_precise(self, seconds: float):
@@ -316,13 +325,14 @@ class AimTracker:
                     pass
 
     def _run_move_queue_loop(self):
-        pending_exact_item = None
-        while not self._stop_event.is_set() or pending_exact_item is not None or not self.move_queue.empty():
+        while not self._stop_event.is_set() or self._pending_exact_item is not None or not self.move_queue.empty():
             try:
-                if pending_exact_item is not None:
-                    item = pending_exact_item
-                    pending_exact_item = None
-                else:
+                item = None
+                with self._move_flush_lock:
+                    if self._pending_exact_item is not None:
+                        item = self._pending_exact_item
+                        self._pending_exact_item = None
+                if item is None:
                     item = self.move_queue.get(timeout=0.1)
                 if isinstance(item, tuple) and len(item) >= 4:
                     dx, dy, delay, exact_step = item[0], item[1], item[2], bool(item[3])
@@ -336,20 +346,17 @@ class AimTracker:
                     merged_dy = float(dy)
                     merged_delay = float(delay) if delay else 0.0
                 elif latest_only:
-                    # Keep only the newest N commands, then merge them.
-                    # This preserves immediate latest-frame behavior while avoiding
-                    # dropped Bezier/WindMouse sub-steps that cause jitter.
                     pending = [(dx, dy, delay)]
-                    while True:
-                        try:
-                            nxt = self.move_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        if isinstance(nxt, tuple) and len(nxt) >= 4 and bool(nxt[3]):
-                            # Hold exact-step ABCurves item for immediate next iteration without tail re-enqueue.
-                            pending_exact_item = nxt
-                            break
-                        pending.append((nxt[0], nxt[1], nxt[2]))
+                    with self._move_flush_lock:
+                        while True:
+                            try:
+                                nxt = self.move_queue.get_nowait()
+                            except queue.Empty:
+                                break
+                            if isinstance(nxt, tuple) and len(nxt) >= 4 and bool(nxt[3]):
+                                self._pending_exact_item = nxt
+                                break
+                            pending.append((nxt[0], nxt[1], nxt[2]))
                     max_batch = max(
                         1,
                         int(getattr(config, "move_queue_merge_batch", self._move_batch_size)),
@@ -414,14 +421,16 @@ class AimTracker:
             while not self._stop_event.is_set():
                 period = 1.0 / float(self._target_fps)
                 start = time.perf_counter()
+                used_event_udp = False
                 try:
-                    self.track_once()
+                    used_event_udp = bool(self.track_once())
                 except Exception as e:
                     print("[Track error]", e)
-                elapsed = time.perf_counter() - start
-                to_sleep = period - elapsed
-                if to_sleep > 0:
-                    time.sleep(to_sleep)
+                if not used_event_udp:
+                    elapsed = time.perf_counter() - start
+                    to_sleep = period - elapsed
+                    if to_sleep > 0:
+                        time.sleep(to_sleep)
         finally:
             if winmm is not None:
                 try:
@@ -642,6 +651,7 @@ class AimTracker:
         # 读取 BGR 帧 (UDP 模式按 frame_seq 同步去重，避免重复处理旧帧与相位抖动)
         t_loop_start = time.perf_counter()
         capture_mode = getattr(self.app.capture, "mode", None)
+        used_event_udp = False
         if capture_mode == "UDP" and hasattr(self.app.capture, "read_udp_frame_with_seq"):
             wait_budget = min(0.012, 1.0 / max(1.0, float(getattr(self, "_target_fps", 144.0))))
             last_seq = getattr(self, "_last_udp_frame_seq", 0)
@@ -652,6 +662,7 @@ class AimTracker:
             )
             if raw_bgr_img is not None and udp_seq > 0:
                 self._last_udp_frame_seq = udp_seq
+                used_event_udp = True
         else:
             raw_bgr_img = self.app.capture.read_frame(apply_fov=False)
         t_grab_end = time.perf_counter()
@@ -664,7 +675,7 @@ class AimTracker:
                     cv2.waitKey(1)
                 except Exception:
                     pass
-            return
+            return True if capture_mode == "UDP" else False
 
         # 纰轰繚鍦栧儚鏄€ｇ簩涓斿彲瀵殑鏁哥祫锛屼互閬垮厤 OpenCV 閷
         if not raw_bgr_img.flags['C_CONTIGUOUS']:
@@ -715,13 +726,19 @@ class AimTracker:
                 from src.utils.activation import get_active_aim_fov
 
                 active_fov = float(get_active_aim_fov(is_sec=False, fallback=getattr(config, "fovsize", 48)))
-                half_roi = int(math.ceil(active_fov + max(48.0, active_fov * 0.45)))
-                if 2 * half_roi < min(w, h) - 16:
+                if bool(getattr(config, "enableaim_sec", False)):
+                    sec_fov_val = float(get_active_aim_fov(is_sec=True, fallback=getattr(config, "fovsize_sec", 150)))
+                    active_fov = max(active_fov, sec_fov_val)
+                if str(getattr(config, "mode", "ABCurves")) == "NCAF":
+                    active_fov = max(active_fov, float(getattr(config, "ncaf_snap_radius", 150.0)))
+                half_roi_x = int(math.ceil(active_fov + max(48.0, active_fov * 0.45)))
+                half_roi_y = max(half_roi_x, 115)
+                if 2 * half_roi_x < w - 16 or 2 * half_roi_y < h - 16:
                     cx0, cy0 = w // 2, h // 2
-                    roi_x0 = max(0, cx0 - half_roi)
-                    roi_y0 = max(0, cy0 - half_roi)
-                    rx1 = min(w, cx0 + half_roi)
-                    ry1 = min(h, cy0 + half_roi)
+                    roi_x0 = max(0, cx0 - half_roi_x)
+                    roi_y0 = max(0, cy0 - half_roi_y)
+                    rx1 = min(w, cx0 + half_roi_x)
+                    ry1 = min(h, cy0 + half_roi_y)
                     if (rx1 - roi_x0) >= 32 and (ry1 - roi_y0) >= 32:
                         det_img = bgr_img[roi_y0:ry1, roi_x0:rx1]
             except Exception:
@@ -731,7 +748,12 @@ class AimTracker:
 
         try:
             t_det_start = time.perf_counter()
-            detection_results, mask = perform_detection(self.model, det_img, roi_offset=(roi_x0, roi_y0))
+            detection_results, mask = perform_detection(
+                self.model,
+                det_img,
+                roi_offset=(roi_x0, roi_y0),
+                full_frame_size=(w, h),
+            )
             detect_ms = (time.perf_counter() - t_det_start) * 1000.0
             # 显示 MASK 视窗（如果启用）
             if show_mask_win and mask is not None:
@@ -757,10 +779,13 @@ class AimTracker:
                 except Exception:
                     pass
 
+        # Keep bgr_img 100% clean and read-only for Detection and async Hybrid AI worker;
+        # draw debug overlays onto a separate buffer only when the Detection window is enabled.
+        overlay_img = bgr_img.copy() if draw_overlays else None
+
         targets = []
         target_bboxes = []
         if detection_results:
-            # 鐛插彇鐣跺墠 aim_type锛圡ain Aimbot锛?
             aim_type = getattr(config, "aim_type", "head")
             frame_area = max(1, int(frame.xres) * int(frame.yres))
             dynamic_min_area = int(
@@ -770,33 +795,61 @@ class AimTracker:
                     max(120, int(frame_area * 0.0015)),
                 )
             )
-            if str(getattr(config, "detection_morph_mode", "legacy")).strip().lower() != "stable":
-                dynamic_min_area = min(dynamic_min_area, max(40, int(frame_area * 0.00035)))
-            
-            for det in detection_results:
+            fcx, fcy = frame.xres * 0.5, frame.yres * 0.5
+            locked_main = getattr(self, "_active_locked_target_main", None)
+
+            def _det_priority_key(d):
+                bx, by, bw_d, bh_d = d["bbox"]
+                dcx = float(bx) + 0.5 * float(bw_d)
+                dcy = float(by) + 0.15 * float(bh_d)
+                if locked_main is not None and len(locked_main) >= 2:
+                    lock_d = math.hypot(dcx - float(locked_main[0]), dcy - float(locked_main[1]))
+                    if lock_d <= max(28.0, float(max(bw_d, bh_d)) * 0.85):
+                        return (-1, lock_d)
+                return (0, math.hypot(dcx - fcx, dcy - fcy))
+
+            ordered_detections = sorted(detection_results, key=_det_priority_key)
+            act_mode = str(getattr(config, "aimbot_activation_type", "hold_enable") or "").strip().lower()
+            ai_armed = bool(getattr(config, "enableaim", False)) and (aim_type != "body") and (
+                get_aimbot_toggle_state() if act_mode == "toggle" else True
+            )
+            primary_ai_dispatched = False
+            for det in ordered_detections:
                 try:
                     x, y, w, h = det['bbox']
                     conf = det.get('confidence', 1.0)
                     if int(w) <= 0 or int(h) <= 0:
                         continue
-                    # Ignore tiny blobs to reduce per-frame target flicker.
-                    if int(w) * int(h) < dynamic_min_area:
+                    box_area = int(w) * int(h)
+                    near_fovea = math.hypot((float(x) + 0.5 * float(w)) - fcx, (float(y) + 0.5 * float(h)) - fcy) <= 44.0
+                    eff_min_area = min(dynamic_min_area, 35) if near_fovea else dynamic_min_area
+                    if box_area < eff_min_area:
                         continue
                     x1, y1 = int(x), int(y)
                     x2, y2 = int(x + w), int(y + h)
-                    # Only draw overlay boxes when OpenCV Detection window is enabled
-                    if draw_overlays:
-                        self._draw_body(bgr_img, x1, y1, x2, y2, conf)
+                    if overlay_img is not None:
+                        self._draw_body(overlay_img, x1, y1, x2, y2, conf)
                     
-                    # 瑷堢畻 body 鐨勪腑蹇冮粸鍜?Y 绡勫湇
                     body_cx = (x1 + x2) / 2.0
                     body_cy = (y1 + y2) / 2.0
-                    body_y_min = y1  # body 鐨?Y 杌告渶楂樺€硷紙鍦栧儚搴ф绯讳腑 y 瓒婂皬瓒婇潬涓婏級
-                    body_y_max = y2  # body 鐨?Y 杌告渶浣庡€?                    
-                    # Estimation t锚tes dans la bbox
-                    head_positions = self._estimate_head_positions(
-                        x1, y1, x2, y2, bgr_img, mask, roi_offset=(roi_x0, roi_y0)
-                    )
+                    body_y_min = y1
+                    body_y_max = y2
+                    if aim_type == "body":
+                        head_positions = []
+                    else:
+                        head_positions = self._estimate_head_positions(
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            bgr_img,
+                            mask,
+                            roi_offset=(roi_x0, roi_y0),
+                            allow_ai_dispatch=(ai_armed and not primary_ai_dispatched),
+                            overlay_img=overlay_img,
+                        )
+                        if ai_armed:
+                            primary_ai_dispatched = True
                     
                     if aim_type == "body":
                         # Body 妯″紡锛氫娇鐢?body 涓績榛?
@@ -807,8 +860,8 @@ class AimTracker:
                     else:
                         # Head 鎴?Nearest 妯″紡锛氫娇鐢?head 浣嶇疆
                         for head_cx, head_cy, bbox in head_positions:
-                            if draw_overlays:
-                                self._draw_head_bbox(bgr_img, head_cx, head_cy)
+                            if overlay_img is not None:
+                                self._draw_head_bbox(overlay_img, head_cx, head_cy)
                             d = math.hypot(head_cx - frame.xres / 2.0, head_cy - frame.yres / 2.0)
                             
                             # 瑷堢畻 head 鐨?Y 绡勫湇锛堢敤鏂?nearest 妯″紡锛?
@@ -841,9 +894,9 @@ class AimTracker:
             )
 
         # FOVs once per frame (only when OpenCV Detection window is enabled)
-        if draw_overlays:
+        if overlay_img is not None:
             try:
-                self._draw_fovs(bgr_img, frame)
+                self._draw_fovs(overlay_img, frame)
             except Exception:
                 pass
 
@@ -884,13 +937,17 @@ class AimTracker:
         # Record 144Hz pipeline telemetry & update dynamic capture lag estimator
         try:
             q_depth = int(self.move_queue.qsize())
-            self.profiler.record(grab_ms, detect_ms, aim_ms, total_ms, queue_depth=q_depth)
+            eff_grab_ms = grab_ms
             decode_ms = 0.0
             cap_stats_fn = getattr(self.app.capture, "get_performance_stats", None)
             if callable(cap_stats_fn):
                 st = cap_stats_fn() or {}
                 decode_ms = float(st.get("decode_time_ms", 0.0) or 0.0)
-            self.lag_estimator.update(decode_ms=decode_ms, grab_ms=grab_ms, detect_ms=detect_ms)
+                if used_event_udp:
+                    # Exclude idle network frame-wait time from capture latency estimation
+                    eff_grab_ms = min(grab_ms, max(0.05, float(st.get("processing_delay_ms", 0.3) or 0.3)))
+            self.profiler.record(eff_grab_ms, detect_ms, aim_ms, (t_aim_end - t_grab_end) * 1000.0 + eff_grab_ms, queue_depth=q_depth)
+            self.lag_estimator.update(decode_ms=decode_ms, grab_ms=eff_grab_ms, detect_ms=detect_ms)
 
             # Optional ~2Hz Lighting-Drift Guard (custom HSV mode only; updates live model without mutating config.json)
             if (
@@ -916,7 +973,8 @@ class AimTracker:
         if (getattr(config, "show_opencv_windows", True) and 
             getattr(config, "show_opencv_detection", True)):
             try:
-                display_img = self._draw_enhanced_detection(bgr_img.copy(), targets_all, frame)
+                src_disp = overlay_img if overlay_img is not None else bgr_img.copy()
+                display_img = self._draw_enhanced_detection(src_disp, targets_all, frame)
                 if roi_x0 > 0 or roi_y0 > 0:
                     roi_h, roi_w = det_img.shape[:2]
                     cv2.rectangle(
@@ -954,6 +1012,7 @@ class AimTracker:
                 cv2.waitKey(1)
             except Exception:
                 pass
+        return used_event_udp
     
     def _draw_enhanced_detection(self, img, targets, frame):
         """
@@ -1155,9 +1214,22 @@ class AimTracker:
         # 鍏у湀锛堢磪鑹诧級
         cv2.circle(img, (int(headx), int(heady)), 3, (0, 0, 255), -1)
 
-    def _estimate_head_positions(self, x1, y1, x2, y2, img, mask=None, roi_offset=(0, 0)):
+    def _estimate_head_positions(
+        self,
+        x1,
+        y1,
+        x2,
+        y2,
+        img,
+        mask=None,
+        roi_offset=(0, 0),
+        allow_ai_dispatch: bool = True,
+        overlay_img=None,
+    ):
         """
-        Estimate head position from body bbox geometry only.
+        Unified head position estimator synchronized across HSV mask, Hybrid ONNX AI, and Main Aim.
+        Invariant: Geometric estimation ALWAYS remains inside [y1, y2] (never guesses into empty
+        space above y1); only verified RGB Hybrid AI detections may refine to exact head coordinates.
         """
         if not img.flags['C_CONTIGUOUS']:
             img = np.ascontiguousarray(img)
@@ -1167,37 +1239,90 @@ class AimTracker:
 
         width = max(1, int(x2) - int(x1))
         height = max(1, int(y2) - int(y1))
+        aspect = float(width) / float(height)
 
         top_crop_factor = 0.10
         side_crop_factor = 0.10
-
-        effective_y1 = float(y1) + float(height) * top_crop_factor
         effective_height = float(height) * (1.0 - top_crop_factor)
         effective_x1 = float(x1) + float(width) * side_crop_factor
         effective_x2 = float(x2) - float(width) * side_crop_factor
         effective_width = max(1.0, effective_x2 - effective_x1)
-
         center_x = (effective_x1 + effective_x2) / 2.0
-        headx_base = center_x + effective_width * (offset_x / 100.0)
-        # Keep Y estimate deterministic (no mask-driven jitter).
-        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.22))
-        heady_base = float(y1) + float(height) * base_head_ratio + effective_height * (offset_y / 100.0)
 
-        # Optional one-pass refinement from the already computed mask.
-        # Convert full-frame bbox into mask-local coords when dynamic ROI crop is active.
+        base_head_ratio = float(getattr(config, "head_estimate_ratio", 0.14))
+        # Continuous vertical ratio inside [y1, y2] (eliminating hard jumps across height=20..36):
+        if height <= 20 and width <= 20 and aspect >= 0.82:
+            eff_ratio = max(base_head_ratio, 0.24)  # Square head-only peek behind cover
+        elif height >= 36:
+            eff_ratio = min(base_head_ratio, 0.10)  # Full/upper-body silhouette
+        elif height <= 20:
+            eff_ratio = min(base_head_ratio, 0.13)
+        else:
+            t_h = (float(height) - 20.0) / 16.0
+            eff_ratio = min(base_head_ratio, 0.13 - 0.03 * t_h)
+
+        geom_hx = center_x
+        geom_hy = max(float(y1) + 1.0, float(y1) + float(height) * eff_ratio)
+
+        # Refine geometric X strictly from the narrow top 12% head crown in the HSV mask
+        # (above the shoulders, so sideways arms/rifles never pull X off-head).
         if mask is not None:
             rox, roy = int(roi_offset[0]), int(roi_offset[1])
             mx1 = max(0, min(int(x1) - rox, mask.shape[1] - 1))
             my1 = max(0, min(int(y1) - roy, mask.shape[0] - 1))
             mx2 = max(mx1 + 1, min(int(x2) - rox, mask.shape[1]))
             my2 = max(my1 + 1, min(int(y2) - roy, mask.shape[0]))
-            upper_h = max(6, int((my2 - my1) * 0.42))
-            upper_y2 = min(my2, my1 + upper_h)
-            upper_mask = mask[my1:upper_y2, mx1:mx2]
-            if upper_mask.size > 0:
-                ys, xs = np.where(upper_mask > 0)
-                if len(xs) >= int(getattr(config, "head_refine_min_pixels", 20)):
-                    headx_base = float(rox + mx1 + int(np.median(xs)))
+            bh_m = max(1, my2 - my1)
+
+            min_refine_px = int(getattr(config, "head_refine_min_pixels", 20))
+            crown_h = max(3, int(round(bh_m * 0.12)))
+            crown_mask = mask[my1:min(my2, my1 + crown_h), mx1:mx2]
+            cxs = np.where(crown_mask > 0)[1] if crown_mask.size > 0 else np.empty(0, dtype=np.intp)
+            min_crown_px = max(4, min(12, min_refine_px // 2))
+            if len(cxs) >= min_crown_px:
+                geom_hx = float(rox + mx1) + 0.5 * float(int(cxs.min()) + int(cxs.max()))
+            else:
+                upper_h = max(5, int(round(bh_m * 0.24)))
+                upper_mask = mask[my1:min(my2, my1 + upper_h), mx1:mx2]
+                if upper_mask.size > 0:
+                    _, uxs = np.where(upper_mask > 0)
+                    if len(uxs) >= min_refine_px:
+                        geom_hx = float(rox + mx1) + 0.5 * float(int(uxs.min()) + int(uxs.max()))
+
+        final_hx = geom_hx
+        final_hy = geom_hy
+
+        if allow_ai_dispatch and bool(getattr(config, "hybrid_ai_enabled", False)):
+            sync_ai = bool(getattr(config, "hybrid_ai_sync_mode", False))
+            img_h, img_w = img.shape[:2]
+            active_fov = float(get_active_aim_fov(is_sec=False, fallback=getattr(config, "fovsize", 48)))
+            dist_center = math.hypot(center_x - img_w * 0.5, float(y1) - img_h * 0.5)
+            if sync_ai or dist_center <= max(96.0, active_fov + 64.0):
+                refiner = getattr(self, "hybrid_head_refiner", None)
+                if refiner is None:
+                    refiner = HybridHeadRefiner(start_worker=not sync_ai)
+                    self.hybrid_head_refiner = refiner
+                model_path = str(getattr(config, "hybrid_ai_model_path", "models/v11_192_Valorant_180.onnx"))
+                conf_thr = float(getattr(config, "hybrid_ai_conf_threshold", 0.28))
+                ai_hx, ai_hy, used_ai = refiner.refine_head(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    img,
+                    geom_hx,
+                    geom_hy,
+                    model_path=model_path,
+                    conf_threshold=conf_thr,
+                    sync=sync_ai,
+                )
+                if used_ai:
+                    final_hx = ai_hx
+                    final_hy = ai_hy
+
+        # Apply user offset exactly once (no double-offset discrepancy between Geom and Hybrid AI)
+        headx_base = final_hx + effective_width * (offset_x / 100.0)
+        heady_base = final_hy + effective_height * (offset_y / 100.0)
 
         pixel_marginx = max(12, int(width * 0.20))
         pixel_marginy = max(8, int(height * 0.10))
@@ -1207,12 +1332,12 @@ class AimTracker:
         y2_roi = int(min(heady_base + pixel_marginy, img.shape[0]))
 
         if x2_roi <= x1_roi or y2_roi <= y1_roi:
-            return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
+            return [(float(headx_base), float(heady_base), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
-        if getattr(config, "show_opencv_windows", False) and getattr(config, "show_opencv_detection", False):
-            cv2.rectangle(img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
+        if overlay_img is not None:
+            cv2.rectangle(overlay_img, (x1_roi, y1_roi), (x2_roi, y2_roi), (0, 255, 255), 1)
 
-        return [(int(round(headx_base)), int(round(heady_base)), (x1_roi, y1_roi, x2_roi, y2_roi))]
+        return [(float(headx_base), float(heady_base), (x1_roi, y1_roi, x2_roi, y2_roi))]
 
     def _draw_body(self, img, x1, y1, x2, y2, conf):
         """
@@ -1321,6 +1446,9 @@ if __name__ == "__main__":
         
         temp_app = TempApp(capture_service)
         
+        # Load persisted config.json BEFORE AimTracker initializes HSV model, target FPS, and prewarm
+        config.load_from_file()
+
         # 鍓靛缓 AimTracker (use config value if available)
         target_fps = getattr(config, "target_fps", 144)
         tracker = AimTracker(app=temp_app, target_fps=target_fps)
@@ -1337,9 +1465,6 @@ if __name__ == "__main__":
         
         # 鏇存柊 tracker 鐨?app 寮曠敤
         tracker.app = app
-        
-        # 杓夊叆涓︽噳鐢ㄩ厤缃紙纰轰繚鎵€鏈夎ō缃兘姝ｇ⒑锛?
-        config.load_from_file()
         app._sync_config_to_tracker()
         
         print("[Main] Application initialized")

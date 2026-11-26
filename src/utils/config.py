@@ -9,8 +9,8 @@ class Config:
 
         self.enableaim = True
         self.enabletb = False
-        self.offsetX = -2
-        self.offsetY = 3
+        self.offsetX = 0
+        self.offsetY = 0
         
         # --- Aimbot Offsets ---
         self.aim_offsetX = 0  # Aimbot 專用 X 偏移
@@ -43,7 +43,7 @@ class Config:
         self.detection_upright_filter_enabled = True
         self.detection_disable_empty_fallback = True
         self.min_detection_bbox_area = 150
-        self.head_estimate_ratio = 0.22
+        self.head_estimate_ratio = 0.14
         self.head_refine_min_pixels = 20
         self.aim_latest_frame_priority = True
         self.enable_target_temporal_smoothing = False
@@ -461,6 +461,10 @@ class Config:
         self.firing_deadzone_boost_px = 2.5
         self.firing_deadzone_window_ms = 200.0
         self.obs_udp_fast_boot = True
+        self.hybrid_ai_enabled = False
+        self.hybrid_ai_model_path = "models/v11_192_Valorant_180.onnx"
+        self.hybrid_ai_conf_threshold = 0.28
+        self.hybrid_ai_sync_mode = False
         
         # --- Button Mask Settings ---
         self.button_mask_enabled = False  # 绺介枊闂?
@@ -924,6 +928,12 @@ class Config:
             "firing_deadzone_boost_px": getattr(self, "firing_deadzone_boost_px", 2.5),
             "firing_deadzone_window_ms": getattr(self, "firing_deadzone_window_ms", 200.0),
             "obs_udp_fast_boot": getattr(self, "obs_udp_fast_boot", True),
+            "hybrid_ai_enabled": bool(getattr(self, "hybrid_ai_enabled", False)),
+            "hybrid_ai_model_path": str(
+                getattr(self, "hybrid_ai_model_path", "models/v11_192_Valorant_180.onnx")
+            ),
+            "hybrid_ai_conf_threshold": float(getattr(self, "hybrid_ai_conf_threshold", 0.28)),
+            "hybrid_ai_sync_mode": bool(getattr(self, "hybrid_ai_sync_mode", False)),
         }
     
     def from_dict(self, data):
@@ -1395,6 +1405,18 @@ class Config:
             )
         except Exception:
             self.trigger_strafe_manual_neutral_ms = 0
+        self.hybrid_ai_enabled = bool(getattr(self, "hybrid_ai_enabled", False))
+        self.hybrid_ai_sync_mode = bool(getattr(self, "hybrid_ai_sync_mode", False))
+        self.hybrid_ai_model_path = (
+            str(getattr(self, "hybrid_ai_model_path", "models/v11_192_Valorant_180.onnx")).strip()
+            or "models/v11_192_Valorant_180.onnx"
+        )
+        try:
+            self.hybrid_ai_conf_threshold = max(
+                0.10, min(0.95, float(getattr(self, "hybrid_ai_conf_threshold", 0.28)))
+            )
+        except Exception:
+            self.hybrid_ai_conf_threshold = 0.28
     
     def _resolve_config_file(self, filename="config.json"):
         if filename == "config.json" or not os.path.isabs(filename):

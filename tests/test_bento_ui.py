@@ -53,6 +53,9 @@ class TestBentoDashboardUI(unittest.TestCase):
         cls.tracker = _make_stub_tracker()
         cls.capture = _make_stub_capture()
 
+        cls._save_patcher = patch.object(config, "save_to_file", lambda *a, **kw: True)
+        cls._save_patcher.start()
+
         with patch.object(ui_module.ViewerApp, "_maybe_auto_start_runtime", lambda self: None), \
              patch.object(ui_module.ViewerApp, "_load_initial_config", lambda self: None), \
              patch.object(ui_module.ViewerApp, "_poll_clipboard_config_import", lambda self: None), \
@@ -70,6 +73,10 @@ class TestBentoDashboardUI(unittest.TestCase):
                 except Exception:
                     pass
             cls.app.destroy()
+        except Exception:
+            pass
+        try:
+            cls._save_patcher.stop()
         except Exception:
             pass
         if cls._orig_ui_style is not None:

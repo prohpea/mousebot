@@ -3446,6 +3446,33 @@ class ViewerApp(ctk.CTk):
         )
         self._checkbox_vars["hsv_lighting_guard_enabled"] = self.var_hsv_lighting_guard
 
+        self.var_hybrid_ai_enabled = tk.BooleanVar(value=bool(getattr(config, "hybrid_ai_enabled", False)))
+        self._add_switch_in_frame(
+            sec_settings,
+            "Hybrid AI Head Refiner (ONNX)",
+            self.var_hybrid_ai_enabled,
+            self._on_hybrid_ai_enabled_changed,
+        )
+        self._checkbox_vars["hybrid_ai_enabled"] = self.var_hybrid_ai_enabled
+
+        hybrid_model_row = ctk.CTkFrame(sec_settings, fg_color="transparent")
+        hybrid_model_row.pack(fill="x", pady=(4, 2))
+        cur_model_name = os.path.basename(str(getattr(config, "hybrid_ai_model_path", "v11_192_Valorant_180.onnx") or ""))
+        self.hybrid_ai_model_btn = ctk.CTkButton(
+            hybrid_model_row,
+            text=f"AI Model: {cur_model_name or 'Select .onnx'}",
+            height=28,
+            fg_color=COLOR_SURFACE,
+            hover_color=COLOR_BORDER,
+            text_color=COLOR_ACCENT,
+            font=FONT_BOLD,
+            corner_radius=4,
+            border_width=1,
+            border_color=COLOR_BORDER,
+            command=self._on_select_hybrid_ai_model,
+        )
+        self.hybrid_ai_model_btn.pack(fill="x", padx=14)
+
         hsv_lab_btn_row = ctk.CTkFrame(sec_settings, fg_color="transparent")
         hsv_lab_btn_row.pack(fill="x", pady=(6, 4))
         ctk.CTkButton(
@@ -12220,6 +12247,58 @@ class ViewerApp(ctk.CTk):
 
     def _on_hsv_lighting_guard_changed(self):
         config.hsv_lighting_guard_enabled = bool(self.var_hsv_lighting_guard.get())
+
+    def _on_hybrid_ai_enabled_changed(self):
+        enabled = bool(self.var_hybrid_ai_enabled.get())
+        config.hybrid_ai_enabled = enabled
+        if enabled:
+            try:
+                from src.utils.hybrid_head_refiner import inspect_onnx_model
+                rep = inspect_onnx_model(getattr(config, "hybrid_ai_model_path", ""), run_benchmark=False)
+                if rep.compatible:
+                    self._show_status_toast(f"[OK] Hybrid AI ON: {os.path.basename(rep.path)} ({rep.input_hw[1]}x{rep.input_hw[0]})", "#10B981")
+                else:
+                    self._show_status_toast(f"[WARN] Hybrid AI: {rep.reason}", "#F59E0B")
+            except Exception as exc:
+                log_print(f"[UI] Hybrid AI toggle check error: {exc}")
+        try:
+            config.save_to_file()
+        except Exception:
+            pass
+
+    def _on_select_hybrid_ai_model(self):
+        try:
+            from tkinter import filedialog
+            from src.utils.app_paths import get_app_dir
+            from src.utils.hybrid_head_refiner import inspect_onnx_model
+
+            models_dir = get_app_dir() / "models"
+            init_dir = str(models_dir if models_dir.exists() else get_app_dir())
+            chosen = filedialog.askopenfilename(
+                title="Select Valorant ONNX Head Model",
+                initialdir=init_dir,
+                filetypes=[("ONNX Model", "*.onnx"), ("All Files", "*.*")],
+            )
+            if not chosen:
+                return
+            rep = inspect_onnx_model(chosen, run_benchmark=True)
+            if not rep.compatible:
+                self._show_status_toast(f"[INVALID] {rep.reason}", "#EF4444")
+                return
+            try:
+                rel = os.path.relpath(chosen, str(get_app_dir()))
+                save_path = rel.replace("\\", "/") if not rel.startswith("..") else chosen
+            except Exception:
+                save_path = chosen
+            config.hybrid_ai_model_path = save_path
+            if hasattr(self, "hybrid_ai_model_btn") and self.hybrid_ai_model_btn.winfo_exists():
+                self.hybrid_ai_model_btn.configure(text=f"AI Model: {os.path.basename(chosen)} ({rep.latency_ms:.1f}ms)")
+            if hasattr(self, "tracker") and hasattr(self.tracker, "hybrid_head_refiner"):
+                self.tracker.hybrid_head_refiner.ensure_model_loaded(save_path)
+            config.save_to_file()
+            self._show_status_toast(f"[{rep.verdict}] {os.path.basename(chosen)} ({rep.latency_ms:.1f}ms)", "#10B981")
+        except Exception as exc:
+            log_print(f"[UI] Select Hybrid AI model failed: {exc}")
 
     def _on_dynamic_lag_changed(self):
         config.dynamic_capture_lag_enabled = bool(self.var_dynamic_capture_lag.get())

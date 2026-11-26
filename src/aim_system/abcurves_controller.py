@@ -16,6 +16,7 @@ from src.utils.activation import get_active_aim_fov
 from src.utils.app_paths import get_bundle_dir
 from src.utils.config import config
 from src.utils.debug_logger import log_move, log_print
+from src.utils.mouse import update_movement_lock
 
 # Calibrated to eDPI = sens * dpi = 0.35 * 800 = 280 so X/Y Speed = 1.0 gives ~1.40 counts/px.
 _REF_EDPI = 280.0
@@ -181,6 +182,48 @@ class _NativeContinuousPipelineAdapter:
             reports[idx, 1] = ry
         return {"reports": reports}
 
+    @property
+    def is_stopped_mode(self) -> bool:
+        try:
+            return int(self._planner.state.mode) == 2
+        except Exception:
+            return False
+
+    def hold_zero(self) -> None:
+        ix, iy = float(self._previous[0]), float(self._previous[1])
+        try:
+            if hasattr(self._planner, "clear_target"):
+                self._planner.clear_target(max(0, int(self._last_t_us)))
+            else:
+                self._planner.reinitialize(seed=self._seed, initial_position=(ix, iy))
+                self._last_t_us = 0
+        except Exception:
+            pass
+
+    def seed_onset(self, vx0: float = 0.0, vy0: float = 0.0) -> None:
+        """Re-anchor C++ planner in active MOVE state at current position with zero un-emitted jump."""
+        ix, iy = float(self._previous[0]), float(self._previous[1])
+        svx = float(max(-0.30, min(0.30, vx0)))
+        svy = float(max(-0.30, min(0.30, vy0)))
+        if abs(svx) < 1e-4 and abs(svy) < 1e-4:
+            svx = 0.02
+        self._planner.reinitialize(
+            seed=self._seed,
+            initial_position=(ix, iy),
+            history=[(svx, svy)] * 160,
+        )
+        self._last_t_us = 0
+
+    def nudge_anchor(self, rx: int, ry: int) -> None:
+        self._previous[0] += float(rx)
+        self._previous[1] -= float(ry)
+        self._rendered[0] += float(rx)
+        self._rendered[1] -= float(ry)
+        try:
+            self._planner.set_position((float(self._previous[0]), float(self._previous[1])))
+        except Exception:
+            pass
+
 
 def _create_abcurves_pipeline(
     seed: int,
@@ -200,7 +243,7 @@ def _create_abcurves_pipeline(
     try:
         ContinuousPipeline, CountTransform, common_rad = _ensure_abcurves_loaded()
         transform = CountTransform(common_rad, y_down=True)
-        chosen_kernel = "numpy" if kernel_backend == "numba" else kernel_backend
+        chosen_kernel = kernel_backend if kernel_backend in ("numba", "numpy") else "numba"
         try:
             return ContinuousPipeline(
                 profile,
@@ -245,38 +288,69 @@ def _flush_exact_steps(tracker) -> Tuple[int, int]:
     if move_q is None:
         return 0, 0
 
+    flush_lock = getattr(tracker, "_move_flush_lock", None)
     kept = []
     flushed_dx = 0
     flushed_dy = 0
-    try:
-        while True:
-            item = move_q.get_nowait()
-            if isinstance(item, tuple) and len(item) >= 4 and bool(item[3]):
-                flushed_dx += int(round(float(item[0])))
-                flushed_dy += int(round(float(item[1])))
-            else:
-                kept.append(item)
-    except queue.Empty:
-        pass
 
-    for item in kept:
+    def _drain_and_requeue() -> None:
+        nonlocal flushed_dx, flushed_dy
+        pending_item = getattr(tracker, "_pending_exact_item", None)
+        if pending_item is not None:
+            setattr(tracker, "_pending_exact_item", None)
+            if isinstance(pending_item, tuple) and len(pending_item) >= 4 and bool(pending_item[3]):
+                flushed_dx += int(round(float(pending_item[0])))
+                flushed_dy += int(round(float(pending_item[1])))
         try:
-            move_q.put_nowait(item)
-        except queue.Full:
-            break
+            while True:
+                item = move_q.get_nowait()
+                if isinstance(item, tuple) and len(item) >= 4 and bool(item[3]):
+                    flushed_dx += int(round(float(item[0])))
+                    flushed_dy += int(round(float(item[1])))
+                else:
+                    kept.append(item)
+        except queue.Empty:
+            pass
+
+        for item in kept:
+            try:
+                move_q.put_nowait(item)
+            except queue.Full:
+                break
+
+    if flush_lock is not None:
+        with flush_lock:
+            _drain_and_requeue()
+    else:
+        _drain_and_requeue()
 
     return flushed_dx, flushed_dy
 
 
+def _rewind_axis_history(old_val: int, new_val: int, flushed: int) -> int:
+    if flushed > 0:
+        return min(int(old_val), int(new_val))
+    if flushed < 0:
+        return max(int(old_val), int(new_val))
+    return int(old_val)
+
+
 def _flush_and_rewind(tracker, pipe, state: Dict[str, Any]) -> Tuple[int, int]:
-    """Flush pending ABCurves steps and adjust sent counters to stay in sync."""
+    """Flush pending ABCurves steps and monotonically rewind sent history so inflight never flips sign."""
     flushed_dx, flushed_dy = _flush_exact_steps(tracker)
     if (flushed_dx != 0 or flushed_dy != 0) and state.get("active", False):
-        state["cum_sent_x"] -= flushed_dx
-        state["cum_sent_y"] -= flushed_dy
-        if state["sent_history"]:
-            ts, lx, ly = state["sent_history"][-1]
-            state["sent_history"][-1] = (ts, lx - flushed_dx, ly - flushed_dy)
+        new_cx = int(state["cum_sent_x"]) - flushed_dx
+        new_cy = int(state["cum_sent_y"]) - flushed_dy
+        state["cum_sent_x"] = new_cx
+        state["cum_sent_y"] = new_cy
+        hist = state["sent_history"]
+        for idx in range(len(hist) - 1, -1, -1):
+            ts, hx, hy = hist[idx]
+            rx = _rewind_axis_history(hx, new_cx, flushed_dx)
+            ry = _rewind_axis_history(hy, new_cy, flushed_dy)
+            if rx == hx and ry == hy:
+                break
+            hist[idx] = (ts, rx, ry)
     return flushed_dx, flushed_dy
 
 
@@ -293,11 +367,11 @@ def _damp_axis_on_turn(
     rt = pipe.movement
     pl = rt.planner
     if turn_x:
-        v0_x = float(np.clip(float(delta_cnt[0]) * 0.14 / 16.0, -0.70, 0.70))
+        v0_x = float(np.clip(float(delta_cnt[0]) * 0.032, -0.70, 0.70))
         rt._target_history[:, 0] = float(target_xy[0])
         rt._history[:, 0] = v0_x
     if turn_y:
-        v0_y = float(np.clip(-float(delta_cnt[1]) * 0.14 / 16.0, -0.70, 0.70))
+        v0_y = float(np.clip(-float(delta_cnt[1]) * 0.032, -0.70, 0.70))
         rt._target_history[:, 1] = float(target_xy[1])
         rt._history[:, 1] = v0_y
     rt._pending_index = 32
@@ -312,6 +386,7 @@ def _state_attr(is_sec: bool) -> str:
 
 def _clear_tracking_counters(state: Dict[str, Any]) -> None:
     state["active"] = False
+    state["activated_at_s"] = 0.0
     state["last_t_us"] = 0
     state["last_call_s"] = 0.0
     state["cum_sent_x"] = 0
@@ -330,8 +405,10 @@ def _clear_tracking_counters(state: Dict[str, Any]) -> None:
     state["sig_dy"] = 0.0
     state["last_turn_x_s"] = -1.0
     state["last_turn_y_s"] = -1.0
+    state["zero_frames"] = 0
     state["was_held"] = False
     state["sent_history"].clear()
+    state["world_history"].clear()
 
 
 def reset_abcurves_state(tracker, is_sec: bool = False) -> None:
@@ -401,8 +478,10 @@ def _get_or_create_state_locked(
             "seed": seed,
             "kernel_backend": kernel_backend,
             "commitment_ms": commit_ms,
-            "sent_history": deque(maxlen=64),
+            "sent_history": deque(maxlen=128),
+            "world_history": deque(maxlen=8),
             "active": False,
+            "activated_at_s": 0.0,
             "last_t_us": 0,
             "last_call_s": 0.0,
             "cum_sent_x": 0,
@@ -421,6 +500,7 @@ def _get_or_create_state_locked(
             "sig_dy": 0.0,
             "last_turn_x_s": -1.0,
             "last_turn_y_s": -1.0,
+            "zero_frames": 0,
         }
         setattr(tracker, attr, state)
 
@@ -443,16 +523,28 @@ def prewarm_abcurves_async(tracker) -> None:
     threading.Thread(target=_worker, daemon=True, name="ABCurvesPrewarm").start()
 
 
-def _lookup_captured_counts(history: deque, target_time_s: float) -> Tuple[int, int]:
+def _lookup_captured_counts(history: deque, target_time_s: float) -> Tuple[float, float]:
+    """Linearly interpolate cumulative sent counts at target_time_s to prevent staircase sawtooth jitter."""
     if not history:
-        return 0, 0
-    cap_x, cap_y = history[0][1], history[0][2]
+        return 0.0, 0.0
+    if target_time_s <= history[0][0]:
+        return float(history[0][1]), float(history[0][2])
+    if target_time_s >= history[-1][0]:
+        return float(history[-1][1]), float(history[-1][2])
+
+    prev_ts, prev_x, prev_y = history[0]
     for ts, cx, cy in history:
-        if ts <= target_time_s:
-            cap_x, cap_y = cx, cy
-        else:
-            break
-    return cap_x, cap_y
+        if ts >= target_time_s:
+            span = ts - prev_ts
+            if span <= 1e-6:
+                return float(cx), float(cy)
+            frac = (target_time_s - prev_ts) / span
+            return (
+                float(prev_x) + frac * float(cx - prev_x),
+                float(prev_y) + frac * float(cy - prev_y),
+            )
+        prev_ts, prev_x, prev_y = ts, cx, cy
+    return float(history[-1][1]), float(history[-1][2])
 
 
 def _enqueue_exact_reports(
@@ -461,44 +553,62 @@ def _enqueue_exact_reports(
     max_step: float,
     dx: float = 0.0,
     dy: float = 0.0,
+    budget_x: Optional[float] = None,
+    budget_y: Optional[float] = None,
 ) -> Tuple[int, int]:
-    """Coalesce (0, 0) ticks into step delays and queue genuine 1 kHz humanized moves."""
+    """Coalesce (0, 0) ticks into step delays and queue genuine 1 kHz humanized moves without overshooting budget."""
     steps = []
     cap = abs(float(max_step)) if max_step > 0 else 50.0
     total_dx = 0
     total_dy = 0
+    pending_delay = 0.0
 
     net_dx = int(reports[:, 0].sum()) if len(reports) > 0 else 0
     net_dy = int(reports[:, 1].sum()) if len(reports) > 0 else 0
-    suppress_x = (dx > 0.5 and net_dx < 0) or (dx < -0.5 and net_dx > 0)
-    suppress_y = (dy > 0.5 and net_dy < 0) or (dy < -0.5 and net_dy > 0)
+    suppress_x = (abs(dx) <= 0.45) or (dx > 0.45 and net_dx < 0) or (dx < -0.45 and net_dx > 0)
+    suppress_y = (abs(dy) <= 0.45) or (dy > 0.45 and net_dy < 0) or (dy < -0.45 and net_dy > 0)
+    rem_x = None if budget_x is None else max(0, int(math.floor(abs(float(budget_x)) + 0.5)))
+    rem_y = None if budget_y is None else max(0, int(math.floor(abs(float(budget_y)) + 0.5)))
+    acc_x = 0
+    acc_y = 0
 
     for row in reports:
         raw_dx = 0 if suppress_x else int(row[0])
         raw_dy = 0 if suppress_y else int(row[1])
+        if (dx > 0.45 and raw_dx < 0) or (dx < -0.45 and raw_dx > 0):
+            raw_dx = 0
+        if (dy > 0.45 and raw_dy < 0) or (dy < -0.45 and raw_dy > 0):
+            raw_dy = 0
         if raw_dx != 0 or raw_dy != 0:
             cdx, cdy = tracker._clip_movement(raw_dx, raw_dy)
             sdx = int(round(max(-cap, min(cap, float(cdx)))))
             sdy = int(round(max(-cap, min(cap, float(cdy)))))
+            if rem_x is not None and sdx != 0:
+                avail_x = max(0, rem_x - acc_x)
+                sdx = int(math.copysign(min(abs(sdx), avail_x), sdx)) if avail_x > 0 else 0
+                acc_x += abs(sdx)
+            if rem_y is not None and sdy != 0:
+                avail_y = max(0, rem_y - acc_y)
+                sdy = int(math.copysign(min(abs(sdy), avail_y), sdy)) if avail_y > 0 else 0
+                acc_y += abs(sdy)
         else:
             sdx, sdy = 0, 0
 
         if sdx == 0 and sdy == 0:
             if steps:
                 px, py, pdelay = steps[-1]
-                steps[-1] = (px, py, min(0.004, pdelay + 0.001))
+                steps[-1] = (px, py, min(0.006, pdelay + 0.001))
             else:
-                steps.append((0, 0, 0.001))
+                pending_delay = min(0.006, pending_delay + 0.001)
         else:
-            steps.append((sdx, sdy, 0.001))
-            total_dx += sdx
-            total_dy += sdy
+            steps.append((sdx, sdy, min(0.006, 0.001 + pending_delay)))
+            pending_delay = 0.0
 
     for sdx, sdy, sdelay in steps:
-        if sdx == 0 and sdy == 0:
-            continue
         try:
             tracker.move_queue.put_nowait((sdx, sdy, sdelay, True))
+            total_dx += sdx
+            total_dy += sdy
         except queue.Full:
             break
 
@@ -551,8 +661,8 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
         init_ty = -float(dy) * counts_per_px_y
         state["ema_tx"] = init_tx
         state["ema_ty"] = init_ty
-        state["prev_raw_tx"] = init_tx
-        state["prev_raw_ty"] = init_ty
+        state["prev_raw_tx"] = float(dx) * counts_per_px_x
+        state["prev_raw_ty"] = -float(dy) * counts_per_px_y
         state["ema_vx"] = 0.0
         state["ema_vy"] = 0.0
         state["last_sent_px_x"] = 0.0
@@ -563,33 +673,38 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
         state["sig_dy"] = float(dy) if abs(float(dy)) >= 3.5 else 0.0
         state["last_turn_x_s"] = -1.0
         state["last_turn_y_s"] = -1.0
+        state["zero_frames"] = 0
         state["sent_history"].clear()
-        state["sent_history"].append((now, 0, 0))
+        state["world_history"].clear()
 
-        # Let planner burn through silent reaction latency cleanly before frame 0 moves.
+        # Seed active onset velocity with zero un-emitted warmup jump so frame 0 responds smoothly.
         try:
-            pipe.update_target((init_tx, init_ty), timestamp_us=0)
-            for warm_ms in range(10, 145, 10):
-                warm_us = warm_ms * 1000
-                warm_out = pipe.advance(warm_us)
-                state["last_t_us"] = warm_us
-                warm_reports = warm_out.get("reports")
-                if warm_reports is not None and len(warm_reports) > 0 and np.any(warm_reports != 0):
-                    break
-            cur_xy = pipe.current_xy
-            state["ema_tx"] = float(cur_xy[0]) + init_tx
-            state["ema_ty"] = float(cur_xy[1]) + init_ty
-            state["prev_raw_tx"] = state["ema_tx"]
-            state["prev_raw_ty"] = state["ema_ty"]
+            if hasattr(pipe, "seed_onset"):
+                pipe.reset(seed=seed, renderer_seed=seed + 94, initial_xy=(0.0, 0.0))
+                pipe.seed_onset(init_tx * 0.012, init_ty * 0.012)
+            else:
+                pipe.reset(seed=seed, renderer_seed=seed + 94, initial_xy=(0.0, 0.0))
+                if hasattr(pipe, "movement"):
+                    vx0 = float(np.clip(init_tx * 0.012, -0.30, 0.30))
+                    vy0 = float(np.clip(init_ty * 0.012, -0.30, 0.30))
+                    pipe.movement._history[:, 0] = vx0 if abs(vx0) >= 1e-4 else 0.02
+                    pipe.movement._history[:, 1] = vy0
         except Exception as exc:
-            log_print(f"[ABCurves warmup error] {exc}")
+            log_print(f"[ABCurves init error] {exc}")
             reset_abcurves_state(tracker, is_sec=is_sec)
             return
-        dt_us = _FIRST_FRAME_US
+        now = time.perf_counter()
+        state["activated_at_s"] = now
+        state["sent_history"].append((now, 0, 0))
+        dt_us = 8_000
     else:
         elapsed_us = int(round((now - state["last_call_s"]) * 1_000_000.0))
         dt_us = max(_MIN_STEP_US, min(_MAX_STEP_US, elapsed_us))
 
+    prev_dx_val = float(state.get("prev_dx", dx))
+    prev_dy_val = float(state.get("prev_dy", dy))
+    prev_sent_px_x = float(state.get("last_sent_px_x", 0.0))
+    prev_sent_px_y = float(state.get("last_sent_px_y", 0.0))
     state["last_call_s"] = now
     state["prev_dx"] = float(dx)
     state["prev_dy"] = float(dy)
@@ -605,44 +720,44 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
         return _CAPTURE_LAG_SECONDS
 
     effective_lag_s = _get_effective_lag_s()
+    inflight_scale_x = max(1.0, float(x_speed)) * _INFLIGHT_WEIGHT
+    inflight_scale_y = max(1.0, float(y_speed)) * _INFLIGHT_WEIGHT
 
     def _compute_inflight_delta() -> Tuple[float, float]:
         cap_cx, cap_cy = _lookup_captured_counts(state["sent_history"], now - effective_lag_s)
-        inflight_x = state["cum_sent_x"] - cap_cx
-        inflight_y = state["cum_sent_y"] - cap_cy
-        if float(dx) >= 0.0:
-            inflight_x = max(0, inflight_x)
-            dtx = max(0.0, float(dx) * counts_per_px_x - _INFLIGHT_WEIGHT * float(inflight_x))
-        else:
-            inflight_x = min(0, inflight_x)
-            dtx = min(0.0, float(dx) * counts_per_px_x - _INFLIGHT_WEIGHT * float(inflight_x))
-        if float(dy) >= 0.0:
-            inflight_y = max(0, inflight_y)
-            dty = max(0.0, float(dy) * counts_per_px_y - _INFLIGHT_WEIGHT * float(inflight_y))
-        else:
-            inflight_y = min(0, inflight_y)
-            dty = min(0.0, float(dy) * counts_per_px_y - _INFLIGHT_WEIGHT * float(inflight_y))
+        inflight_x = float(state["cum_sent_x"]) - cap_cx
+        inflight_y = float(state["cum_sent_y"]) - cap_cy
+        # Scale inflight subtraction by max(1.0, speed) so x_speed > 1.0 accelerates arrival rate
+        # without pumping 2.1x total displacement during the 28ms capture-lag window.
+        dtx = float(dx) * counts_per_px_x - inflight_scale_x * inflight_x
+        dty = float(dy) * counts_per_px_y - inflight_scale_y * inflight_y
         return dtx, dty
 
     delta_tx, delta_ty = _compute_inflight_delta()
+
+    dz_px = float(getattr(config, "deadzone_fovsize_sec" if is_sec else "deadzone_fovsize", 3.5))
+    if not getattr(config, "deadzone_fov_enabled_sec" if is_sec else "deadzone_fov_enabled", True):
+        dz_px = 1.5
+    aim_dist = math.hypot(float(dx), float(dy))
+    turn_thresh_px = max(2.2, 0.80 * dz_px)
 
     sig_dx = float(state.get("sig_dx", 0.0))
     sig_dy = float(state.get("sig_dy", 0.0))
     turn_x = (
         (float(dx) * sig_dx < 0.0)
-        and (abs(float(dx)) >= 3.5)
-        and (abs(delta_tx) >= 3.0 * counts_per_px_x)
+        and (abs(float(dx)) > turn_thresh_px)
+        and (abs(delta_tx) >= max(2.0, turn_thresh_px * 0.80 * counts_per_px_x))
         and ((now - float(state.get("last_turn_x_s", -1.0))) >= 0.075)
     )
     turn_y = (
         (float(dy) * sig_dy < 0.0)
-        and (abs(float(dy)) >= 3.5)
-        and (abs(delta_ty) >= 3.0 * counts_per_px_y)
+        and (abs(float(dy)) > turn_thresh_px)
+        and (abs(delta_ty) >= max(2.0, turn_thresh_px * 0.80 * counts_per_px_y))
         and ((now - float(state.get("last_turn_y_s", -1.0))) >= 0.075)
     )
-    if abs(float(dx)) >= 3.5:
+    if abs(float(dx)) > turn_thresh_px and (float(dx) * sig_dx >= 0.0 or turn_x):
         state["sig_dx"] = float(dx)
-    if abs(float(dy)) >= 3.5:
+    if abs(float(dy)) > turn_thresh_px and (float(dy) * sig_dy >= 0.0 or turn_y):
         state["sig_dy"] = float(dy)
     if turn_x:
         state["last_turn_x_s"] = now
@@ -659,46 +774,81 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
     raw_ty = float(anchor_xy[1]) - delta_ty
 
     was_held = bool(state.pop("was_held", False))
-    alpha_x = 1.0 if (turn_x or was_held) else 0.60
-    alpha_y = 1.0 if (turn_y or was_held) else 0.60
+    dt_s = max(0.001, float(dt_us) * 1e-6)
+    base_alpha = 1.0 - math.exp(-dt_s / 0.011)
+    alpha_x = 1.0 if turn_x else (max(base_alpha, 0.65) if was_held else base_alpha)
+    alpha_y = 1.0 if turn_y else (max(base_alpha, 0.65) if was_held else base_alpha)
     ema_tx = raw_tx if state["ema_tx"] is None else (state["ema_tx"] + alpha_x * (raw_tx - state["ema_tx"]))
     ema_ty = raw_ty if state["ema_ty"] is None else (state["ema_ty"] + alpha_y * (raw_ty - state["ema_ty"]))
     state["ema_tx"] = ema_tx
     state["ema_ty"] = ema_ty
 
-    # Velocity lead estimation (activates ema_vx / ema_vy with turn-reversal zeroing)
+    # Differentiate true hardware-referenced world position (cum_sent + delta) rather than
+    # pipe.current_xy so internal planner resets/clipping never create phantom velocity spikes,
+    # and suppress velocity_lead whenever the player's own hand is pulling away from the target.
     target_tx = ema_tx
     target_ty = ema_ty
+    world_tx = float(state["cum_sent_x"]) * inflight_scale_x + delta_tx
+    world_ty = -float(state["cum_sent_y"]) * inflight_scale_y - delta_ty
     if turn_x:
         state["ema_vx"] = 0.0
     if turn_y:
         state["ema_vy"] = 0.0
-    if dt_us > 0 and not was_held:
-        dt_s = float(dt_us) * 1e-6
-        if dt_s >= 0.002 and state.get("prev_raw_tx") is not None:
-            inst_vx = (raw_tx - float(state["prev_raw_tx"])) / dt_s
-            inst_vy = (raw_ty - float(state["prev_raw_ty"])) / dt_s
-            # Filter out noise spikes (>2800 counts/s)
-            if abs(inst_vx) <= 2800.0 and not turn_x:
-                state["ema_vx"] = float(state.get("ema_vx", 0.0)) + 0.35 * (inst_vx - float(state.get("ema_vx", 0.0)))
-            if abs(inst_vy) <= 2800.0 and not turn_y:
-                state["ema_vy"] = float(state.get("ema_vy", 0.0)) + 0.35 * (inst_vy - float(state.get("ema_vy", 0.0)))
-    state["prev_raw_tx"] = raw_tx
-    state["prev_raw_ty"] = raw_ty
-
-    if getattr(config, "velocity_lead_enabled", False) and not (turn_x or turn_y) and not was_held:
-        lead_gain = max(0.0, min(1.2, float(getattr(config, "velocity_lead_gain", 0.55))))
-        max_lead_px = max(0.0, min(25.0, float(getattr(config, "velocity_lead_max_px", 12.0))))
-        lead_s = effective_lag_s * lead_gain
-        lead_x = max(-max_lead_px * counts_per_px_x, min(max_lead_px * counts_per_px_x, float(state["ema_vx"]) * lead_s))
-        lead_y = max(-max_lead_px * counts_per_px_y, min(max_lead_px * counts_per_px_y, float(state["ema_vy"]) * lead_s))
-        target_tx = ema_tx + lead_x
-        target_ty = ema_ty + lead_y
+    world_hist = state.get("world_history")
+    if world_hist is None:
+        world_hist = deque(maxlen=8)
+        state["world_history"] = world_hist
+    if getattr(config, "velocity_lead_enabled", False):
+        hand_diverging_x = (abs(float(dx)) > abs(prev_dx_val) + 0.75) and (prev_dx_val * prev_sent_px_x >= 0.0)
+        hand_diverging_y = (abs(float(dy)) > abs(prev_dy_val) + 0.75) and (prev_dy_val * prev_sent_px_y >= 0.0)
+        activated_age = now - float(state.get("activated_at_s", now) or now)
+        lag_settled = activated_age >= (effective_lag_s + 0.025)
+        world_hist.append((now, world_tx, world_ty))
+        ref_entry = None
+        for wh_ts, wh_x, wh_y in world_hist:
+            if (now - wh_ts) >= 0.022:
+                ref_entry = (wh_ts, wh_x, wh_y)
+        if lag_settled and ref_entry is not None and not was_held:
+            span_s = max(0.020, now - ref_entry[0])
+            inst_vx = (world_tx - ref_entry[1]) / span_s
+            inst_vy = (world_ty - ref_entry[2]) / span_s
+            if hand_diverging_x:
+                state["ema_vx"] = float(state.get("ema_vx", 0.0)) * 0.35
+            elif abs(inst_vx) <= 1200.0 and not turn_x:
+                v_alpha = 1.0 - math.exp(-dt_s / 0.025)
+                state["ema_vx"] = float(state.get("ema_vx", 0.0)) + v_alpha * (inst_vx - float(state.get("ema_vx", 0.0)))
+            if hand_diverging_y:
+                state["ema_vy"] = float(state.get("ema_vy", 0.0)) * 0.35
+            elif abs(inst_vy) <= 1200.0 and not turn_y:
+                v_alpha = 1.0 - math.exp(-dt_s / 0.025)
+                state["ema_vy"] = float(state.get("ema_vy", 0.0)) + v_alpha * (inst_vy - float(state.get("ema_vy", 0.0)))
+        state["prev_raw_tx"] = world_tx
+        state["prev_raw_ty"] = world_ty
+        if lag_settled and ref_entry is not None and not (turn_x or turn_y) and not was_held:
+            lead_gain = max(0.0, min(1.0, float(getattr(config, "velocity_lead_gain", 0.25))))
+            max_lead_px = max(0.0, min(12.0, float(getattr(config, "velocity_lead_max_px", 5.0))))
+            lead_s = effective_lag_s * lead_gain
+            dead_vx = 28.0 * counts_per_px_x
+            dead_vy = 28.0 * counts_per_px_y
+            eff_vx = math.copysign(max(0.0, abs(float(state["ema_vx"])) - dead_vx), float(state["ema_vx"]))
+            eff_vy = math.copysign(max(0.0, abs(float(state["ema_vy"])) - dead_vy), float(state["ema_vy"]))
+            lead_x = 0.0 if hand_diverging_x else max(
+                -max_lead_px * counts_per_px_x,
+                min(max_lead_px * counts_per_px_x, eff_vx * lead_s),
+            )
+            lead_y = 0.0 if hand_diverging_y else max(
+                -max_lead_px * counts_per_px_y,
+                min(max_lead_px * counts_per_px_y, eff_vy * lead_s),
+            )
+            target_tx = ema_tx + lead_x
+            target_ty = ema_ty + lead_y
+    else:
+        state["prev_raw_tx"] = world_tx
+        state["prev_raw_ty"] = world_ty
 
     t_receipt_us = state["last_t_us"]
     t_next_us = t_receipt_us + dt_us
     try:
-        # Prevent stochastic mid-flight BRAKE recoil while keeping planner responsive to turns.
         if hasattr(pipe, "movement"):
             rt = pipe.movement
             pl = rt.planner
@@ -717,6 +867,30 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
                     turn_x=turn_x,
                     turn_y=turn_y,
                 )
+            elif int(state.get("zero_frames", 0)) >= 2 and aim_dist > max(2.0, dz_px) and math.hypot(delta_tx, delta_ty) >= 2.2:
+                rt._history[:, 0] = float(np.clip(delta_tx * 0.032, -0.45, 0.45))
+                rt._history[:, 1] = float(np.clip(-delta_ty * 0.032, -0.45, 0.45))
+                rt._pending_index = 32
+                pl.previous_valid = False
+                state["zero_frames"] = 0
+        elif hasattr(pipe, "seed_onset"):
+            stalled_native = (
+                (bool(getattr(pipe, "is_stopped_mode", False)) or int(state.get("zero_frames", 0)) >= 4)
+                and aim_dist > max(2.0, dz_px)
+                and math.hypot(delta_tx, delta_ty) >= 3.0
+            )
+            if turn_x or turn_y or was_held or stalled_native:
+                pipe.seed_onset(delta_tx * 0.014, -delta_ty * 0.014)
+                state["zero_frames"] = 0
+                t_receipt_us = 0
+                state["last_t_us"] = 0
+                t_next_us = dt_us
+                anc_now = pipe.current_xy
+                ema_tx = float(anc_now[0]) + delta_tx
+                ema_ty = float(anc_now[1]) - delta_ty
+                state["ema_tx"] = ema_tx
+                state["ema_ty"] = ema_ty
+                target_tx, target_ty = ema_tx, ema_ty
         pipe.update_target((target_tx, target_ty), timestamp_us=t_receipt_us)
         out = pipe.advance(t_next_us)
     except Exception as exc:
@@ -727,8 +901,6 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
     state["last_t_us"] = t_next_us
 
     try:
-        from src.utils.mouse import update_movement_lock
-
         if not is_sec:
             lock_x = getattr(config, "mouse_lock_main_x", False)
             lock_y = getattr(config, "mouse_lock_main_y", False)
@@ -740,30 +912,61 @@ def apply_abcurves_aim(dx, dy, distance_to_center, tracker, is_sec: bool = False
     except Exception:
         pass
 
+    # Anti-recoil landing lock: if an axis just crossed zero and is already settled inside the head core
+    # (<= turn_thresh_px), suppress reverse pull-back twitches while the other axis finishes converging.
+    core_settle_px = turn_thresh_px
+    settled_cross_x = (float(dx) * sig_dx < 0.0) and (abs(float(dx)) <= core_settle_px)
+    settled_cross_y = (float(dy) * sig_dy < 0.0) and (abs(float(dy)) <= core_settle_px)
+
     reports = out.get("reports")
+    total_dx = 0
+    total_dy = 0
     if reports is not None and len(reports) > 0:
+        eff_bx = 0.0 if settled_cross_x else (abs(float(delta_tx)) / max(1.0, inflight_scale_x))
+        eff_by = 0.0 if settled_cross_y else (abs(float(delta_ty)) / max(1.0, inflight_scale_y))
         total_dx, total_dy = _enqueue_exact_reports(
             tracker,
             reports,
             max_step=max_step,
-            dx=float(dx),
-            dy=float(dy),
+            dx=0.0 if settled_cross_x else float(delta_tx),
+            dy=0.0 if settled_cross_y else float(delta_ty),
+            budget_x=eff_bx,
+            budget_y=eff_by,
         )
-        state["cum_sent_x"] += total_dx
-        state["cum_sent_y"] += total_dy
-        state["last_sent_px_x"] = float(total_dx) / max(1e-6, counts_per_px_x)
-        state["last_sent_px_y"] = float(total_dy) / max(1e-6, counts_per_px_y)
-        state["sent_history"].append((now, state["cum_sent_x"], state["cum_sent_y"]))
-        if total_dx != 0 or total_dy != 0:
-            log_move(total_dx, total_dy, label)
+        # Keep planner anchor synchronized with suppressed/clipped steps so stationary targets never drift.
+        anchor_after = pipe.current_xy
+        planned_dx = float(anchor_after[0]) - float(anchor_xy[0])
+        planned_dy_screen = -(float(anchor_after[1]) - float(anchor_xy[1]))
+        err_sync_x = float(total_dx) - planned_dx
+        err_sync_y = float(total_dy) - planned_dy_screen
+        if abs(err_sync_x) > 0.5 or abs(err_sync_y) > 0.5:
+            state["ema_tx"] = float(anchor_after[0]) + (delta_tx - float(total_dx) * inflight_scale_x)
+            state["ema_ty"] = float(anchor_after[1]) - (delta_ty - float(total_dy) * inflight_scale_y)
+
+    if aim_dist > max(2.0, dz_px) and total_dx == 0 and total_dy == 0:
+        state["zero_frames"] = int(state.get("zero_frames", 0)) + 1
     else:
-        state["last_sent_px_x"] = 0.0
-        state["last_sent_px_y"] = 0.0
-        state["sent_history"].append((now, state["cum_sent_x"], state["cum_sent_y"]))
+        state["zero_frames"] = 0
+    prev_cum_x = int(state["cum_sent_x"])
+    prev_cum_y = int(state["cum_sent_y"])
+    state["cum_sent_x"] = prev_cum_x + total_dx
+    state["cum_sent_y"] = prev_cum_y + total_dy
+    state["last_sent_px_x"] = float(total_dx) / max(1e-6, counts_per_px_x)
+    state["last_sent_px_y"] = float(total_dy) / max(1e-6, counts_per_px_y)
+    t_done = time.perf_counter()
+    prev_hist_ts = float(state["sent_history"][-1][0]) if state["sent_history"] else 0.0
+    if total_dx != 0 or total_dy != 0:
+        t_emit_start = max(now, prev_hist_ts + 1e-6)
+        state["sent_history"].append((t_emit_start, prev_cum_x, prev_cum_y))
+        state["sent_history"].append((max(t_done + 0.0005, t_emit_start + 0.0005), state["cum_sent_x"], state["cum_sent_y"]))
+    else:
+        state["sent_history"].append((max(t_done, prev_hist_ts), state["cum_sent_x"], state["cum_sent_y"]))
+    if total_dx != 0 or total_dy != 0:
+        log_move(total_dx, total_dy, label)
 
 
 def hold_abcurves_state(tracker, is_sec: bool = False) -> None:
-    """Softly settle ABCurves at current position inside Stop Aim FOV without harsh reset."""
+    """Softly settle ABCurves at current position inside Stop Aim FOV and flush excess coasting steps."""
     state: Optional[Dict[str, Any]] = getattr(tracker, _state_attr(is_sec), None)
     if not state or not state.get("active", False):
         return
@@ -776,8 +979,9 @@ def hold_abcurves_state(tracker, is_sec: bool = False) -> None:
         reset_abcurves_state(tracker, is_sec=is_sec)
         return
 
-    elapsed_us = int(round((now - state["last_call_s"]) * 1_000_000.0))
-    dt_us = max(_MIN_STEP_US, min(_MAX_STEP_US, elapsed_us))
+    # Flush any unexecuted tail steps so the cursor stops cleanly inside Deadzone without coasting past head.
+    _flush_and_rewind(tracker, pipe, state)
+
     state["last_call_s"] = now
     state["prev_dx"] = 0.0
     state["prev_dy"] = 0.0
@@ -789,25 +993,20 @@ def hold_abcurves_state(tracker, is_sec: bool = False) -> None:
     state["ema_vy"] = 0.0
     state["was_held"] = True
 
-    # Let any remaining final tail steps in move_queue coast to a natural stop cleanly.
     if hasattr(pipe, "movement"):
         pipe.movement._history[:] = 0.0
+    elif hasattr(pipe, "hold_zero"):
+        pipe.hold_zero()
+    state["zero_frames"] = 0
 
     anchor_xy = pipe.current_xy
     state["ema_tx"] = float(anchor_xy[0])
     state["ema_ty"] = float(anchor_xy[1])
-    state["prev_raw_tx"] = float(anchor_xy[0])
-    state["prev_raw_ty"] = float(anchor_xy[1])
-    t_receipt_us = state["last_t_us"]
-    t_next_us = t_receipt_us + dt_us
-    try:
-        pipe.update_target((state["ema_tx"], state["ema_ty"]), timestamp_us=t_receipt_us)
-        pipe.advance(t_next_us)
-        state["last_t_us"] = t_next_us
-    except Exception:
-        reset_abcurves_state(tracker, is_sec=is_sec)
-        return
-    state["sent_history"].append((now, state["cum_sent_x"], state["cum_sent_y"]))
+    state["prev_raw_tx"] = float(state["cum_sent_x"])
+    state["prev_raw_ty"] = -float(state["cum_sent_y"])
+    t_done = time.perf_counter()
+    prev_hist_ts = float(state["sent_history"][-1][0]) if state["sent_history"] else 0.0
+    state["sent_history"].append((max(t_done, prev_hist_ts), state["cum_sent_x"], state["cum_sent_y"]))
 
 
 def simulate_abcurves_preview_path(

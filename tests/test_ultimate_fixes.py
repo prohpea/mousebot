@@ -221,6 +221,48 @@ class UltimateRegressionTests(unittest.TestCase):
         self.assertEqual(cfg.custom_hsv_max_h, 179)
         self.assertEqual(cfg.custom_hsv_min_s, 255)
 
+    def test_head_estimator_handles_shoulder_top_sideways_and_head_peek(self):
+        tracker = main_mod.AimTracker.__new__(main_mod.AimTracker)
+        img = np.zeros((320, 320, 3), dtype=np.uint8)
+
+        # 1) Torso/upper-body box (36x38) with heavier left-shoulder outline:
+        #    Geometric baseline MUST stay inside [y1, y2] (never lift into empty space above y1=140)
+        #    and keep X symmetric near center (158) rather than pulling onto thick left shoulder.
+        mask_torso = np.zeros((320, 320), dtype=np.uint8)
+        mask_torso[140:178, 140:154] = 255
+        mask_torso[140:178, 172:176] = 255
+        heads_torso = tracker._estimate_head_positions(140, 140, 176, 178, img, mask=mask_torso)
+        self.assertEqual(len(heads_torso), 1)
+        hx_t, hy_t, _ = heads_torso[0]
+        self.assertGreaterEqual(hy_t, 141, "Geometric baseline must never aim above y1 into empty space")
+        self.assertLessEqual(hy_t, 146)
+        self.assertGreaterEqual(hx_t, 156)
+        self.assertLessEqual(hx_t, 160)
+
+        # 2) Full-standing sideways enemy WITH head crown (h=90, w=36; head at x=150..160, torso+gun x=144..180):
+        #    Must lock X onto narrow top-12% head crown (~155) and Y onto head (~109), not chest or empty air.
+        mask_side = np.zeros((320, 320), dtype=np.uint8)
+        mask_side[100:113, 150:160] = 255
+        mask_side[113:190, 144:180] = 255
+        heads_side = tracker._estimate_head_positions(144, 100, 180, 190, img, mask=mask_side)
+        self.assertEqual(len(heads_side), 1)
+        hx_s, hy_s, _ = heads_side[0]
+        self.assertGreaterEqual(hx_s, 153)
+        self.assertLessEqual(hx_s, 157)
+        self.assertGreaterEqual(hy_s, 106)
+        self.assertLessEqual(hy_s, 112)
+
+        # 3) Head-only peek behind cover (16x18): must stay inside head box.
+        mask_peek = np.zeros((320, 320), dtype=np.uint8)
+        mask_peek[120:138, 152:168] = 255
+        heads_peek = tracker._estimate_head_positions(152, 120, 168, 138, img, mask=mask_peek)
+        self.assertEqual(len(heads_peek), 1)
+        hx_p, hy_p, _ = heads_peek[0]
+        self.assertGreaterEqual(hy_p, 124)
+        self.assertLessEqual(hy_p, 130)
+        self.assertGreaterEqual(hx_p, 158)
+        self.assertLessEqual(hx_p, 162)
+
 
 if __name__ == "__main__":
     unittest.main()
